@@ -178,11 +178,16 @@ def _benchmark_map_reprojection(
     return float(np.median(times)), packed_bytes, approx_heap
 
 
-def _benchmark_insertion_strides(repeats: int = 3) -> dict[str, float]:
+def _benchmark_insertion_strides(repeats: int = 2) -> dict[str, float]:
     """Benchmark surfel insertion at 720p resolution across strides 2, 4, 8."""
     w, h = 1280, 720
+    fx, fy = 1000.0, 1000.0
+    cx, cy = w / 2.0, h / 2.0
+    u, v = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
     pts = np.zeros((h, w, 3), dtype=np.float32)
     pts[..., 2] = 2.5
+    pts[..., 0] = (u - cx) * pts[..., 2] / fx
+    pts[..., 1] = (v - cy) * pts[..., 2] / fy
     nrms = np.zeros_like(pts)
     nrms[..., 2] = -1.0
     confs = np.ones((h, w), dtype=np.float32)

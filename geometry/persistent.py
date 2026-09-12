@@ -229,6 +229,19 @@ class SurfelMap:
             normal = normal / normal_norm
             base_key = self._key(point)
 
+            if not self._buckets:
+                new_surfel = Surfel(
+                    point.copy(),
+                    normal.astype(np.float32),
+                    float(np.clip(weight, 0.0, 1.0)),
+                    1,
+                    int(frame_id),
+                )
+                self._surfels.append(new_surfel)
+                self._buckets.setdefault(base_key, []).append(len(self._surfels) - 1)
+                new_count += 1
+                continue
+
             # 27-cell neighborhood search
             best_match: Surfel | None = None
             best_idx: int = -1
