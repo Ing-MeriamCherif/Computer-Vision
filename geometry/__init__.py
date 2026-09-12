@@ -21,7 +21,7 @@ from .normals import (
 )
 from .motion import MotionState, OpticalFlowProvider, OpenCVFlowProvider, flow_consistency
 from .temporal import TemporalConfig, TemporalGeometryEngine, photometric_error
-from .warp import warp_field_backward, warp_normals_backward
+from .warp import warp_depth_backward, warp_field_backward, warp_normals_backward
 from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
 
 __all__ = [
@@ -47,6 +47,7 @@ __all__ = [
     "TemporalConfig",
     "TemporalGeometryEngine",
     "photometric_error",
+    "warp_depth_backward",
     "warp_field_backward",
     "warp_normals_backward",
     "DepthAlignmentResult",

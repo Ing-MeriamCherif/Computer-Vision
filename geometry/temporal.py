@@ -16,7 +16,7 @@ from .camera import CameraModel
 from .motion import MotionState, OpticalFlowProvider
 from .normals import NormalConfig, NormalMode, estimate_normals
 from .state import DepthState, GeometryState
-from .warp import warp_field_backward
+from .warp import warp_depth_backward, warp_field_backward
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,6 +25,7 @@ class TemporalConfig:
     flow_confidence_sigma: float = 1.5
     photometric_threshold: float = 0.25
     depth_disagreement_threshold: float = 0.25
+    depth_warp_discontinuity_threshold: float = 0.15
     history_weight_max: float = 0.85
     history_decay: float = 0.92
     max_history_age: int = 8
@@ -40,6 +41,8 @@ class TemporalConfig:
             raise ValueError("flow thresholds must be positive")
         if self.photometric_threshold <= 0 or self.depth_disagreement_threshold <= 0:
             raise ValueError("consistency thresholds must be positive")
+        if self.depth_warp_discontinuity_threshold <= 0:
+            raise ValueError("depth_warp_discontinuity_threshold must be positive")
         if not 0 <= self.history_weight_max <= 1 or not 0 < self.history_decay <= 1:
             raise ValueError("history weights/decay must be in valid ranges")
         if self.max_history_age < 1 or not 0 <= self.history_min_confidence <= 1:
@@ -63,7 +66,11 @@ def _gray(frame: np.ndarray) -> np.ndarray:
     return np.nan_to_num(array, nan=0.0, posinf=1.0, neginf=0.0)
 
 
-def photometric_error(previous_frame: np.ndarray, current_frame: np.ndarray, backward_flow: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def photometric_error(
+    previous_frame: np.ndarray,
+    current_frame: np.ndarray,
+    backward_flow: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
     """Compute brightness-robust normalized RGB/grayscale mismatch."""
 
     previous = _gray(previous_frame)
@@ -103,6 +110,7 @@ class TemporalGeometryEngine:
         self.previous_timestamp: float | None = None
         self.previous_frame_id: int | str | None = None
         self.motion_state: MotionState | None = None
+        self.last_alignment: DepthAlignmentResult | None = None
 
     @property
     def current_state(self) -> GeometryState | None:
@@ -114,31 +122,60 @@ class TemporalGeometryEngine:
         self.previous_timestamp = None
         self.previous_frame_id = None
         self.motion_state = None
+        self.last_alignment = None
 
-    def _needs_reset(self, camera: CameraModel, frame_id: int | str, timestamp: float, scale_mode: DepthScaleMode | None) -> bool:
+    def _needs_reset(
+        self,
+        camera: CameraModel,
+        frame_id: int | str,
+        timestamp: float,
+        scale_mode: DepthScaleMode | None,
+    ) -> bool:
         if self.previous_state is None:
             return False
         if not _camera_compatible(self.camera, camera):
             return True
         if isinstance(frame_id, int) and isinstance(self.previous_frame_id, int) and frame_id != self.previous_frame_id + 1:
             return True
-        if self.previous_timestamp is not None and (timestamp <= self.previous_timestamp or timestamp - self.previous_timestamp > self.config.timestamp_gap_reset):
+        if self.previous_timestamp is not None and (
+            timestamp <= self.previous_timestamp or timestamp - self.previous_timestamp > self.config.timestamp_gap_reset
+        ):
             return True
         return scale_mode is not None and scale_mode is not self.previous_state.scale_mode
 
-    def _empty_state(self, frame_id: int | str, timestamp: float, camera: CameraModel, scale_mode: DepthScaleMode) -> GeometryState:
+    def _empty_state(
+        self,
+        frame_id: int | str,
+        timestamp: float,
+        camera: CameraModel,
+        scale_mode: DepthScaleMode,
+    ) -> GeometryState:
         shape = (camera.height, camera.width)
         depth = np.full(shape, np.nan, dtype=np.float32)
         positions = np.full((*shape, 3), np.nan, dtype=np.float32)
         zeros = np.zeros(shape, dtype=np.float32)
         return GeometryState(
-            timestamp, frame_id, depth, positions, np.zeros(shape, dtype=bool), camera, scale_mode,
-            normals=np.full((*shape, 3), np.nan, dtype=np.float32), confidence=zeros,
-            temporal_age=np.zeros(shape, dtype=np.uint16), history_valid=np.zeros(shape, dtype=bool),
-            occlusion_mask=np.ones(shape, dtype=bool), normal_valid_mask=np.zeros(shape, dtype=bool),
-            normal_confidence=zeros, selected_radius=np.zeros(shape, dtype=np.int16),
-            spatial_confidence=zeros, history_confidence=zeros, temporal_confidence=zeros,
+            timestamp=timestamp,
+            source_frame_id=frame_id,
+            depth=depth,
+            positions_3d=positions,
+            valid_mask=np.zeros(shape, dtype=bool),
+            camera=camera,
+            scale_mode=scale_mode,
+            normals=np.full((*shape, 3), np.nan, dtype=np.float32),
+            confidence=zeros,
+            temporal_age=np.zeros(shape, dtype=np.uint16),
+            history_valid=np.zeros(shape, dtype=bool),
+            occlusion_mask=np.zeros(shape, dtype=bool),
+            normal_valid_mask=np.zeros(shape, dtype=bool),
+            normal_confidence=zeros,
+            selected_radius=np.zeros(shape, dtype=np.int16),
+            spatial_confidence=zeros,
+            history_confidence=zeros,
+            temporal_confidence=zeros,
             depth_alignment_residual=np.full(shape, np.inf, dtype=np.float32),
+            history_rejection_mask=np.zeros(shape, dtype=bool),
+            disocclusion_mask=np.zeros(shape, dtype=bool),
         )
 
     def _get_motion(
@@ -162,33 +199,71 @@ class TemporalGeometryEngine:
             # Catastrophic provider failure safely rejects history for this update.
             return None
 
-    def _history_inputs(self, motion: MotionState, current_rgb: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    def _history_inputs(
+        self,
+        motion: MotionState,
+        current_rgb: np.ndarray | None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         assert self.previous_state is not None
         previous = self.previous_state
-        warped_depth, warped_valid = warp_field_backward(previous.depth, motion.backward_flow, previous.valid_mask, "bilinear")
+
+        # 1. Depth-aware warping across discontinuities
+        warped_depth, warped_valid, depth_warp_conf = warp_depth_backward(
+            previous.depth,
+            motion.backward_flow,
+            previous.valid_mask,
+            discontinuity_threshold=self.config.depth_warp_discontinuity_threshold,
+            epsilon=self.config.alignment_epsilon,
+        )
+
         previous_confidence = previous.temporal_confidence
         if previous_confidence is None:
             previous_confidence = previous.confidence
         if previous_confidence is None:
             previous_confidence = np.ones_like(previous.valid_mask, dtype=np.float32)
-        warped_confidence, confidence_valid = warp_field_backward(previous_confidence, motion.backward_flow, previous.valid_mask, "bilinear", 0.0)
-        warped_age, _ = warp_field_backward(previous.temporal_age.astype(np.float32) if previous.temporal_age is not None else np.zeros_like(previous.valid_mask, dtype=np.float32), motion.backward_flow, previous.valid_mask, "nearest", 0.0)
-        flow_confidence, flow_valid = warp_field_backward(motion.flow_confidence, motion.backward_flow, interpolation="bilinear", fill_value=0.0)
-        flow_error, flow_error_valid = warp_field_backward(motion.forward_backward_error, motion.backward_flow, interpolation="bilinear", fill_value=np.inf)
+
+        warped_confidence, confidence_valid = warp_field_backward(
+            previous_confidence, motion.backward_flow, previous.valid_mask, "bilinear", 0.0
+        )
+        warped_age, _ = warp_field_backward(
+            previous.temporal_age.astype(np.float32) if previous.temporal_age is not None else np.zeros_like(previous.valid_mask, dtype=np.float32),
+            motion.backward_flow,
+            previous.valid_mask,
+            "nearest",
+            0.0,
+        )
+
+        # 2. Flow confidence: single source of truth (no duplicate exponential)
+        flow_confidence, flow_valid = warp_field_backward(
+            motion.flow_confidence, motion.backward_flow, interpolation="bilinear", fill_value=0.0
+        )
+        flow_error, flow_error_valid = warp_field_backward(
+            motion.forward_backward_error, motion.backward_flow, interpolation="bilinear", fill_value=np.inf
+        )
         flow_valid &= flow_error_valid & (flow_error <= self.config.flow_fb_threshold)
-        flow_confidence *= np.exp(-((np.nan_to_num(flow_error, nan=np.inf, posinf=np.inf) / self.config.flow_confidence_sigma) ** 2)).astype(np.float32)
-        history_confidence = np.clip(np.nan_to_num(warped_confidence) * np.nan_to_num(flow_confidence), 0.0, 1.0)
+
+        # Combine previous confidence, flow confidence, and depth warp confidence
+        history_confidence = np.clip(
+            np.nan_to_num(warped_confidence) * np.nan_to_num(flow_confidence) * np.nan_to_num(depth_warp_conf),
+            0.0,
+            1.0,
+        )
         history_valid = warped_valid & confidence_valid & flow_valid & (history_confidence >= self.config.history_min_confidence)
+
         if motion.occlusion_mask is not None:
             history_valid &= ~motion.occlusion_mask
+
         if current_rgb is not None and self.previous_rgb is not None:
             photo, photo_valid = photometric_error(self.previous_rgb, current_rgb, motion.backward_flow)
             history_confidence *= np.where(photo_valid, np.exp(-((photo / self.config.photometric_threshold) ** 2)), 0.0)
-            history_valid &= photo_valid & (photo <= self.config.photometric_threshold * 3.0)
+            history_valid &= (
+                photo_valid
+                & (photo <= self.config.photometric_threshold * 3.0)
+                & (history_confidence >= self.config.history_min_confidence)
+            )
+
         raw_age = np.nan_to_num(warped_age).astype(np.int32) + 1
-        history_valid &= raw_age <= self.config.max_history_age
-        age = np.minimum(raw_age, self.config.max_history_age).astype(np.uint16)
-        return warped_depth, history_valid, history_confidence.astype(np.float32), age, flow_valid
+        return warped_depth, history_valid, history_confidence.astype(np.float32), raw_age.astype(np.uint16), flow_valid
 
     def update(
         self,
@@ -218,12 +293,15 @@ class TemporalGeometryEngine:
             self.previous_timestamp = timestamp
             self.previous_frame_id = frame_id
             return state
+
         motion = self._get_motion(rgb_frame, frame_id, timestamp, motion_state)
         self.motion_state = motion
         if depth_state is not None:
             mode = DepthScaleMode(depth_state.scale_mode)
             raw_positions, current_valid = backproject_depth(depth_state.depth, camera, mode, depth_state.valid_mask)
-            spatial = estimate_normals(raw_positions, current_valid, depth_state.depth, self.config.normal_mode, self.normal_config, depth_state.confidence)
+            spatial = estimate_normals(
+                raw_positions, current_valid, depth_state.depth, self.config.normal_mode, self.normal_config, depth_state.confidence
+            )
             current_depth = np.asarray(depth_state.depth, dtype=np.float32)
         else:
             mode = self.previous_state.scale_mode
@@ -232,7 +310,9 @@ class TemporalGeometryEngine:
             spatial = None
             current_depth = np.full(current_valid.shape, np.nan, dtype=np.float32)
 
-        if self.previous_state is None or motion is None:
+        has_reprojected_history = self.previous_state is not None and motion is not None
+
+        if not has_reprojected_history:
             history_depth = np.full(current_valid.shape, np.nan, dtype=np.float32)
             history_valid = np.zeros(current_valid.shape, dtype=bool)
             history_confidence = np.zeros(current_valid.shape, dtype=np.float32)
@@ -241,33 +321,54 @@ class TemporalGeometryEngine:
         else:
             history_depth, history_valid, history_confidence, age, flow_valid = self._history_inputs(motion, rgb_frame)
 
-        alignment = DepthAlignmentResult(1.0, 0.0, 0, float("inf"), False)
+        alignment = DepthAlignmentResult(1.0, 0.0, 0, float("inf"), False, model_used="none", normalized_fit_residual=float("inf"))
         aligned_history = history_depth
         aligned_valid = history_valid.copy()
+        rel_diff = np.zeros(current_valid.shape, dtype=np.float32)
         disagreement = np.zeros(current_valid.shape, dtype=np.float32)
+
         if depth_state is not None and history_valid.any():
             if mode is DepthScaleMode.RELATIVE:
                 alignment = align_inverse_depth(
-                    current_depth, history_depth, current_valid & history_valid,
-                    history_confidence, min_samples=self.config.alignment_min_samples,
-                    residual_threshold=self.config.alignment_residual_threshold, epsilon=self.config.alignment_epsilon,
+                    current_depth,
+                    history_depth,
+                    current_valid & history_valid,
+                    weights=history_confidence,
+                    min_samples=self.config.alignment_min_samples,
+                    residual_threshold=self.config.alignment_residual_threshold,
+                    epsilon=self.config.alignment_epsilon,
                 )
-                aligned_history, aligned_valid = align_history_depth(history_depth, alignment, mode, self.config.alignment_epsilon)
+                aligned_history, aligned_valid = align_history_depth(
+                    history_depth, alignment, mode, self.config.alignment_epsilon
+                )
             else:
                 aligned_valid = np.isfinite(history_depth) & (history_depth > self.config.alignment_epsilon)
             aligned_valid &= history_valid
+
+            # Dimensionless relative depth difference
             denominator = np.maximum(np.minimum(np.abs(current_depth), np.abs(aligned_history)), self.config.alignment_epsilon)
-            disagreement = np.where(aligned_valid & current_valid, np.abs(current_depth - aligned_history) / denominator, 0.0)
+            rel_diff = np.where(aligned_valid & current_valid, (current_depth - aligned_history) / denominator, 0.0)
+            disagreement = np.abs(rel_diff)
             agreement = np.exp(-((disagreement / self.config.depth_disagreement_threshold) ** 2))
             history_confidence *= agreement.astype(np.float32)
             history_valid &= aligned_valid & (disagreement <= self.config.depth_disagreement_threshold * 3.0)
         elif depth_state is None:
-            history_valid &= aligned_valid
+            # History-only propagation: stale age enforcement applies here
+            history_valid &= (age <= self.config.max_history_age)
 
-        has_reprojected_history = self.previous_state is not None and motion is not None
+        # Distinct mask semantics
         occlusion = np.zeros(current_valid.shape, dtype=bool)
+        disocclusion = np.zeros(current_valid.shape, dtype=bool)
+        history_rejection = np.zeros(current_valid.shape, dtype=bool)
+
         if depth_state is not None:
-            occlusion = has_reprojected_history & current_valid & ~history_valid
+            both_tested = current_valid & aligned_valid
+            # Geometric occlusion: new foreground surface moved in front
+            occlusion = both_tested & (rel_diff < -self.config.depth_disagreement_threshold)
+            # Geometric disocclusion: foreground surface moved away revealing background
+            disocclusion = both_tested & (rel_diff > self.config.depth_disagreement_threshold)
+            history_rejection = has_reprojected_history & ~history_valid
+
             current_confidence = spatial.confidence if spatial is not None else np.zeros_like(current_valid, dtype=np.float32)
             current_weight = np.where(current_valid, np.maximum(current_confidence, 0.05), 0.0)
             history_weight = np.where(history_valid, np.minimum(history_confidence, self.config.history_weight_max), 0.0)
@@ -276,12 +377,22 @@ class TemporalGeometryEngine:
             denominator = current_weight + history_weight
             fused_depth[current_valid & ~history_valid] = current_depth[current_valid & ~history_valid]
             fused_depth[~current_valid & history_valid] = aligned_history[~current_valid & history_valid]
-            fused_depth[both] = ((current_weight[both] * current_depth[both] + history_weight[both] * aligned_history[both]) / np.maximum(denominator[both], 1e-6)).astype(np.float32)
+            fused_depth[both] = (
+                (current_weight[both] * current_depth[both] + history_weight[both] * aligned_history[both])
+                / np.maximum(denominator[both], 1e-6)
+            ).astype(np.float32)
             final_valid = np.isfinite(fused_depth) & (fused_depth > self.config.alignment_epsilon)
-            temporal_confidence = np.where(both, (current_weight * current_confidence + history_weight * history_confidence) / np.maximum(denominator, 1e-6), np.where(current_valid, current_confidence, history_confidence))
-            age = np.where(history_valid, age, 0).astype(np.uint16)
+            temporal_confidence = np.where(
+                both,
+                (current_weight * current_confidence + history_weight * history_confidence) / np.maximum(denominator, 1e-6),
+                np.where(current_valid, current_confidence, history_confidence),
+            )
+
+            # Temporal age: 0 when fresh depth observation is accepted; increment only for history-only fill
+            age = np.where(current_valid, 0, np.where(history_valid, age, 0)).astype(np.uint16)
             spatial_confidence = current_confidence
         else:
+            history_rejection = has_reprojected_history & ~history_valid
             fused_depth = np.where(history_valid, aligned_history, np.nan).astype(np.float32)
             final_valid = history_valid & np.isfinite(fused_depth) & (fused_depth > self.config.alignment_epsilon)
             temporal_confidence = np.where(final_valid, history_confidence * self.config.history_decay, 0.0)
@@ -289,24 +400,39 @@ class TemporalGeometryEngine:
             final_valid &= temporal_confidence >= self.config.history_min_confidence
             age = np.where(final_valid, age, 0).astype(np.uint16)
             spatial_confidence = np.zeros_like(temporal_confidence)
-            occlusion = has_reprojected_history & ~final_valid
 
         positions, _ = backproject_depth(fused_depth, camera, mode, final_valid)
         normal_result = estimate_normals(positions, final_valid, fused_depth, self.config.normal_mode, self.normal_config)
         history_confidence = np.where(history_valid, history_confidence, 0.0).astype(np.float32)
         final_confidence = np.clip(np.nan_to_num(temporal_confidence), 0.0, 1.0).astype(np.float32)
         alignment_map = np.full(final_valid.shape, alignment.fit_residual, dtype=np.float32)
+
         return_state = GeometryState(
-            timestamp=timestamp, source_frame_id=frame_id, depth=fused_depth, positions_3d=positions,
-            valid_mask=final_valid, camera=camera, scale_mode=mode, normals=normal_result.normals,
-            confidence=final_confidence, temporal_age=age, history_valid=history_valid,
-            occlusion_mask=occlusion, normal_valid_mask=normal_result.normal_valid_mask,
-            normal_confidence=normal_result.confidence, selected_radius=normal_result.selected_radius,
-            spatial_confidence=spatial_confidence.astype(np.float32), history_confidence=history_confidence,
-            temporal_confidence=final_confidence, depth_alignment_residual=alignment_map,
+            timestamp=timestamp,
+            source_frame_id=frame_id,
+            depth=fused_depth,
+            positions_3d=positions,
+            valid_mask=final_valid,
+            camera=camera,
+            scale_mode=mode,
+            normals=normal_result.normals,
+            confidence=final_confidence,
+            temporal_age=age,
+            history_valid=history_valid,
+            occlusion_mask=occlusion,
+            normal_valid_mask=normal_result.normal_valid_mask,
+            normal_confidence=normal_result.confidence,
+            selected_radius=normal_result.selected_radius,
+            spatial_confidence=spatial_confidence.astype(np.float32),
+            history_confidence=history_confidence,
+            temporal_confidence=final_confidence,
+            depth_alignment_residual=alignment_map,
+            history_rejection_mask=history_rejection,
+            disocclusion_mask=disocclusion,
         )
         self.previous_state = return_state
         self.previous_rgb = None if rgb_frame is None else np.asarray(rgb_frame).copy()
         self.previous_timestamp = timestamp
         self.previous_frame_id = frame_id
+        self.last_alignment = alignment
         return return_state

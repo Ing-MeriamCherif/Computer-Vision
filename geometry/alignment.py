@@ -16,6 +16,11 @@ class DepthAlignmentResult:
     sample_count: int
     fit_residual: float
     fit_success: bool
+    model_used: str = "none"  # "affine", "scale_only", "none"
+    normalized_fit_residual: float = 0.0
+    inlier_count: int = 0
+    input_sample_count: int = 0
+    conditioning: float = 0.0
 
 
 def align_inverse_depth(
@@ -31,9 +36,13 @@ def align_inverse_depth(
 ) -> DepthAlignmentResult:
     """Fit ``1/current_z = scale * 1/history_z + shift`` robustly.
 
-    The fit uses weighted least squares followed by Huber-like residual
-    reweighting. The final residual median/MAD gate excludes moving-object and
-    correspondence outliers without requiring SciPy.
+    The fit uses scale-normalized residuals ``r_norm = (q_cur - (scale * q_hist + shift)) / s_q``,
+    where ``s_q = max(median(|q_cur|), epsilon)`` is the robust characteristic inverse-depth
+    scale of the current scene. This makes Huber reweighting, inlier gating, and fit-success
+    thresholds scale-invariant across relative depth maps with arbitrary global scale.
+
+    If affine fitting is ill-conditioned (e.g. fronto-parallel surfaces with very low depth
+    variation), a robust scale-only fallback (``shift = 0``) is used.
     """
 
     current = np.asarray(current_depth, dtype=np.float64)
@@ -49,38 +58,156 @@ def align_inverse_depth(
         supplied_weights = np.asarray(weights, dtype=np.float64)
         if supplied_weights.shape != current.shape:
             raise ValueError("weights must have shape (H, W)")
-    valid = mask & np.isfinite(current) & np.isfinite(history) & (current > epsilon) & (history > epsilon) & np.isfinite(supplied_weights) & (supplied_weights > 0)
+    valid = (
+        mask
+        & np.isfinite(current)
+        & np.isfinite(history)
+        & (current > epsilon)
+        & (history > epsilon)
+        & np.isfinite(supplied_weights)
+        & (supplied_weights > 0)
+    )
     sample_count = int(valid.sum())
     if sample_count < min_samples:
-        return DepthAlignmentResult(1.0, 0.0, sample_count, float("inf"), False)
+        return DepthAlignmentResult(
+            1.0, 0.0, sample_count, float("inf"), False,
+            model_used="none", normalized_fit_residual=float("inf"), inlier_count=0,
+            input_sample_count=sample_count, conditioning=0.0
+        )
+
     x = (1.0 / history[valid]).ravel()
     y = (1.0 / current[valid]).ravel()
     base_weights = supplied_weights[valid].ravel()
-    robust_weights = base_weights.copy()
-    scale, shift = 1.0, 0.0
-    for _ in range(iterations):
-        design = np.column_stack((x, np.ones_like(x)))
-        weighted_design = design * np.sqrt(robust_weights)[:, None]
-        weighted_y = y * np.sqrt(robust_weights)
-        solution, *_ = np.linalg.lstsq(weighted_design, weighted_y, rcond=None)
-        scale, shift = float(solution[0]), float(solution[1])
+
+    # Characteristic inverse-depth scale for dimensionless normalization
+    s_q = max(float(np.median(np.abs(y))), epsilon)
+
+    # Measure depth diversity and design conditioning
+    w_sum = float(np.sum(base_weights))
+    x_mean = float(np.sum(base_weights * x) / max(w_sum, epsilon))
+    x_var = float(np.sum(base_weights * (x - x_mean) ** 2) / max(w_sum, epsilon))
+    rel_std_x = float(np.sqrt(max(x_var, 0.0)) / max(abs(x_mean), epsilon))
+
+    design = np.column_stack((x, np.ones_like(x)))
+    weighted_design = design * np.sqrt(base_weights)[:, None]
+    try:
+        _, s, _ = np.linalg.svd(weighted_design, full_matrices=False)
+        conditioning = float(s[1] / max(s[0], epsilon)) if len(s) > 1 else 0.0
+    except np.linalg.LinAlgError:
+        conditioning = 0.0
+
+    # Low-variation / degeneracy test: if spread is small or matrix is ill-conditioned, use scale-only
+    is_well_conditioned = (rel_std_x >= 0.02) and (conditioning >= 1e-4)
+
+    # 1. Try affine model if well-conditioned
+    if is_well_conditioned:
+        scale_init = float(np.median(y) / max(np.median(x), epsilon))
+        shift_init = float(np.median(y - scale_init * x))
+        r_init = (y - (scale_init * x + shift_init)) / s_q
+        abs_r_init = np.abs(r_init)
+        med_init = float(np.median(abs_r_init))
+        mad_init = float(np.median(np.abs(abs_r_init - med_init)))
+        huber_init = max(1.4826 * mad_init, residual_threshold / 4.0, epsilon)
+        robust_weights = base_weights * np.minimum(1.0, huber_init / np.maximum(abs_r_init, epsilon))
+        scale, shift = scale_init, shift_init
+        for _ in range(iterations):
+            w_des = design * np.sqrt(robust_weights)[:, None]
+            w_y = y * np.sqrt(robust_weights)
+            solution, *_ = np.linalg.lstsq(w_des, w_y, rcond=None)
+            scale, shift = float(solution[0]), float(solution[1])
+            residual = y - (scale * x + shift)
+            r_norm = residual / s_q
+            abs_r_norm = np.abs(r_norm)
+            med_norm = float(np.median(abs_r_norm))
+            mad_norm = float(np.median(np.abs(abs_r_norm - med_norm)))
+            huber_scale_norm = max(1.4826 * mad_norm, residual_threshold / 4.0, epsilon)
+            robust_factor = np.minimum(1.0, huber_scale_norm / np.maximum(abs_r_norm, epsilon))
+            robust_weights = base_weights * robust_factor
+
         residual = y - (scale * x + shift)
-        abs_residual = np.abs(residual)
-        mad = float(np.median(np.abs(abs_residual - np.median(abs_residual))))
-        huber_scale = max(1.4826 * mad, residual_threshold / 4.0, epsilon)
-        robust_factor = np.minimum(1.0, huber_scale / np.maximum(abs_residual, epsilon))
+        r_norm = residual / s_q
+        abs_r_norm = np.abs(r_norm)
+        med_norm = float(np.median(abs_r_norm))
+        mad_norm = float(np.median(np.abs(abs_r_norm - med_norm)))
+        gate_norm = max(residual_threshold, med_norm + 3.0 * 1.4826 * mad_norm)
+        inliers = abs_r_norm <= gate_norm
+        inlier_count = int(inliers.sum())
+
+        if inlier_count >= min_samples and np.isfinite(scale + shift) and scale > epsilon:
+            norm_res = float(np.sqrt(np.average(r_norm[inliers] ** 2, weights=base_weights[inliers])))
+            if norm_res <= residual_threshold:
+                return DepthAlignmentResult(
+                    scale=scale,
+                    shift=shift,
+                    sample_count=inlier_count,
+                    fit_residual=norm_res,
+                    fit_success=True,
+                    model_used="affine",
+                    normalized_fit_residual=norm_res,
+                    inlier_count=inlier_count,
+                    input_sample_count=sample_count,
+                    conditioning=conditioning,
+                )
+
+    # 2. Scale-only fallback (b = 0): q_cur = a * q_hist
+    robust_weights = base_weights.copy()
+    scale = 1.0
+    shift = 0.0
+    for _ in range(iterations):
+        denom = float(np.sum(robust_weights * (x ** 2)))
+        if denom <= epsilon:
+            break
+        scale = float(np.sum(robust_weights * x * y) / denom)
+        if scale <= epsilon or not np.isfinite(scale):
+            break
+        residual = y - scale * x
+        r_norm = residual / s_q
+        abs_r_norm = np.abs(r_norm)
+        med_norm = float(np.median(abs_r_norm))
+        mad_norm = float(np.median(np.abs(abs_r_norm - med_norm)))
+        huber_scale_norm = max(1.4826 * mad_norm, residual_threshold / 4.0, epsilon)
+        robust_factor = np.minimum(1.0, huber_scale_norm / np.maximum(abs_r_norm, epsilon))
         robust_weights = base_weights * robust_factor
-    residual = y - (scale * x + shift)
-    abs_residual = np.abs(residual)
-    median_abs = float(np.median(abs_residual))
-    mad = float(np.median(np.abs(abs_residual - median_abs)))
-    gate = max(residual_threshold, median_abs + 3.0 * 1.4826 * mad)
-    inliers = abs_residual <= gate
-    if int(inliers.sum()) < min_samples or not np.isfinite(scale + shift) or scale <= epsilon:
-        return DepthAlignmentResult(1.0, 0.0, sample_count, float(np.sqrt(np.mean(residual**2))), False)
-    fit_residual = float(np.sqrt(np.average(residual[inliers] ** 2, weights=base_weights[inliers])))
-    success = fit_residual <= residual_threshold
-    return DepthAlignmentResult(scale if success else 1.0, shift if success else 0.0, int(inliers.sum()), fit_residual, success)
+
+    residual = y - scale * x
+    r_norm = residual / s_q
+    abs_r_norm = np.abs(r_norm)
+    med_norm = float(np.median(abs_r_norm))
+    mad_norm = float(np.median(np.abs(abs_r_norm - med_norm)))
+    gate_norm = max(residual_threshold, med_norm + 3.0 * 1.4826 * mad_norm)
+    inliers = abs_r_norm <= gate_norm
+    inlier_count = int(inliers.sum())
+
+    if inlier_count >= min_samples and np.isfinite(scale) and scale > epsilon:
+        norm_res = float(np.sqrt(np.average(r_norm[inliers] ** 2, weights=base_weights[inliers])))
+        if norm_res <= residual_threshold:
+            return DepthAlignmentResult(
+                scale=scale,
+                shift=0.0,
+                sample_count=inlier_count,
+                fit_residual=norm_res,
+                fit_success=True,
+                model_used="scale_only",
+                normalized_fit_residual=norm_res,
+                inlier_count=inlier_count,
+                input_sample_count=sample_count,
+                conditioning=conditioning,
+            )
+
+    # 3. Fit failed
+    raw_norm_res = float(np.sqrt(np.mean((residual / s_q) ** 2)))
+    return DepthAlignmentResult(
+        scale=1.0,
+        shift=0.0,
+        sample_count=sample_count,
+        fit_residual=raw_norm_res,
+        fit_success=False,
+        model_used="none",
+        normalized_fit_residual=raw_norm_res,
+        inlier_count=inlier_count,
+        input_sample_count=sample_count,
+        conditioning=conditioning,
+    )
 
 
 def align_history_depth(
