@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 import sys
 import time
@@ -16,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
+from renderer.capture import CapturedRGBFrame, WebcamCaptureWorker
 from renderer.config import LightingConfig
 from renderer.renderer import DebugMode, Renderer
 
@@ -41,74 +41,49 @@ def letterbox_bgr_to_rgb(frame_bgr: np.ndarray, destination_rgb: np.ndarray, cv2
     return x0, y0, scaled_w, scaled_h
 
 
-@dataclass
-class WebcamSource:
-    capture: object
-    cv2: object
-    camera_index: int
-    reported_width: int
-    reported_height: int
-    reported_fps: float
-    received_width: int
-    received_height: int
-    first_frame: np.ndarray | None
-    frames_received: int = 0
+def letterbox_rgb_to_rgb(frame_rgb: np.ndarray, destination_rgb: np.ndarray, cv2) -> tuple[int, int, int, int]:
+    """Aspect-fit an RGB camera frame into a reusable RGB canvas."""
+    if frame_rgb.ndim != 3 or frame_rgb.shape[2] != 3 or frame_rgb.dtype != np.uint8:
+        raise ValueError(f"camera RGB frame must be HxWx3 uint8, got {frame_rgb.shape} {frame_rgb.dtype}")
+    if destination_rgb.ndim != 3 or destination_rgb.shape[2] != 3 or destination_rgb.dtype != np.uint8:
+        raise ValueError("destination must be an HxWx3 uint8 RGB array")
 
-    @classmethod
-    def open(cls, camera_index: int) -> "WebcamSource":
-        try:
-            import cv2
-        except ImportError as exc:
-            raise RuntimeError("OpenCV is required for webcam input; install requirements.txt") from exc
+    source_h, source_w = frame_rgb.shape[:2]
+    target_h, target_w = destination_rgb.shape[:2]
+    scale = min(target_w / source_w, target_h / source_h)
+    scaled_w = max(1, min(target_w, int(round(source_w * scale))))
+    scaled_h = max(1, min(target_h, int(round(source_h * scale))))
+    x0 = (target_w - scaled_w) // 2
+    y0 = (target_h - scaled_h) // 2
 
-        capture = cv2.VideoCapture(camera_index)
-        if not capture.isOpened():
-            capture.release()
-            raise RuntimeError(f"could not open webcam at camera index {camera_index}")
-        reported_width = int(round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)))
-        reported_height = int(round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
-        reported_fps = float(capture.get(cv2.CAP_PROP_FPS))
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            capture.release()
-            raise RuntimeError(f"webcam index {camera_index} opened but did not return a frame")
-        received_height, received_width = frame.shape[:2]
-        return cls(
-            capture=capture,
-            cv2=cv2,
-            camera_index=camera_index,
-            reported_width=reported_width,
-            reported_height=reported_height,
-            reported_fps=reported_fps,
-            received_width=received_width,
-            received_height=received_height,
-            first_frame=frame,
-        )
+    resized_rgb = cv2.resize(frame_rgb, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+    destination_rgb.fill(0)
+    destination_rgb[y0:y0 + scaled_h, x0:x0 + scaled_w] = resized_rgb
+    return x0, y0, scaled_w, scaled_h
 
-    def update_packet(self, packet: RenderPacket, frame_index: int) -> float:
+
+class WebcamPacketUpdater:
+    """Copy only newly captured RGB frames into the stable RenderPacket canvas."""
+
+    def __init__(self, worker: WebcamCaptureWorker) -> None:
+        self.worker = worker
+        self.current_frame: CapturedRGBFrame | None = None
+
+    def update(self, packet: RenderPacket, _render_index: int) -> tuple[float, bool]:
         start_ns = time.perf_counter_ns()
-        if self.first_frame is not None:
-            frame = self.first_frame
-            self.first_frame = None
-        else:
-            ok, frame = self.capture.read()
-            if not ok or frame is None:
-                raise RuntimeError(f"webcam index {self.camera_index} stopped returning frames")
-        actual_h, actual_w = frame.shape[:2]
-        self.received_width = actual_w
-        self.received_height = actual_h
-        letterbox_bgr_to_rgb(frame, packet.rgb, self.cv2)
-        now = time.perf_counter()
-        packet.frame_id = frame_index
-        packet.timestamp_s = now
-        packet.depth.timestamp_s = now
-        packet.normals.timestamp_s = now
-        packet.lights.timestamp_s = now
-        self.frames_received += 1
-        return (time.perf_counter_ns() - start_ns) / 1_000_000.0
-
-    def release(self) -> None:
-        self.capture.release()
+        self.worker.raise_if_failed()
+        frame = self.worker.frames.get_latest()
+        changed = frame is not None and (self.current_frame is None or frame.sequence != self.current_frame.sequence)
+        if changed:
+            letterbox_rgb_to_rgb(frame.rgb, packet.rgb, self.worker.cv2)
+            packet.frame_id = frame.sequence
+            packet.timestamp_s = frame.captured_at_s
+            packet.depth.timestamp_s = frame.captured_at_s
+            packet.normals.timestamp_s = frame.captured_at_s
+            packet.lights.timestamp_s = frame.captured_at_s
+            self.current_frame = frame
+        elapsed_ms = (time.perf_counter_ns() - start_ns) / 1_000_000.0
+        return elapsed_ms, bool(changed)
 
 
 def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
@@ -263,7 +238,7 @@ def _run_benchmark(
     renderer_setup_ms: float,
     vsync_on: bool,
     input_name: str,
-    prepare_frame: Callable[[RenderPacket, int], float] | None,
+    prepare_frame: Callable[[RenderPacket, int], tuple[float, bool]] | None,
     benchmark_mode: DebugMode,
 ) -> int:
     """Run unlogged warmup frames, then collect per-stage CPU timings."""
@@ -298,10 +273,17 @@ def _run_benchmark(
         previous_time = now
         _move_light(glfw, window, packet.lights.lights[0], delta_s, light_speed)
 
-        prep_ms = prepare_frame(packet, frame_index) if prepare_frame is not None else 0.0
+        prep_ms = 0.0
+        rgb_updated = True
+        if prepare_frame is not None:
+            prep_ms, rgb_updated = prepare_frame(packet, frame_index)
 
         upload_start_ns = time.perf_counter_ns()
-        renderer.upload_packet(packet)
+        if input_name == "webcam":
+            if rgb_updated:
+                renderer.upload_rgb(packet.rgb)
+        else:
+            renderer.upload_packet(packet)
         upload_end_ns = time.perf_counter_ns()
 
         render_start_ns = time.perf_counter_ns()
@@ -347,7 +329,7 @@ def _run_benchmark(
     print(f"Max full frame time: {float(np.max(full_ms)):.3f} ms (min FPS {1000.0 / float(np.max(full_ms)):.2f})")
     print(f"Average texture upload CPU-call time: {float(np.mean(upload_ms)):.3f} ms/frame")
     if prepare_frame is not None:
-        print(f"Average webcam capture/letterbox time: {float(np.mean(frame_prep_ms)):.3f} ms/frame")
+        print(f"Average webcam latest-frame fetch/letterbox time: {float(np.mean(frame_prep_ms)):.3f} ms/frame")
     print(f"Average render CPU-submit time: {float(np.mean(render_submit_ms)):.3f} ms/frame")
     print(f"Average buffer-swap time: {float(np.mean(swap_ms)):.3f} ms/frame")
     if gpu_queries:
@@ -368,10 +350,204 @@ def _run_benchmark(
     return 0
 
 
+def _run_webcam_live(
+    glfw,
+    context,
+    renderer: Renderer,
+    window,
+    packet: RenderPacket,
+    worker: WebcamCaptureWorker,
+    updater: WebcamPacketUpdater,
+    *,
+    light_speed: float,
+    max_frames: int | None,
+    duration_seconds: float | None,
+    gpu_name: str,
+    state: dict,
+) -> int:
+    """Render latest webcam RGB while a worker continuously drains the camera."""
+    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final | A/D X, W/S Y, Q/E Z | Esc quit")
+
+    gpu_queries = []
+    gpu_query_error = None
+    try:
+        gpu_queries = [context.query(time=True) for _ in range(40)]
+    except Exception as exc:  # Some OpenGL drivers do not expose timer queries.
+        gpu_queries = []
+        gpu_query_error = f"{type(exc).__name__}: {exc}"
+
+    measurement_start = time.perf_counter()
+    previous_time = measurement_start
+    next_report_time = measurement_start + 1.0
+    next_query_time = measurement_start
+    query_interval_s = max(0.25, (duration_seconds or 20.0) / max(1, len(gpu_queries)))
+    start_camera_stats = worker.frames.stats()
+    previous_camera_stats = start_camera_stats
+    previous_report_time = measurement_start
+    last_presented_sequence = 0
+    rendered_frames = 0
+    presented_camera_frames = 0
+    presented_camera_frames_total = 0
+    webcam_packet_prep_total_ms = 0.0
+    webcam_packet_prep_count = 0
+    upload_total_ms = 0.0
+    upload_count = 0
+    render_submit_total_ms = 0.0
+    swap_total_ms = 0.0
+    full_frame_total_ms = 0.0
+    presentation_latency_total_ms = 0.0
+    presentation_latency_max_ms = 0.0
+    presentation_latency_count = 0
+    frame_count = 0
+    query_index = 0
+
+    while not glfw.window_should_close(window):
+        worker.raise_if_failed()
+        frame_start_ns = time.perf_counter_ns()
+        glfw.poll_events()
+        now = time.perf_counter()
+        delta_s = min(now - previous_time, 0.1)
+        previous_time = now
+        _move_light(glfw, window, packet.lights.lights[0], delta_s, light_speed)
+
+        prep_ms, rgb_updated = updater.update(packet, rendered_frames)
+        webcam_packet_prep_total_ms += prep_ms
+        webcam_packet_prep_count += 1
+        if rgb_updated:
+            upload_start_ns = time.perf_counter_ns()
+            renderer.upload_rgb(packet.rgb)
+            upload_total_ms += (time.perf_counter_ns() - upload_start_ns) / 1_000_000.0
+            upload_count += 1
+
+        render_start_ns = time.perf_counter_ns()
+        query = None
+        if query_index < len(gpu_queries) and now >= next_query_time:
+            query = gpu_queries[query_index]
+            query_index += 1
+            next_query_time += query_interval_s
+        if query is None:
+            renderer.render(packet, state["mode"], upload_inputs=False)
+        else:
+            with query:
+                renderer.render(packet, state["mode"], upload_inputs=False)
+        render_submit_total_ms += (time.perf_counter_ns() - render_start_ns) / 1_000_000.0
+
+        swap_start_ns = time.perf_counter_ns()
+        glfw.swap_buffers(window)
+        frame_end_ns = time.perf_counter_ns()
+        swap_total_ms += (frame_end_ns - swap_start_ns) / 1_000_000.0
+        full_frame_ms = (frame_end_ns - frame_start_ns) / 1_000_000.0
+        full_frame_total_ms += full_frame_ms
+        rendered_frames += 1
+        frame_count += 1
+
+        frame = updater.current_frame
+        if frame is not None and frame.sequence != last_presented_sequence:
+            presented_camera_frames += 1
+            presented_camera_frames_total += 1
+            last_presented_sequence = frame.sequence
+            age_ms = max(0.0, (time.perf_counter() - frame.captured_at_s) * 1000.0)
+            presentation_latency_total_ms += age_ms
+            presentation_latency_max_ms = max(presentation_latency_max_ms, age_ms)
+            presentation_latency_count += 1
+
+        end_time = time.perf_counter()
+        if end_time >= next_report_time:
+            camera_stats = worker.frames.stats()
+            interval_s = max(end_time - previous_report_time, 1e-9)
+            captured_interval = camera_stats.frames_captured - previous_camera_stats.frames_captured
+            replaced_interval = camera_stats.frames_replaced - previous_camera_stats.frames_replaced
+            unique_interval = presented_camera_frames
+            report_frames = frame_count
+            report_fps = report_frames / interval_s
+            unique_fps = unique_interval / interval_s
+            latest_age_ms = (
+                max(0.0, (end_time - camera_stats.latest_capture_time_s) * 1000.0)
+                if camera_stats.latest_capture_time_s is not None
+                else float("nan")
+            )
+            label = (
+                f"Renderer {report_fps:5.1f} FPS | capture {captured_interval / interval_s:4.1f} FPS "
+                f"({captured_interval} new, {replaced_interval} replaced) | unique {unique_fps:4.1f}/s "
+                f"| latest age {latest_age_ms:5.1f} ms | {state['mode'].name} | {gpu_name}"
+            )
+            glfw.set_window_title(window, label)
+            sys.stdout.write("\r" + label + "   ")
+            sys.stdout.flush()
+            previous_camera_stats = camera_stats
+            previous_report_time = end_time
+            frame_count = 0
+            presented_camera_frames = 0
+            next_report_time = end_time + 1.0
+
+        if duration_seconds is not None and end_time - measurement_start >= duration_seconds:
+            glfw.set_window_should_close(window, True)
+        if max_frames is not None and rendered_frames >= max_frames:
+            glfw.set_window_should_close(window, True)
+
+    if rendered_frames == 0:
+        raise RuntimeError("webcam renderer exited before presenting any frames")
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+
+    measurement_end = time.perf_counter()
+    elapsed_s = max(measurement_end - measurement_start, 1e-9)
+    end_camera_stats = worker.frames.stats()
+    captured = end_camera_stats.frames_captured - start_camera_stats.frames_captured
+    replaced = end_camera_stats.frames_replaced - start_camera_stats.frames_replaced
+    camera_fps = captured / elapsed_s
+    loop_fps = rendered_frames / elapsed_s
+    unique_fps = presented_camera_frames_total / elapsed_s
+
+    gpu_draw_ms = None
+    if gpu_queries:
+        try:
+            # Synchronize only after the live measurement so timer results never stall frames.
+            context.finish()
+            gpu_draw_ms = np.asarray(
+                [query.elapsed / 1_000_000.0 for query in gpu_queries[:query_index]], dtype=np.float64
+            )
+        except Exception as exc:
+            gpu_query_error = f"{type(exc).__name__}: {exc}"
+        finally:
+            # ModernGL Query objects have no explicit release(); dropping the
+            # references lets their wrappers release them with the context.
+            gpu_queries.clear()
+
+    print("Webcam live metrics:")
+    print(f"  Measurement duration: {elapsed_s:.2f} s")
+    print(f"  Camera-reported FPS: {worker.reported_fps:.2f}" if worker.reported_fps > 0 else "  Camera-reported FPS: unavailable")
+    print(f"  Actual capture FPS: {camera_fps:.2f} ({captured} frames captured)")
+    print(f"  Frames replaced before renderer consumption: {replaced}")
+    print(f"  Renderer loop FPS: {loop_fps:.2f} ({rendered_frames} frames)")
+    print(f"  Unique camera updates presented per second: {unique_fps:.2f}")
+    print(f"  Latest-frame fetch/letterbox CPU time: {webcam_packet_prep_total_ms / webcam_packet_prep_count:.3f} ms/render")
+    print(f"  RGB texture upload CPU time: {upload_total_ms / max(upload_count, 1):.3f} ms/update ({upload_count} updates)")
+    print(f"  Render submit CPU time: {render_submit_total_ms / rendered_frames:.3f} ms/frame")
+    if gpu_draw_ms is not None and gpu_draw_ms.size:
+        print(
+            f"  GPU draw time: avg {float(np.mean(gpu_draw_ms)):.3f} ms, "
+            f"p95 {float(np.percentile(gpu_draw_ms, 95)):.3f} ms (n={gpu_draw_ms.size})"
+        )
+    elif gpu_query_error:
+        print(f"  GPU draw timer query unavailable: {gpu_query_error}")
+    print(f"  Buffer swap time: {swap_total_ms / rendered_frames:.3f} ms/frame")
+    print(f"  Full renderer loop time: {full_frame_total_ms / rendered_frames:.3f} ms/frame average")
+    if presentation_latency_count:
+        print(
+            f"  Presented camera-frame age: avg {presentation_latency_total_ms / presentation_latency_count:.2f} ms, "
+            f"max {presentation_latency_max_ms:.2f} ms"
+        )
+    print("  Backlog: one latest-frame slot only; stale queued frames are discarded by replacement.")
+    print(f"  OpenGL GPU: {gpu_name}")
+    return 0
+
+
 def run_demo(
     width: int,
     height: int,
     max_frames: int | None,
+    duration_seconds: float | None,
     light_speed: float,
     *,
     benchmark: bool,
@@ -403,6 +579,7 @@ def run_demo(
     renderer = None
     status_line_open = False
     webcam = None
+    webcam_updater = None
     try:
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
@@ -424,16 +601,17 @@ def run_demo(
         data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
         prepare_frame = None
         if input_name == "webcam":
-            webcam = WebcamSource.open(camera_index)
-            webcam.update_packet(packet, 0)
-            prepare_frame = webcam.update_packet
+            webcam = WebcamCaptureWorker(camera_index).start()
+            webcam_updater = WebcamPacketUpdater(webcam)
+            webcam_updater.update(packet, 0)
+            prepare_frame = webcam_updater.update
             reported_fps = f"{webcam.reported_fps:.2f}" if webcam.reported_fps > 0.0 else "unavailable"
             print(f"Webcam index: {camera_index}")
             print(f"Webcam reported resolution: {webcam.reported_width}x{webcam.reported_height}")
             print(f"Webcam reported FPS: {reported_fps}")
             print(f"Webcam received frame size: {webcam.received_width}x{webcam.received_height}")
             print("WEBCAM RGB + MOCK GEOMETRY: real webcam RGB with synthetic depth/normals; geometry does not describe the camera scene.")
-            print("Webcam display: aspect-preserving letterbox, BGR converted to RGB, no image/video saved")
+            print("Webcam display: aspect-preserving letterbox, RGB latest-frame mailbox, local only; no saving or network transmission")
 
         renderer_setup_start_ns = time.perf_counter_ns()
         renderer = Renderer(context, packet, config=lighting_config)
@@ -467,6 +645,22 @@ def run_demo(
                 input_name=input_name,
                 prepare_frame=prepare_frame,
                 benchmark_mode=benchmark_mode,
+            )
+
+        if input_name == "webcam":
+            return _run_webcam_live(
+                glfw,
+                context,
+                renderer,
+                window,
+                packet,
+                webcam,
+                webcam_updater,
+                light_speed=light_speed,
+                max_frames=max_frames,
+                duration_seconds=duration_seconds,
+                gpu_name=gpu_name,
+                state=state,
             )
 
         print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final | A/D X, W/S Y, Q/E Z | Esc quit")
@@ -517,11 +711,18 @@ def run_demo(
         print(f"Renderer/OpenGL error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:
+        if webcam is not None:
+            try:
+                webcam.stop()
+            except Exception as exc:
+                print(f"Webcam shutdown error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            stats = webcam.frames.stats()
+            print(
+                f"Webcam index {camera_index} capture thread stopped; VideoCapture released={webcam.released}; "
+                f"{stats.frames_captured} frames captured."
+            )
         if renderer is not None:
             renderer.release()
-        if webcam is not None:
-            webcam.release()
-            print(f"Webcam index {camera_index} released after {webcam.frames_received} received frames.")
         if context is not None:
             context.release()
         if window is not None:
@@ -534,6 +735,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--frames", type=int, default=None, help="exit after this many frames (for smoke testing)")
+    parser.add_argument("--duration-seconds", type=float, default=None, help="stop a live webcam test after this many seconds")
     parser.add_argument("--benchmark", action="store_true", help="run a warmup plus a measured benchmark")
     parser.add_argument("--benchmark-frames", type=int, default=600, help="measured frames; benchmark requires at least 600")
     parser.add_argument("--warmup-frames", type=int, default=60, help="ignored warmup frames; benchmark requires at least 60")
@@ -555,6 +757,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames <= 0:
         parser.error("--frames must be positive")
+    if args.duration_seconds is not None and (not np.isfinite(args.duration_seconds) or args.duration_seconds <= 0.0):
+        parser.error("--duration-seconds must be finite and positive")
+    if args.duration_seconds is not None and args.input != "webcam":
+        parser.error("--duration-seconds is only supported with --input webcam")
+    if args.duration_seconds is not None and args.benchmark:
+        parser.error("use --frames or --duration-seconds without --benchmark")
     if args.benchmark and args.frames is not None:
         parser.error("use --benchmark-frames instead of --frames with --benchmark")
     if args.benchmark and args.benchmark_frames < 600:
@@ -578,6 +786,7 @@ def main(argv: list[str] | None = None) -> int:
         args.width,
         args.height,
         args.frames,
+        args.duration_seconds,
         args.light_speed,
         benchmark=args.benchmark,
         benchmark_frames=args.benchmark_frames,

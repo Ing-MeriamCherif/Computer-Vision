@@ -51,6 +51,15 @@ class RendererResources:
         self.depth_valid_texture.write(self._bytes(packet.depth.valid_mask, np.dtype(np.uint8)), alignment=1)
         self.normal_valid_texture.write(self._bytes(packet.normals.valid_mask, np.dtype(np.uint8)), alignment=1)
 
+    def upload_rgb(self, rgb: np.ndarray) -> None:
+        """Update only the changing webcam RGB texture; mock geometry stays resident."""
+        if rgb.dtype != np.uint8 or rgb.shape != (self.size[1], self.size[0], 3):
+            raise ValueError(
+                f"RGB frame must be uint8 with shape {(self.size[1], self.size[0], 3)}, "
+                f"got {rgb.dtype} {rgb.shape}"
+            )
+        self.rgb_texture.write(self._bytes(rgb), alignment=1)
+
     def release(self) -> None:
         for texture in (
             self.rgb_texture,

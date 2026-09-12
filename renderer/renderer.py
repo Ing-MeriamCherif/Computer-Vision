@@ -65,6 +65,10 @@ class Renderer:
         """Update the existing input textures, without reallocating them."""
         self.resources.upload(packet)
 
+    def upload_rgb(self, rgb) -> None:
+        """Update just RGB when depth and normals are unchanged, as in webcam mock mode."""
+        self.resources.upload_rgb(rgb)
+
     def render(
         self,
         packet: RenderPacket,
