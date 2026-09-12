@@ -19,6 +19,7 @@ class DebugMode(IntEnum):
     FINAL = 6
     SHADOW_MASK = 7
     SHADOW_FINAL = 8
+    DEPTH_EDGES = 9
 
 
 class Renderer:
@@ -76,9 +77,12 @@ class Renderer:
         self.composite_program["u_ambient"].value = 0
         self.composite_program["u_direct"].value = 1
         self.composite_program["u_shadow_visibility"].value = 2
+        self.composite_program["u_depth"].value = 3
+        self.composite_program["u_depth_valid"].value = 4
 
         self.debug_program["u_depth_min_m"].value = 0.5
         self.debug_program["u_depth_max_m"].value = 3.5
+        self.debug_program["u_depth_edge_threshold_m"].value = self.shadow_config.depth_edge_threshold_m
         self.lighting_program["u_ambient_strength"].value = self.config.ambient_strength
         self.lighting_program["u_specular_strength"].value = self.config.specular_strength
         self.lighting_program["u_shininess"].value = self.config.shininess
@@ -88,6 +92,15 @@ class Renderer:
         self.shadow_program["u_shadow_bias_m"].value = self.shadow_config.shadow_bias_m
         self.shadow_program["u_shadow_thickness_m"].value = self.shadow_config.shadow_thickness_m
         self.shadow_program["u_ray_start_offset"].value = self.shadow_config.ray_start_offset
+        self.composite_program["u_shadow_softening_enabled"].value = int(
+            self.shadow_config.shadow_softening_enabled
+        )
+        self.composite_program["u_shadow_soft_samples"].value = self.shadow_config.shadow_soft_samples
+        self.composite_program["u_shadow_edge_aware_upsampling"].value = int(
+            self.shadow_config.shadow_edge_aware_upsampling
+        )
+        self.composite_program["u_shadow_soft_radius"].value = self.shadow_config.shadow_soft_radius
+        self.composite_program["u_depth_edge_threshold_m"].value = self.shadow_config.depth_edge_threshold_m
 
     def upload_packet(self, packet: RenderPacket) -> None:
         """Update existing input textures without reallocating them."""
@@ -180,6 +193,8 @@ class Renderer:
         self.resources.ambient_texture.use(location=0)
         self.resources.direct_texture.use(location=1)
         self.resources.shadow_texture.use(location=2)
+        self.resources.depth_texture.use(location=3)
+        self.resources.depth_valid_texture.use(location=4)
         self._draw(self.composite_vertex_array, self._moderngl, query)
 
     def render(
@@ -212,7 +227,7 @@ class Renderer:
             self._render_composite(queries.get("composition"))
             return
 
-        if mode in (DebugMode.RGB, DebugMode.DEPTH, DebugMode.NORMALS):
+        if mode in (DebugMode.RGB, DebugMode.DEPTH, DebugMode.NORMALS, DebugMode.DEPTH_EDGES):
             self.context.screen.use()
             self.context.viewport = (0, 0, *self.context.screen.size)
             self.context.clear(0.04, 0.04, 0.05, 1.0)

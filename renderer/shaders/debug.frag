@@ -9,6 +9,7 @@ uniform sampler2D u_shadow_visibility;
 uniform int u_debug_mode;
 uniform float u_depth_min_m;
 uniform float u_depth_max_m;
+uniform float u_depth_edge_threshold_m;
 
 in vec2 v_uv;
 out vec4 frag_color;
@@ -26,8 +27,31 @@ void main() {
         color = vec3(depth_gray);
     } else if (u_debug_mode == 7) {
         // Shadow mask convention: white = illuminated, black = shadowed.
-        float visibility = texture(u_shadow_visibility, v_uv).r;
+        // This texture is a framebuffer output, so its Y origin is bottom-left.
+        float visibility = texture(u_shadow_visibility, vec2(v_uv.x, 1.0 - v_uv.y)).r;
         color = vec3(clamp(visibility, 0.0, 1.0));
+    } else if (u_debug_mode == 9) {
+        float center_z = texture(u_depth, v_uv).r;
+        bool center_valid = texture(u_depth_valid, v_uv).r > 0.0
+            && !isnan(center_z) && !isinf(center_z) && center_z > 0.0;
+        float edge_delta = 0.0;
+        if (center_valid) {
+            vec2 texel = 1.0 / vec2(textureSize(u_depth, 0));
+            const vec2 directions[4] = vec2[4](
+                vec2(1.0, 0.0), vec2(-1.0, 0.0),
+                vec2(0.0, 1.0), vec2(0.0, -1.0)
+            );
+            for (int i = 0; i < 4; ++i) {
+                vec2 sample_uv = clamp(v_uv + directions[i] * texel, vec2(0.0), vec2(1.0));
+                float sample_z = texture(u_depth, sample_uv).r;
+                bool sample_valid = texture(u_depth_valid, sample_uv).r > 0.0
+                    && !isnan(sample_z) && !isinf(sample_z) && sample_z > 0.0;
+                if (sample_valid) {
+                    edge_delta = max(edge_delta, abs(center_z - sample_z));
+                }
+            }
+        }
+        color = vec3(clamp(edge_delta / u_depth_edge_threshold_m, 0.0, 1.0));
     } else {
         vec3 normal = texture(u_normals, v_uv).xyz;
         float magnitude = length(normal);

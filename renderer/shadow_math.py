@@ -14,6 +14,88 @@ import numpy as np
 from .projection import project_camera_point, reconstruct_camera_point
 
 
+def compute_depth_edge_mask(
+    depth_m: np.ndarray,
+    valid_mask: np.ndarray,
+    *,
+    threshold_m: float,
+) -> np.ndarray:
+    """Mark both pixels adjacent to a reliable horizontal/vertical depth edge."""
+    depth = np.asarray(depth_m)
+    valid = np.asarray(valid_mask)
+    if depth.ndim != 2 or valid.shape != depth.shape:
+        raise ValueError("depth_m and valid_mask must be same-size HxW arrays")
+    if not math.isfinite(float(threshold_m)) or threshold_m <= 0.0:
+        raise ValueError("threshold_m must be finite and > 0")
+
+    reliable = valid.astype(bool) & np.isfinite(depth) & (depth > 0.0)
+    edges = np.zeros(depth.shape, dtype=np.bool_)
+    horizontal = reliable[:, :-1] & reliable[:, 1:] & (
+        np.abs(depth[:, :-1] - depth[:, 1:]) >= threshold_m
+    )
+    vertical = reliable[:-1, :] & reliable[1:, :] & (
+        np.abs(depth[:-1, :] - depth[1:, :]) >= threshold_m
+    )
+    edges[:, :-1] |= horizontal
+    edges[:, 1:] |= horizontal
+    edges[:-1, :] |= vertical
+    edges[1:, :] |= vertical
+    return edges
+
+
+def shadow_soft_offsets(samples: int, radius: float) -> np.ndarray:
+    """Return the same symmetric cross/ring offsets used by the GLSL filter."""
+    if samples not in (4, 8):
+        raise ValueError("soft samples must be 4 or 8")
+    if not math.isfinite(float(radius)) or radius <= 0.0:
+        raise ValueError("radius must be finite and > 0")
+    diagonal = 1.0 / math.sqrt(2.0)
+    offsets = np.array(
+        [
+            [1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0],
+            [diagonal, diagonal], [-diagonal, -diagonal],
+            [diagonal, -diagonal], [-diagonal, diagonal],
+        ],
+        dtype=np.float32,
+    )
+    return offsets[:samples] * np.float32(radius)
+
+
+def filter_shadow_samples_reference(
+    visibility_samples: np.ndarray,
+    sample_depth_m: np.ndarray,
+    *,
+    receiver_depth_m: float,
+    depth_edge_threshold_m: float,
+    edge_aware: bool = True,
+) -> float:
+    """CPU reference for the compositor's depth-weighted shadow-mask average."""
+    visibility = np.asarray(visibility_samples, dtype=np.float64)
+    depths = np.asarray(sample_depth_m, dtype=np.float64)
+    if visibility.ndim != 1 or depths.shape != visibility.shape or visibility.size == 0:
+        raise ValueError("visibility_samples and sample_depth_m must be same-size non-empty vectors")
+    if not np.isfinite(visibility).all() or np.any((visibility < 0.0) | (visibility > 1.0)):
+        raise ValueError("visibility samples must be finite and in [0, 1]")
+    if not math.isfinite(float(depth_edge_threshold_m)) or depth_edge_threshold_m <= 0.0:
+        raise ValueError("depth_edge_threshold_m must be finite and > 0")
+
+    weights = np.ones(visibility.shape, dtype=np.float64)
+    if edge_aware:
+        receiver_z = float(receiver_depth_m)
+        if not math.isfinite(receiver_z) or receiver_z <= 0.0:
+            return 1.0
+        reliable = np.isfinite(depths) & (depths > 0.0)
+        weights.fill(0.0)
+        weights[reliable] = np.maximum(
+            0.0,
+            1.0 - np.abs(depths[reliable] - receiver_z) / depth_edge_threshold_m,
+        )
+    weight_sum = float(weights.sum())
+    if weight_sum <= 1e-12:
+        return 1.0
+    return float(np.dot(visibility, weights) / weight_sum)
+
+
 def sample_is_occluded(
     scene_depth_m: float,
     depth_valid: bool,

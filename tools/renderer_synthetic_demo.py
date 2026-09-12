@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 import sys
 import time
@@ -16,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
 from renderer.capture import CapturedRGBFrame, WebcamCaptureWorker
-from renderer.config import LightingConfig, ShadowConfig
+from renderer.config import LightingConfig, ShadowConfig, ShadowQualityProfile
 from renderer.renderer import DebugMode, Renderer
 
 
@@ -91,6 +92,8 @@ def make_synthetic_packet(
     height: int = 540,
     *,
     foreground_bounds: tuple[float, float, float, float] | None = (0.30, 0.25, 0.70, 0.75),
+    scene_name: str = "A",
+    include_occluders: bool = True,
 ) -> RenderPacket:
     """Build deterministic RGB/depth/normals with documented pinhole intrinsics.
 
@@ -100,6 +103,9 @@ def make_synthetic_packet(
     """
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive")
+    scene_name = scene_name.upper()
+    if scene_name not in ("A", "B", "C", "D"):
+        raise ValueError("scene_name must be one of A, B, C, or D")
 
     x = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
     y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
@@ -110,36 +116,57 @@ def make_synthetic_packet(
     rgb[:, :, 1] = np.clip(45.0 + 145.0 * y + 20.0 * (1.0 - x), 0.0, 255.0).astype(np.uint8)
     rgb[:, :, 2] = np.clip(105.0 + 95.0 * (1.0 - y) + 30.0 * checker, 0.0, 255.0).astype(np.uint8)
 
-    if foreground_bounds is None:
-        foreground = np.zeros((height, width), dtype=np.bool_)
-        bounds = None
-    else:
-        if len(foreground_bounds) != 4 or not all(np.isfinite(value) for value in foreground_bounds):
-            raise ValueError("foreground_bounds must be finite normalized (left, top, right, bottom) bounds")
-        left, top, right, bottom = foreground_bounds
+    depth_m = np.full((height, width), 3.0, dtype=np.float32)
+    foreground = np.zeros((height, width), dtype=np.bool_)
+    bounds = None
+
+    def paint_rect(rect, depth_value, color):
+        left, top, right, bottom = rect
         if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
-            raise ValueError("foreground_bounds must be ordered within [0, 1]")
+            raise ValueError("synthetic rectangle bounds must be ordered within [0, 1]")
         x0, x1 = int(width * left), int(width * right)
         y0, y1 = int(height * top), int(height * bottom)
-        foreground = np.zeros((height, width), dtype=np.bool_)
-        foreground[y0:y1, x0:x1] = True
-        bounds = (x0, y0, x1, y1)
-    depth_m = np.full((height, width), 3.0, dtype=np.float32)
-    depth_m[foreground] = 1.5
-    rgb[foreground, 0] = 225
-    rgb[foreground, 1] = 105
-    rgb[foreground, 2] = 45
+        if x1 <= x0 or y1 <= y0:
+            return None
+        region = np.zeros((height, width), dtype=np.bool_)
+        region[y0:y1, x0:x1] = True
+        depth_m[region] = depth_value
+        rgb[region] = color
+        return region, (x0, y0, x1, y1)
+
+    if include_occluders:
+        if scene_name == "A":
+            if foreground_bounds is not None:
+                if len(foreground_bounds) != 4 or not all(np.isfinite(value) for value in foreground_bounds):
+                    raise ValueError("foreground_bounds must be finite normalized (left, top, right, bottom) bounds")
+                painted = paint_rect(foreground_bounds, 1.5, (225, 105, 45))
+                if painted is not None:
+                    foreground |= painted[0]
+                    bounds = painted[1]
+        elif scene_name == "B":
+            near = paint_rect((0.14, 0.28, 0.43, 0.74), 1.4, (225, 105, 45))
+            far = paint_rect((0.58, 0.18, 0.86, 0.57), 2.1, (55, 175, 225))
+            foreground |= near[0]
+            foreground |= far[0]
+        elif scene_name == "C":
+            thin = paint_rect((0.485, 0.12, 0.515, 0.88), 1.5, (225, 105, 45))
+            foreground |= thin[0]
+        else:  # D: a strong full-height depth step across the image.
+            depth_m[:, : width // 2] = 1.25
+            rgb[:, : width // 2] = (225, 105, 45)
+            foreground[:, : width // 2] = True
+
+    if bounds is not None:
+        x0, y0, x1, y1 = bounds
+        tilted = np.zeros((height, width), dtype=np.bool_)
+        tilted[y0:y1, max(x0, int(width * 0.40)):min(x1, int(width * 0.52))] = True
+    else:
+        tilted = np.zeros((height, width), dtype=np.bool_)
 
     # Camera-facing surfaces point toward the camera (-Z); a small tilted patch
     # makes the normal debug mode show a second, distinct direction.
     normals = np.zeros((height, width, 3), dtype=np.float32)
     normals[:, :, 2] = -1.0
-    if bounds is None:
-        tilted = np.zeros((height, width), dtype=np.bool_)
-    else:
-        x0, y0, x1, y1 = bounds
-        tilted = np.zeros((height, width), dtype=np.bool_)
-        tilted[y0:y1, max(x0, int(width * 0.40)):min(x1, int(width * 0.52))] = True
     normals[tilted, 0] = 0.5
     normals[tilted, 2] = -np.sqrt(np.float32(0.75))
     valid_mask = np.ones((height, width), dtype=np.bool_)
@@ -244,6 +271,7 @@ _MODE_NAMES = {
     "final": DebugMode.FINAL,
     "shadow-mask": DebugMode.SHADOW_MASK,
     "shadow-final": DebugMode.SHADOW_FINAL,
+    "depth-edges": DebugMode.DEPTH_EDGES,
 }
 
 
@@ -264,6 +292,8 @@ def _run_benchmark(
     input_name: str,
     prepare_frame: Callable[[RenderPacket, int], tuple[float, bool]] | None,
     benchmark_mode: DebugMode,
+    quality_profile: ShadowQualityProfile,
+    scene_name: str,
 ) -> int:
     """Run unlogged warmup frames, then collect per-stage CPU timings."""
     total_frames = warmup_frames + measured_frames
@@ -347,7 +377,7 @@ def _run_benchmark(
 
     average_frame_ms = float(np.mean(full_ms))
     warmup_average_ms = float(np.mean(warmup_ms))
-    print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | profile {quality_profile.value} | scene {scene_name} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
     if benchmark_mode in (DebugMode.SHADOW_MASK, DebugMode.SHADOW_FINAL):
         print(
             f"Shadow pass: {renderer.resources.shadow_size[0]}x{renderer.resources.shadow_size[1]} | "
@@ -355,6 +385,13 @@ def _run_benchmark(
             f"bias {renderer.shadow_config.shadow_bias_m:.3f} m | "
             f"thickness {renderer.shadow_config.shadow_thickness_m:.3f} m | "
             f"start offset {renderer.shadow_config.ray_start_offset:.3f} m"
+        )
+        print(
+            f"Quality profile: {quality_profile.value} | softening "
+            f"{renderer.shadow_config.shadow_softening_enabled} "
+            f"({renderer.shadow_config.shadow_soft_samples} offsets, "
+            f"radius {renderer.shadow_config.shadow_soft_radius:.2f}) | "
+            f"depth-aware upsampling {renderer.shadow_config.shadow_edge_aware_upsampling}"
         )
     print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
     short_sample_count = min(45, warmup_frames)
@@ -411,7 +448,7 @@ def _run_webcam_live(
     state: dict,
 ) -> int:
     """Render latest webcam RGB while a worker continuously drains the camera."""
-    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows | A/D X, W/S Y, Q/E Z | Esc quit")
+    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows, 9 depth edges | A/D X, W/S Y, Q/E Z | Esc quit")
 
     gpu_queries = []
     gpu_query_error = None
@@ -606,6 +643,9 @@ def run_demo(
     shadow_config: ShadowConfig,
     benchmark_mode: DebugMode,
     foreground_bounds: tuple[float, float, float, float] | None,
+    quality_profile: ShadowQualityProfile,
+    scene_name: str,
+    include_occluders: bool,
 ) -> int:
     try:
         import glfw
@@ -648,6 +688,8 @@ def run_demo(
             width=width,
             height=height,
             foreground_bounds=foreground_bounds,
+            scene_name=scene_name,
+            include_occluders=include_occluders,
         )
         data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
         prepare_frame = None
@@ -675,7 +717,7 @@ def run_demo(
                 return
             if key in (
                 glfw.KEY_1, glfw.KEY_2, glfw.KEY_3, glfw.KEY_4,
-                glfw.KEY_5, glfw.KEY_6, glfw.KEY_7, glfw.KEY_8,
+                glfw.KEY_5, glfw.KEY_6, glfw.KEY_7, glfw.KEY_8, glfw.KEY_9,
             ):
                 state["mode"] = DebugMode(key - glfw.KEY_0)
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
@@ -699,6 +741,8 @@ def run_demo(
                 input_name=input_name,
                 prepare_frame=prepare_frame,
                 benchmark_mode=benchmark_mode,
+                quality_profile=quality_profile,
+                scene_name=scene_name,
             )
 
         if input_name == "webcam":
@@ -717,7 +761,7 @@ def run_demo(
                 state=state,
             )
 
-        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows, 9 depth edges | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
@@ -808,12 +852,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--specular-strength", type=float, default=0.20)
     parser.add_argument("--shininess", type=float, default=48.0)
     parser.add_argument("--attenuation-k", type=float, default=0.6)
-    parser.add_argument("--shadow-enabled", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--shadow-resolution-scale", type=float, default=0.5)
-    parser.add_argument("--shadow-steps", type=int, default=12)
-    parser.add_argument("--shadow-bias-m", type=float, default=0.015)
-    parser.add_argument("--shadow-thickness-m", type=float, default=0.15)
-    parser.add_argument("--ray-start-offset", type=float, default=0.01)
+    parser.add_argument("--quality-profile", choices=tuple(item.value for item in ShadowQualityProfile), default="balanced")
+    parser.add_argument("--shadow-enabled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--shadow-resolution-scale", type=float, default=None)
+    parser.add_argument("--shadow-steps", type=int, default=None)
+    parser.add_argument("--shadow-bias-m", type=float, default=None)
+    parser.add_argument("--shadow-thickness-m", type=float, default=None)
+    parser.add_argument("--ray-start-offset", type=float, default=None)
+    parser.add_argument("--shadow-softening-enabled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--shadow-soft-samples", type=int, default=None, choices=(4, 8))
+    parser.add_argument("--shadow-soft-radius", type=float, default=None)
+    parser.add_argument("--shadow-edge-aware-upsampling", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--depth-edge-threshold-m", type=float, default=None)
+    parser.add_argument("--synthetic-scene", choices=("A", "B", "C", "D"), default="A")
     parser.add_argument(
         "--foreground-bounds",
         type=float,
@@ -849,15 +900,26 @@ def main(argv: list[str] | None = None) -> int:
             shininess=args.shininess,
             attenuation_k=args.attenuation_k,
         )
-        shadow_config = ShadowConfig(
-            shadow_enabled=args.shadow_enabled,
-            shadow_resolution_scale=args.shadow_resolution_scale,
-            shadow_steps=args.shadow_steps,
-            shadow_bias_m=args.shadow_bias_m,
-            shadow_thickness_m=args.shadow_thickness_m,
-            ray_start_offset=args.ray_start_offset,
+        quality_profile = ShadowQualityProfile(args.quality_profile)
+        profile_config = ShadowConfig.for_profile(quality_profile)
+        config_overrides = {
+            "shadow_enabled": args.shadow_enabled,
+            "shadow_resolution_scale": args.shadow_resolution_scale,
+            "shadow_steps": args.shadow_steps,
+            "shadow_bias_m": args.shadow_bias_m,
+            "shadow_thickness_m": args.shadow_thickness_m,
+            "ray_start_offset": args.ray_start_offset,
+            "shadow_softening_enabled": args.shadow_softening_enabled,
+            "shadow_soft_samples": args.shadow_soft_samples,
+            "shadow_soft_radius": args.shadow_soft_radius,
+            "shadow_edge_aware_upsampling": args.shadow_edge_aware_upsampling,
+            "depth_edge_threshold_m": args.depth_edge_threshold_m,
+        }
+        shadow_config = replace(
+            profile_config,
+            **{name: value for name, value in config_overrides.items() if value is not None},
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         parser.error(str(exc))
     foreground_bounds = None if args.no_occluder else tuple(args.foreground_bounds)
     if foreground_bounds is not None:
@@ -881,6 +943,9 @@ def main(argv: list[str] | None = None) -> int:
         shadow_config=shadow_config,
         benchmark_mode=_MODE_NAMES[args.benchmark_mode],
         foreground_bounds=foreground_bounds,
+        quality_profile=quality_profile,
+        scene_name=args.synthetic_scene,
+        include_occluders=not args.no_occluder,
     )
 
 
