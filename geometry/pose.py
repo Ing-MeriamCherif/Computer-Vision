@@ -137,6 +137,67 @@ class PoseEstimator:
         confidence = float(np.clip(inlier_ratio * (0.35 + 0.35 * count_score + 0.30 * residual_score) * min(1.0, 10.0 * coverage), 0.0, 1.0))
         return PoseEstimateResult(True, transform, confidence, inlier_mask, int(inlier_mask.sum()), float(np.mean(inlier_errors)), median, p95, len(points3d), coverage)
 
+    def estimate_from_flow(
+        self,
+        previous_geometry,
+        motion,
+        *,
+        min_geometry_confidence: float = 0.35,
+        min_motion_confidence: float = 0.35,
+    ) -> PoseEstimateResult:
+        """Estimate camera motion from previous GeometryState and MotionState forward flow."""
+        cam = previous_geometry.camera or self.camera
+        h, w = cam.height, cam.width
+        pts_3d = np.asarray(previous_geometry.positions_3d, dtype=np.float32)
+        flow = np.asarray(motion.forward_flow, dtype=np.float32)
+        if pts_3d.shape != (h, w, 3) or flow.ndim != 3:
+            return _invalid(0, "dimension_mismatch")
+
+        if flow.shape == (h, w, 2):
+            flow_u = flow[..., 0]
+            flow_v = flow[..., 1]
+            finite_flow = np.isfinite(flow).all(axis=-1)
+        elif flow.shape == (2, h, w):
+            flow_u = flow[0]
+            flow_v = flow[1]
+            finite_flow = np.isfinite(flow).all(axis=0)
+        else:
+            return _invalid(0, "dimension_mismatch")
+
+        mask = np.asarray(previous_geometry.valid_mask, dtype=bool) & np.asarray(motion.valid_mask, dtype=bool)
+        if getattr(previous_geometry, "normal_valid_mask", None) is not None:
+            mask &= np.asarray(previous_geometry.normal_valid_mask, dtype=bool)
+        if getattr(previous_geometry, "confidence", None) is not None:
+            mask &= np.asarray(previous_geometry.confidence, dtype=np.float32) >= float(min_geometry_confidence)
+        if getattr(motion, "confidence", None) is not None and motion.confidence is not None:
+            mask &= np.asarray(motion.confidence, dtype=np.float32) >= float(min_motion_confidence)
+
+        finite_pts = np.isfinite(pts_3d).all(axis=-1) & (pts_3d[..., 2] > 0)
+        mask &= finite_pts & finite_flow
+
+        valid_count = int(mask.sum())
+        if valid_count < self.min_correspondences:
+            return _invalid(valid_count, "too_few_reliable_correspondences")
+
+        u_grid, v_grid = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+        u_sel = u_grid[mask]
+        v_sel = v_grid[mask]
+        u_flow_sel = flow_u[mask]
+        v_flow_sel = flow_v[mask]
+
+        p_prev = np.column_stack((u_sel, v_sel))
+        p_curr = np.column_stack((u_sel + u_flow_sel, v_sel + v_flow_sel))
+        obj_pts = pts_3d[mask]
+
+        inside = (p_curr[:, 0] >= 0) & (p_curr[:, 0] < w) & (p_curr[:, 1] >= 0) & (p_curr[:, 1] < h)
+        obj_pts = obj_pts[inside]
+        p_curr = p_curr[inside]
+
+        if len(obj_pts) < self.min_correspondences:
+            return _invalid(len(obj_pts), "correspondences_out_of_frame")
+
+        return self.estimate(obj_pts, p_curr, camera=cam)
+
 
 def compose_world_pose(previous_world_from_camera: np.ndarray, current_from_previous: np.ndarray) -> np.ndarray:
     """Compose poses using ``T_world_from_current = T_world_from_previous @ inv(T_current_from_previous)``."""
@@ -145,3 +206,83 @@ def compose_world_pose(previous_world_from_camera: np.ndarray, current_from_prev
     if previous.shape != (4, 4) or relative.shape != (4, 4):
         raise ValueError("poses must be 4x4")
     return (previous @ np.linalg.inv(relative)).astype(np.float32)
+
+
+def compute_rigid_flow_residual(
+    camera: CameraModel,
+    previous_positions: np.ndarray,
+    forward_flow: np.ndarray,
+    T_current_from_previous: np.ndarray,
+    valid_mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute per-pixel discrepancy between observed optical flow and rigid camera motion."""
+    h, w = camera.height, camera.width
+    pts = np.asarray(previous_positions, dtype=np.float32)
+    flow = np.asarray(forward_flow, dtype=np.float32)
+    t_mat = np.asarray(T_current_from_previous, dtype=np.float32)
+    residual = np.full((h, w), np.nan, dtype=np.float32)
+
+    if flow.ndim != 3:
+        return residual
+    if flow.shape == (h, w, 2):
+        flow_u = flow[..., 0]
+        flow_v = flow[..., 1]
+        finite_flow = np.isfinite(flow).all(axis=-1)
+    elif flow.shape == (2, h, w):
+        flow_u = flow[0]
+        flow_v = flow[1]
+        finite_flow = np.isfinite(flow).all(axis=0)
+    else:
+        return residual
+
+    valid = np.isfinite(pts).all(axis=-1) & (pts[..., 2] > 0) & finite_flow
+    if valid_mask is not None:
+        valid &= np.asarray(valid_mask, dtype=bool)
+
+    if not valid.any():
+        return residual
+
+    rot = t_mat[:3, :3]
+    trans = t_mat[:3, 3]
+    pts_valid = pts[valid]
+    curr_pts = (rot @ pts_valid.T).T + trans
+    in_front = curr_pts[:, 2] > 1e-4
+
+    if not in_front.any():
+        return residual
+
+    valid_indices = np.flatnonzero(valid)
+    front_indices = valid_indices[in_front]
+
+    u_grid, v_grid = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    u_obs = (u_grid + flow_u).reshape(-1)[front_indices]
+    v_obs = (v_grid + flow_v).reshape(-1)[front_indices]
+    obs_pixels = np.column_stack((u_obs, v_obs))
+
+    rigid_pixels = camera.project(curr_pts[in_front])
+    diff = np.linalg.norm(rigid_pixels - obs_pixels, axis=1)
+
+    res_flat = residual.reshape(-1)
+    res_flat[front_indices] = diff.astype(np.float32)
+    return residual
+
+
+def compute_static_confidence(
+    rigid_residual: np.ndarray,
+    spatial_confidence: np.ndarray | None = None,
+    *,
+    threshold: float = 1.5,
+    tau: float = 2.0,
+) -> np.ndarray:
+    """Calculate static confidence in [0, 1] using rigid motion flow residual."""
+    res = np.asarray(rigid_residual, dtype=np.float32)
+    static = np.zeros_like(res, dtype=np.float32)
+    finite = np.isfinite(res)
+    if finite.any():
+        excess = np.maximum(0.0, res[finite] - float(threshold))
+        static[finite] = np.exp(-excess / max(float(tau), 1e-6))
+    if spatial_confidence is not None:
+        spatial = np.clip(np.asarray(spatial_confidence, dtype=np.float32), 0.0, 1.0)
+        static *= spatial
+    return np.clip(static, 0.0, 1.0).astype(np.float32)
+

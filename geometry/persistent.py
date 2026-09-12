@@ -32,6 +32,24 @@ class PersistentGeometryState:
     map_stats: dict[str, float | int]
 
 
+@dataclass(frozen=True, slots=True)
+class PersistentGeometryConfig:
+    """Tunable governor and parameters for Phase 5 persistent geometry."""
+    voxel_size: float = 0.02
+    max_surfels: int = 100_000
+    max_age_frames: int = 300
+    min_confidence: float = 0.05
+    merge_distance: float | None = None
+    normal_merge_cos: float = 0.8660254  # 30 degrees
+    mapping_stride: int = 4
+    min_insert_confidence: float = 0.35
+    min_static_confidence: float = 0.5
+    pose_max_samples: int = 1000
+    rigid_residual_threshold: float = 1.5
+    persistent_hole_fill_enabled: bool = False
+    min_hole_fill_confidence: float = 0.5
+
+
 @dataclass(slots=True)
 class Surfel:
     position_world: np.ndarray
@@ -76,7 +94,18 @@ class SurfelMap:
             self._rebuild_buckets()
         return evicted
 
-    def insert(self, positions_world: np.ndarray, normals_world: np.ndarray, confidence: np.ndarray, frame_id: int, *, stride: int = 4, static_confidence: np.ndarray | None = None) -> dict[str, int]:
+    def insert(
+        self,
+        positions_world: np.ndarray,
+        normals_world: np.ndarray,
+        confidence: np.ndarray,
+        frame_id: int,
+        *,
+        stride: int = 4,
+        static_confidence: np.ndarray | None = None,
+        min_static_confidence: float = 0.5,
+        valid_mask: np.ndarray | None = None,
+    ) -> dict[str, int]:
         points = np.asarray(positions_world, dtype=np.float32)
         normals = np.asarray(normals_world, dtype=np.float32)
         conf = np.asarray(confidence, dtype=np.float32)
@@ -87,7 +116,15 @@ class SurfelMap:
         static = np.ones_like(conf) if static_confidence is None else np.asarray(static_confidence, dtype=np.float32)
         if static.shape != conf.shape:
             raise ValueError("static_confidence must match confidence shape")
-        valid = np.isfinite(points).all(axis=-1) & np.isfinite(normals).all(axis=-1) & np.isfinite(conf) & (conf >= self.min_confidence) & (static >= self.min_confidence)
+        valid = (
+            np.isfinite(points).all(axis=-1)
+            & np.isfinite(normals).all(axis=-1)
+            & np.isfinite(conf)
+            & (conf >= self.min_confidence)
+            & (static >= float(min_static_confidence))
+        )
+        if valid_mask is not None:
+            valid &= np.asarray(valid_mask, dtype=bool)
         sample = np.zeros(valid.shape, dtype=bool)
         sample[::stride, ::stride] = True
         valid &= sample
@@ -193,17 +230,44 @@ class SurfelMap:
 class PersistentGeometryMapper:
     """Single-owner adapter from stable GeometryState to a SurfelMap."""
 
-    def __init__(self, camera: CameraModel, surfel_map: SurfelMap | None = None, *, mapping_stride: int = 4, min_insert_confidence: float = 0.35, min_static_confidence: float = 0.5) -> None:
+    def __init__(
+        self,
+        camera: CameraModel,
+        surfel_map: SurfelMap | None = None,
+        *,
+        config: PersistentGeometryConfig | None = None,
+        mapping_stride: int = 4,
+        min_insert_confidence: float = 0.35,
+        min_static_confidence: float = 0.5,
+    ) -> None:
         self.camera = camera
-        self.map = surfel_map or SurfelMap()
-        self.mapping_stride = int(mapping_stride)
-        self.min_insert_confidence = float(min_insert_confidence)
-        self.min_static_confidence = float(min_static_confidence)
+        self.config = config or PersistentGeometryConfig()
+        stride = self.config.mapping_stride if config is not None else mapping_stride
+        min_insert = self.config.min_insert_confidence if config is not None else min_insert_confidence
+        min_static = self.config.min_static_confidence if config is not None else min_static_confidence
+        self.map = surfel_map or SurfelMap(
+            voxel_size=self.config.voxel_size,
+            max_surfels=self.config.max_surfels,
+            max_age_frames=self.config.max_age_frames,
+            min_confidence=self.config.min_confidence,
+            merge_distance=self.config.merge_distance,
+            normal_merge_cos=self.config.normal_merge_cos,
+        )
+        self.mapping_stride = int(stride)
+        self.min_insert_confidence = float(min_insert)
+        self.min_static_confidence = float(min_static)
         self.world_from_camera: np.ndarray | None = None
         self.last_pose: CameraPoseState | None = None
 
     def reset(self) -> None:
-        self.map = SurfelMap(voxel_size=self.map.voxel_size, max_surfels=self.map.max_surfels, max_age_frames=self.map.max_age_frames, min_confidence=self.map.min_confidence, merge_distance=self.map.merge_distance, normal_merge_cos=self.map.normal_merge_cos)
+        self.map = SurfelMap(
+            voxel_size=self.map.voxel_size,
+            max_surfels=self.map.max_surfels,
+            max_age_frames=self.map.max_age_frames,
+            min_confidence=self.map.min_confidence,
+            merge_distance=self.map.merge_distance,
+            normal_merge_cos=self.map.normal_merge_cos,
+        )
         self.world_from_camera = None
         self.last_pose = None
 
@@ -240,7 +304,16 @@ class PersistentGeometryMapper:
         normals_world = (world[:3, :3] @ normals.reshape(-1, 3).T).T
         points_world = points_world.reshape(points.shape)
         normals_world = normals_world.reshape(normals.shape)
-        stats = self.map.insert(points_world, normals_world, confidence, int(geometry.source_frame_id) if isinstance(geometry.source_frame_id, (int, np.integer)) else 0, stride=self.mapping_stride, static_confidence=static)
+        stats = self.map.insert(
+            points_world,
+            normals_world,
+            confidence,
+            int(geometry.source_frame_id) if isinstance(geometry.source_frame_id, (int, np.integer)) else 0,
+            stride=self.mapping_stride,
+            static_confidence=static,
+            min_static_confidence=self.min_static_confidence,
+            valid_mask=valid,
+        )
         if isinstance(geometry.source_frame_id, (int, np.integer)):
             stats["age_evicted_surfels"] = self.map.age_evict(int(geometry.source_frame_id))
         depth, projected_positions, projected_normals, projected_confidence = self.map.reproject(self.camera, pose_state)
@@ -248,25 +321,145 @@ class PersistentGeometryMapper:
         return PersistentGeometryState(geometry.timestamp, geometry.source_frame_id, pose_state, depth, projected_positions, projected_normals, projected_confidence, projected_valid, self.map.count, self.map.revision, {**stats, "map_memory_bytes": self.map.nbytes()})
 
 
+def persistent_hole_fill(
+    geometry: GeometryState,
+    persistent: PersistentGeometryState,
+    *,
+    min_persistent_confidence: float = 0.5,
+) -> GeometryState:
+    """Optionally fill missing/invalid geometry using confident persistent reprojection."""
+    if persistent is None or not persistent.pose.valid:
+        return geometry
+
+    geom_valid = np.asarray(geometry.valid_mask, dtype=bool)
+    p_valid = np.asarray(persistent.projected_valid, dtype=bool)
+    p_conf = np.asarray(persistent.projected_confidence, dtype=np.float32)
+
+    fill_mask = (~geom_valid) & p_valid & (p_conf >= float(min_persistent_confidence))
+    if not fill_mask.any():
+        return geometry
+
+    positions = np.array(geometry.positions_3d, copy=True)
+    normals = np.array(geometry.normals, copy=True)
+    valid_mask = np.array(geom_valid, copy=True)
+    normal_valid_mask = np.array(geometry.normal_valid_mask, copy=True) if geometry.normal_valid_mask is not None else np.zeros_like(geom_valid)
+    confidence = np.array(geometry.confidence, copy=True) if geometry.confidence is not None else np.zeros_like(geom_valid, dtype=np.float32)
+    depth = np.array(geometry.depth, copy=True) if geometry.depth is not None else positions[..., 2].copy()
+
+    positions[fill_mask] = persistent.projected_positions[fill_mask]
+    normals[fill_mask] = persistent.projected_normals[fill_mask]
+    depth[fill_mask] = persistent.projected_depth[fill_mask]
+    confidence[fill_mask] = persistent.projected_confidence[fill_mask] * 0.9
+    valid_mask[fill_mask] = True
+    normal_valid_mask[fill_mask] = True
+
+    return GeometryState(
+        timestamp=geometry.timestamp,
+        source_frame_id=geometry.source_frame_id,
+        camera=geometry.camera,
+        positions_3d=positions,
+        valid_mask=valid_mask,
+        scale_mode=geometry.scale_mode,
+        normals=normals,
+        normal_valid_mask=normal_valid_mask,
+        selected_radius=geometry.selected_radius,
+        spatial_confidence=geometry.spatial_confidence,
+        confidence=confidence,
+        temporal_confidence=geometry.temporal_confidence,
+        temporal_age=geometry.temporal_age,
+        depth=depth,
+    )
+
+
 class AdvancedGeometryEngine:
     """Optional wrapper preserving the base update API and fail-safe fallback."""
 
-    def __init__(self, base_engine, *, advanced_geometry_enabled: bool = False, mapper: PersistentGeometryMapper | None = None) -> None:
+    def __init__(
+        self,
+        base_engine,
+        *,
+        advanced_geometry_enabled: bool = False,
+        config: PersistentGeometryConfig | None = None,
+        mapper: PersistentGeometryMapper | None = None,
+        persistent_hole_fill_enabled: bool = False,
+    ) -> None:
         self.base_engine = base_engine
         self.advanced_geometry_enabled = bool(advanced_geometry_enabled)
-        self.mapper = mapper or PersistentGeometryMapper(base_engine.camera)
+        self.config = config or PersistentGeometryConfig(
+            persistent_hole_fill_enabled=persistent_hole_fill_enabled
+        )
+        self.mapper = mapper or PersistentGeometryMapper(base_engine.camera, config=self.config)
+        self.persistent_hole_fill_enabled = bool(
+            self.config.persistent_hole_fill_enabled or persistent_hole_fill_enabled
+        )
         self.last_persistent_state: PersistentGeometryState | None = None
 
-    def update(self, *args, pose: PoseEstimateResult | CameraPoseState | None = None, static_confidence: np.ndarray | None = None, **kwargs) -> GeometryState:
+    def update(
+        self,
+        *args,
+        pose: PoseEstimateResult | CameraPoseState | None = None,
+        static_confidence: np.ndarray | None = None,
+        **kwargs,
+    ) -> GeometryState:
         state = self.base_engine.update(*args, **kwargs)
         self.last_persistent_state = None
         if self.advanced_geometry_enabled and pose is not None:
             try:
                 self.last_persistent_state = self.mapper.update(state, pose, static_confidence=static_confidence)
+                if self.persistent_hole_fill_enabled and self.last_persistent_state is not None:
+                    state = persistent_hole_fill(
+                        state,
+                        self.last_persistent_state,
+                        min_persistent_confidence=self.config.min_hole_fill_confidence,
+                    )
             except (ValueError, np.linalg.LinAlgError, FloatingPointError):
                 self.last_persistent_state = None
         return state
 
-    def update_with_persistent(self, *args, pose: PoseEstimateResult | CameraPoseState | None = None, static_confidence: np.ndarray | None = None, **kwargs) -> tuple[GeometryState, PersistentGeometryState | None]:
+    def update_with_persistent(
+        self,
+        *args,
+        pose: PoseEstimateResult | CameraPoseState | None = None,
+        static_confidence: np.ndarray | None = None,
+        **kwargs,
+    ) -> tuple[GeometryState, PersistentGeometryState | None]:
         state = self.update(*args, pose=pose, static_confidence=static_confidence, **kwargs)
         return state, self.last_persistent_state
+
+
+def compute_dynamic_contamination(
+    positions_world: np.ndarray,
+    dynamic_bounds_min: np.ndarray,
+    dynamic_bounds_max: np.ndarray,
+) -> float:
+    """Calculate percentage of surfels residing inside a forbidden dynamic bounding box."""
+    if len(positions_world) == 0:
+        return 0.0
+    pts = np.asarray(positions_world, dtype=np.float32)
+    b_min = np.asarray(dynamic_bounds_min, dtype=np.float32)
+    b_max = np.asarray(dynamic_bounds_max, dtype=np.float32)
+    inside = (pts >= b_min).all(axis=1) & (pts <= b_max).all(axis=1)
+    return float(inside.mean() * 100.0)
+
+
+def compute_reprojection_metrics(
+    projected_depth: np.ndarray,
+    ground_truth_depth: np.ndarray,
+    eval_mask: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Calculate mean, median, p95 relative depth error and coverage %."""
+    proj = np.asarray(projected_depth, dtype=np.float32)
+    gt = np.asarray(ground_truth_depth, dtype=np.float32)
+    valid = np.isfinite(proj) & (proj > 0) & np.isfinite(gt) & (gt > 0)
+    if eval_mask is not None:
+        valid &= np.asarray(eval_mask, dtype=bool)
+    if not valid.any():
+        return {"mean_error": float("inf"), "median_error": float("inf"), "p95_error": float("inf"), "coverage_percent": 0.0}
+    rel_err = np.abs(proj[valid] - gt[valid]) / gt[valid]
+    return {
+        "mean_error": float(np.mean(rel_err)),
+        "median_error": float(np.median(rel_err)),
+        "p95_error": float(np.percentile(rel_err, 95)),
+        "coverage_percent": float(valid.mean() * 100.0),
+    }
+

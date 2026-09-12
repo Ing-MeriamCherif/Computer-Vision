@@ -26,16 +26,30 @@ callers should pass read-only snapshots to renderers. `reproject()` performs a
 vectorized world-to-camera transform and nearest-depth z-buffer, transforming
 normals with rotation only.
 
-Dynamic rejection is represented by an optional `static_confidence` map. Low
-static-confidence points are not inserted into the static map. A failed pose
-returns no persistent state and leaves the previous map untouched, so the base
-renderer can continue with Phase 1–4 geometry.
+## Static/dynamic classification and rigid flow residual
+
+Dynamic objects are detected by comparing observed optical flow against the rigid
+motion induced by estimated camera motion `T_current_from_previous`:
+
+- `compute_rigid_flow_residual()`: Calculates per-pixel discrepancy in pixels.
+- `compute_static_confidence()`: Modulates spatial confidence by $\exp(-\text{residual} / \tau)$.
+- `PersistentGeometryConfig.min_static_confidence`: Ensures dynamic objects are excluded from the static surfel map.
+- `compute_dynamic_contamination()`: Verifies that no dynamic surfels contaminate the persistent map.
+
+## Optional map-assisted hole filling
+
+When enabled via `persistent_hole_fill_enabled=True` in `PersistentGeometryConfig`:
+`persistent_hole_fill()` populates invalid or missing depth patches using high-confidence
+persistent surfel reprojections, without overwriting fresh high-confidence current geometry.
+
+## Run tools
 
 Run the deterministic headless demonstration:
 
 ```bash
-python3 -m tools.persistent_geometry_demo --frames 5
+python3 tools/persistent_geometry_demo.py --frames 10 --ply work/surfel_map.ply
 ```
 
 No renderer, loop closure, global bundle adjustment, TSDF, NeRF, or semantic
 tracking is part of this core implementation.
+

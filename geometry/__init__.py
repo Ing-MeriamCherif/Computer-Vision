@@ -25,8 +25,25 @@ from .warp import warp_depth_backward, warp_field_backward, warp_normals_backwar
 from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
 from .validation import GeometryValidationReport, validate_renderer_geometry
 from .diagnostics import GeometryDiagnostics, StageTimer, geometry_state_nbytes, motion_state_nbytes, summarize_timings
-from .pose import CameraPoseState, PoseEstimateResult, PoseEstimator, compose_world_pose
-from .persistent import AdvancedGeometryEngine, PersistentGeometryMapper, PersistentGeometryState, Surfel, SurfelMap
+from .pose import (
+    CameraPoseState,
+    PoseEstimateResult,
+    PoseEstimator,
+    compose_world_pose,
+    compute_rigid_flow_residual,
+    compute_static_confidence,
+)
+from .persistent import (
+    AdvancedGeometryEngine,
+    PersistentGeometryConfig,
+    PersistentGeometryMapper,
+    PersistentGeometryState,
+    Surfel,
+    SurfelMap,
+    compute_dynamic_contamination,
+    compute_reprojection_metrics,
+    persistent_hole_fill,
+)
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
 
@@ -70,11 +87,17 @@ __all__ = [
     "PoseEstimateResult",
     "PoseEstimator",
     "compose_world_pose",
+    "compute_rigid_flow_residual",
+    "compute_static_confidence",
     "PersistentGeometryState",
+    "PersistentGeometryConfig",
     "Surfel",
     "SurfelMap",
     "PersistentGeometryMapper",
     "AdvancedGeometryEngine",
+    "persistent_hole_fill",
+    "compute_dynamic_contamination",
+    "compute_reprojection_metrics",
     "CudaGeometryDiagnostics",
     "TorchGeometryBackend",
     "torch_cuda_status",
