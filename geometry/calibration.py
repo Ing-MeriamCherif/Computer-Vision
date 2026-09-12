@@ -46,7 +46,14 @@ def calibrate_checkerboard(
         image = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError(f"could not read calibration image: {path}")
-        image_size = (image.shape[1], image.shape[0])
+        current_size = (image.shape[1], image.shape[0])
+        if image_size is None:
+            image_size = current_size
+        elif current_size != image_size:
+            raise ValueError(
+                f"calibration image '{path}' resolution {current_size} (width={current_size[0]}, height={current_size[1]}) "
+                f"does not match expected reference resolution {image_size} (width={image_size[0]}, height={image_size[1]})"
+            )
         found, corners = cv2.findChessboardCorners(image, board_size, None)
         if not found:
             continue

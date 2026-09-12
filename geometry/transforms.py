@@ -1,4 +1,46 @@
-"""Explicit affine image-coordinate transforms for resolution changes."""
+"""Explicit affine image-coordinate transforms for resolution changes.
+
+Coordinate and Pixel Semantics Convention
+-----------------------------------------
+1. Continuous Pixel Coordinates:
+   The coordinate system uses a continuous 2D plane with origin (0.0, 0.0) at the
+   outer top-left corner of the image boundary. Discrete pixel indices (u, v) with
+   u in [0, W - 1] and v in [0, H - 1] correspond to discrete sample points, with
+   their geometric centers at (u + 0.5, v + 0.5) under standard continuous image
+   conventions. In pinhole ray projection, rays are cast through coordinate (u, v).
+
+2. Affine Coordinate Mapping:
+   Image transforms apply an affine 2D coordinate map:
+       target_x = sx * source_x + tx
+       target_y = sy * source_y + ty
+   Where:
+   - Resize scales coordinates: sx = target_w / source_w, sy = target_h / source_h
+   - Crop translates coordinates: tx = -crop_left, ty = -crop_top
+   - Padding translates coordinates: tx = pad_left, ty = pad_top
+   - Letterbox applies isotropic scaling followed by centering translations.
+
+3. Camera Intrinsics Transformation:
+   Under map_camera(), intrinsics transform according to:
+       fx' = sx * fx
+       fy' = sy * fy
+       cx' = sx * cx + tx
+       cy' = sy * cy + ty
+   This guarantees that camera rays unprojected at target pixel coordinates
+   correspond identically to rays unprojected from source coordinates.
+
+4. External Framework Integration & Half-Pixel Caveats:
+   - OpenCV (cv2.resize): Bilinear interpolation samples continuous coordinates as
+     (u + 0.5) * s - 0.5.
+   - PyTorch (torch.nn.functional.interpolate / grid_sample): "align_corners=False"
+     maps pixel centers with half-pixel adjustments, whereas "align_corners=True"
+     maps corner pixel centers to corner pixel centers.
+   - Model preprocessors (e.g. Depth Anything V2, torchvision transforms): May
+     follow different rounding or half-pixel conventions.
+   - Framework Integration Rule: When moving between this geometry subsystem and
+     external framework tensors/sampling grids, differences in half-pixel alignment
+     must be explicitly handled at integration boundaries; do not rely on implicit
+     coincidence.
+"""
 
 from __future__ import annotations
 
@@ -13,9 +55,12 @@ from .camera import CameraModel
 class ImageTransform:
     """Map source pixel coordinates to target coordinates.
 
-    Coordinates are continuous top-left-origin pixel coordinates and the map is
+    Coordinates are continuous top-left-origin pixel coordinates and the map is:
     ``target = (sx * source_x + tx, sy * source_y + ty)``. Keeping crop and
     padding offsets explicit prevents incorrect principal-point updates.
+
+    See module docstring for complete coordinate, pixel-center, and framework
+    boundary documentation.
     """
 
     sx: float = 1.0

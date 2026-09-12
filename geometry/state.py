@@ -24,10 +24,18 @@ class DepthState:
         if self.depth.ndim != 2:
             raise ValueError("DepthState.depth must be a 2D array")
         self.scale_mode = DepthScaleMode(self.scale_mode)
-        if self.valid_mask is not None and np.asarray(self.valid_mask).shape != self.depth.shape:
-            raise ValueError("DepthState.valid_mask shape must match depth")
-        if self.confidence is not None and np.asarray(self.confidence).shape != self.depth.shape:
-            raise ValueError("DepthState.confidence shape must match depth")
+        if self.valid_mask is not None:
+            self.valid_mask = np.asarray(self.valid_mask, dtype=bool)
+            if self.valid_mask.shape != self.depth.shape:
+                raise ValueError(
+                    f"DepthState.valid_mask shape {self.valid_mask.shape} must match depth shape {self.depth.shape}"
+                )
+        if self.confidence is not None:
+            self.confidence = np.asarray(self.confidence)
+            if self.confidence.shape != self.depth.shape:
+                raise ValueError(
+                    f"DepthState.confidence shape {self.confidence.shape} must match depth shape {self.depth.shape}"
+                )
 
 
 @dataclass(slots=True)
@@ -50,7 +58,49 @@ class GeometryState:
         self.positions_3d = np.asarray(self.positions_3d)
         self.valid_mask = np.asarray(self.valid_mask, dtype=bool)
         self.scale_mode = DepthScaleMode(self.scale_mode)
-        if self.depth.ndim != 2 or self.valid_mask.shape != self.depth.shape:
-            raise ValueError("GeometryState depth and valid_mask must be matching 2D arrays")
-        if self.positions_3d.shape != (*self.depth.shape, 3):
-            raise ValueError("positions_3d must have shape (H, W, 3)")
+        if self.depth.ndim != 2:
+            raise ValueError("GeometryState depth must be a 2D array")
+        if self.valid_mask.shape != self.depth.shape:
+            raise ValueError(
+                f"GeometryState valid_mask shape {self.valid_mask.shape} must match depth shape {self.depth.shape}"
+            )
+        h, w = self.depth.shape
+        if self.positions_3d.shape != (h, w, 3):
+            raise ValueError(
+                f"positions_3d must have shape ({h}, {w}, 3), got {self.positions_3d.shape}"
+            )
+        if self.camera.height != h or self.camera.width != w:
+            raise ValueError(
+                f"camera resolution (height={self.camera.height}, width={self.camera.width}) does not match "
+                f"depth shape (height={h}, width={w})"
+            )
+        if self.normals is not None:
+            self.normals = np.asarray(self.normals)
+            if self.normals.shape != (h, w, 3):
+                raise ValueError(
+                    f"normals must have shape ({h}, {w}, 3), got {self.normals.shape}"
+                )
+        if self.confidence is not None:
+            self.confidence = np.asarray(self.confidence)
+            if self.confidence.shape != (h, w):
+                raise ValueError(
+                    f"confidence must have shape ({h}, {w}), got {self.confidence.shape}"
+                )
+        if self.temporal_age is not None:
+            self.temporal_age = np.asarray(self.temporal_age)
+            if self.temporal_age.shape != (h, w):
+                raise ValueError(
+                    f"temporal_age must have shape ({h}, {w}), got {self.temporal_age.shape}"
+                )
+        if self.history_valid is not None:
+            self.history_valid = np.asarray(self.history_valid, dtype=bool)
+            if self.history_valid.shape != (h, w):
+                raise ValueError(
+                    f"history_valid must have shape ({h}, {w}), got {self.history_valid.shape}"
+                )
+        if self.occlusion_mask is not None:
+            self.occlusion_mask = np.asarray(self.occlusion_mask, dtype=bool)
+            if self.occlusion_mask.shape != (h, w):
+                raise ValueError(
+                    f"occlusion_mask must have shape ({h}, {w}), got {self.occlusion_mask.shape}"
+                )

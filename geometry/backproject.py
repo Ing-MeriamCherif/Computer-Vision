@@ -47,6 +47,13 @@ def backproject_depth(
     depth_arr = np.asarray(depth, dtype=np.float64)
     if depth_arr.ndim != 2:
         raise ValueError("depth must be a 2D array")
+    if depth_arr.shape != (camera.height, camera.width):
+        raise ValueError(
+            f"depth resolution {depth_arr.shape} (height={depth_arr.shape[0]}, width={depth_arr.shape[1]}) "
+            f"does not match camera resolution {(camera.height, camera.width)} "
+            f"(height={camera.height}, width={camera.width}); "
+            "camera intrinsics must first be explicitly transformed to the depth resolution"
+        )
     valid = depth_valid_mask(depth_arr, valid_mask)
     height, width = depth_arr.shape
     v, u = np.indices((height, width), dtype=np.float64)
