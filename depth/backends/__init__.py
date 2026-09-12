@@ -1,7 +1,13 @@
-from depth.backends.depth_anything_v2_small import DepthAnythingV2Small
+from depth.backends.depth_anything_v2_small import (
+    DepthAnythingV2Small,
+    DepthAnythingV2Base,
+    DepthAnythingV2Large,
+)
 
 BACKENDS = {
     "depth_anything_v2_small": DepthAnythingV2Small,
+    "depth_anything_v2_base": DepthAnythingV2Base,
+    "depth_anything_v2_large": DepthAnythingV2Large,
 }
 
 

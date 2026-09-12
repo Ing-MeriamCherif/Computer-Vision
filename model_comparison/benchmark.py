@@ -23,6 +23,7 @@ from depth.benchmark import get_vram_mb
 MODELS = {
     "depth_anything_v2_small": "depth-anything/Depth-Anything-V2-Small-hf",
     "depth_anything_v2_base": "depth-anything/Depth-Anything-V2-Base-hf",
+    "depth_anything_v2_large": "depth-anything/Depth-Anything-V2-Large-hf",
 }
 
 
@@ -95,11 +96,21 @@ def main():
     parser.add_argument("--fp16", action="store_true", default=True)
     parser.add_argument("--no-fp16", dest="fp16", action="store_false")
     parser.add_argument("--num-frames", type=int, default=50)
+    parser.add_argument("--models", default="all",
+                        help="Comma-separated model names or 'all' (small,base,large)")
     parser.add_argument("--output", default="model_comparison/results.csv")
     args = parser.parse_args()
 
+    if args.models == "all":
+        models = MODELS
+    else:
+        names = [n.strip() for n in args.models.split(",")]
+        models = {k: v for k, v in MODELS.items() if k in names}
+        if not models:
+            raise SystemExit(f"Unknown models: {names}. Available: {list(MODELS.keys())}")
+
     results = []
-    for name, model_id in MODELS.items():
+    for name, model_id in models.items():
         print(f"[{name}]")
         stats = benchmark_model(model_id, args.device, args.input_size,
                                 args.fp16, args.num_frames)

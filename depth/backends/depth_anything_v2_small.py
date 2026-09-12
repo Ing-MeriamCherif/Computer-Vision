@@ -8,13 +8,16 @@ import torch
 
 
 class DepthAnythingV2Small:
-    """Depth Anything V2 Small backend.
+    """Depth Anything V2 backend (Small / Base / Large).
 
-    Wraps the HuggingFace `depth-anything/Depth-Anything-V2-Small-hf` model.
+    Wraps any HuggingFace `depth-anything/Depth-Anything-V2-*-hf` model.
     Install: pip install transformers
     """
 
     scale_mode = "relative"
+
+    # Default model — overridden by Base/Large subclasses
+    _model_id = "depth-anything/Depth-Anything-V2-Small-hf"
 
     def __init__(
         self,
@@ -32,11 +35,9 @@ class DepthAnythingV2Small:
             return
         from transformers import pipeline
 
-        task = "depth-estimation"
-        model_id = "depth-anything/Depth-Anything-V2-Small-hf"
         self._pipe = pipeline(
-            task=task,
-            model=model_id,
+            task="depth-estimation",
+            model=self._model_id,
             device=0 if self.device.type == "cuda" else -1,
             torch_dtype=torch.float16 if self.fp16 else torch.float32,
         )
@@ -105,3 +106,13 @@ class DepthAnythingV2Small:
     def _to_pil(rgb: np.ndarray):
         from PIL import Image
         return Image.fromarray(rgb)
+
+
+class DepthAnythingV2Base(DepthAnythingV2Small):
+    """Depth Anything V2 Base backend (97.5M params)."""
+    _model_id = "depth-anything/Depth-Anything-V2-Base-hf"
+
+
+class DepthAnythingV2Large(DepthAnythingV2Small):
+    """Depth Anything V2 Large backend (335.3M params)."""
+    _model_id = "depth-anything/Depth-Anything-V2-Large-hf"
