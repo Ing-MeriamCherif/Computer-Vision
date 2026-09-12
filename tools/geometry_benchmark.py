@@ -18,6 +18,7 @@ from geometry import (  # noqa: E402
     DepthState,
     MotionState,
     NormalMode,
+    OpenCVFlowProvider,
     TemporalGeometryEngine,
     align_inverse_depth,
     backproject_depth,
@@ -56,6 +57,14 @@ def benchmark(width: int, height: int, warmups: int, iterations: int) -> dict:
         "alignment_affine": lambda: align_inverse_depth(varied, varied * 1.1, valid, min_samples=64),
         "alignment_scale_only": lambda: align_inverse_depth(np.full_like(depth, 2.2), depth, valid, min_samples=64),
     }
+    texture_prev = (127.0 + 60.0 * np.sin(np.arange(width)[None, :] * 0.4) * np.cos(np.arange(height)[:, None] * 0.35)).clip(0, 255).astype(np.uint8)
+    texture_cur = np.roll(texture_prev, 1, axis=1)
+    for method in ("dis", "farneback"):
+        try:
+            provider = OpenCVFlowProvider(method=method)
+            stages[f"opencv_{method}"] = lambda provider=provider: provider.compute(texture_prev, texture_cur, 0, 1, 1 / 30)
+        except RuntimeError:
+            pass
     results = {name: _run(fn, warmups, iterations) for name, fn in stages.items()}
     motion = MotionState(0, 1, 1 / 30, flow, flow)
     fresh_engine = TemporalGeometryEngine(camera)
