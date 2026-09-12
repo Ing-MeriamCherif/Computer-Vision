@@ -7,8 +7,18 @@ in the previous frame: ``source = current + backward_flow``.
 from __future__ import annotations
 
 import warnings
+from functools import lru_cache
 
 import numpy as np
+
+
+@lru_cache(maxsize=8)
+def _pixel_grid(height: int, width: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return bounded, immutable float32 pixel grids for repeated warps."""
+    yy, xx = np.indices((height, width), dtype=np.float32)
+    yy.setflags(write=False)
+    xx.setflags(write=False)
+    return yy, xx
 
 
 def _validate_flow(field: np.ndarray, backward_flow: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -42,7 +52,7 @@ def warp_field_backward(
             raise ValueError("source_valid_mask must have shape (H, W)")
         source_valid &= np.isfinite(value).all(axis=-1) if value.ndim == 3 else np.isfinite(value)
 
-    yy, xx = np.indices((height, width), dtype=np.float32)
+    yy, xx = _pixel_grid(height, width)
     source_x = xx + flow[..., 0]
     source_y = yy + flow[..., 1]
     finite_coords = np.isfinite(source_x) & np.isfinite(source_y)
@@ -135,7 +145,7 @@ def warp_depth_backward(
             raise ValueError("source_valid_mask must have shape (H, W)")
         source_valid &= np.isfinite(value) & (value > epsilon)
 
-    yy, xx = np.indices((height, width), dtype=np.float32)
+    yy, xx = _pixel_grid(height, width)
     source_x = xx + flow[..., 0]
     source_y = yy + flow[..., 1]
     finite_coords = np.isfinite(source_x) & np.isfinite(source_y)

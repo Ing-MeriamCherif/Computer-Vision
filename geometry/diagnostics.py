@@ -45,26 +45,26 @@ class _TimerContext:
 
 @dataclass(frozen=True, slots=True)
 class GeometryDiagnostics:
-    total_ms: float = 0.0
-    flow_ms: float = 0.0
-    warp_ms: float = 0.0
-    alignment_ms: float = 0.0
-    fusion_ms: float = 0.0
-    backprojection_ms: float = 0.0
-    normals_ms: float = 0.0
-    valid_geometry_percent: float = 0.0
-    valid_normal_percent: float = 0.0
-    history_acceptance_percent: float = 0.0
-    history_rejection_percent: float = 0.0
-    occlusion_percent: float = 0.0
-    disocclusion_percent: float = 0.0
-    mean_temporal_age: float = 0.0
-    mean_confidence: float = 0.0
-    alignment_success: bool = False
-    alignment_model: str = "none"
-    alignment_residual: float = float("inf")
-    reset_reason: str = "none"
-    depth_source_frame_delta: int = 0
+    total_ms: float | None = None
+    flow_ms: float | None = None
+    warp_ms: float | None = None
+    alignment_ms: float | None = None
+    fusion_ms: float | None = None
+    backprojection_ms: float | None = None
+    normals_ms: float | None = None
+    valid_geometry_percent: float | None = None
+    valid_normal_percent: float | None = None
+    history_acceptance_percent: float | None = None
+    history_rejection_percent: float | None = None
+    occlusion_percent: float | None = None
+    disocclusion_percent: float | None = None
+    mean_temporal_age: float | None = None
+    mean_confidence: float | None = None
+    alignment_success: bool | None = None
+    alignment_model: str | None = None
+    alignment_residual: float | None = None
+    reset_reason: str | None = None
+    depth_source_frame_delta: int | None = None
 
 
 def geometry_state_nbytes(state: GeometryState) -> int:

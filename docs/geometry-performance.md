@@ -12,16 +12,26 @@ python3 -m tools.geometry_benchmark --width 1280 --height 720 --warmups 1 --iter
 
 The benchmark covers backprojection, all normal modes, generic/depth-aware
 warping, affine/scale-only alignment, fresh/history-only temporal updates, and
-records enough samples for meaningful percentiles (at least two by CLI
-contract).  `tools.geometry_stress` provides deterministic multi-rate and
+labels percentile confidence when a caller requests fewer than five or ten
+samples, and includes quality fields (valid geometry/normals, alignment model,
+residual, and sample counts). For stable tails use at least 30 samples at
+320x180, 10 at 640x360, and 5 at 1280x720; small exploratory runs are marked
+limited. `tools.geometry_stress` provides deterministic multi-rate and
 fault-injection runs.
+
+The optional reduced-resolution flow study is reproducible with
+`python3 -m tools.flow_resolution_benchmark --iterations 3`; it reports DIS and
+Farneback EPE (mean/median/p95) alongside runtime for scales 1.0, 0.5, and
+0.25. On the checked-in synthetic texture, Farneback 0.5 was the best CPU
+trade-off while DIS 1.0 had the lowest error but substantially higher cost.
 
 The principal avoidable allocation removed in Phase 4 is per-frame camera-grid
 construction: backprojection uses an eight-entry bounded cache of read-only
 float32 normalized-ray fields keyed by camera intrinsics and resolution.
-Alignment already operates on compact valid samples; its double-precision
-arrays are limited to the fitting vectors.  Multi-scale normal candidates
-remain explicit for readability and correctness.  Inputs are not mutated and
+Alignment supports deterministic grid-stratified `max_samples` (the temporal
+default is 10,000), and converts only selected fitting vectors to float64.
+Multi-scale normal selection now streams one radius at a time while preserving
+the acceptance-first/best-fallback result policy. Inputs are not mutated and
 OpenCV conversion only makes a contiguous uint8 buffer when required by the
 backend.
 
@@ -40,5 +50,6 @@ The checked-in baseline snapshot (CPU, repeated measurements) is approximately:
 | 640x360 | 3.26 ms | 122.50 ms | 71.86 ms | 591.81 ms | 380.84 ms |
 | 1280x720 | 8.05 ms | 470.72 ms | 280.09 ms | 2982.95 ms | 1812.50 ms |
 
-The corresponding JSON contains p50/p95/p99/max and iteration counts; the
+The corresponding JSON contains p50/p95/p99/max, quality metrics, and iteration
+counts; the
 1280 row used two repeated measurements because each full update is expensive.
