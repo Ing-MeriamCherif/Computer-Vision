@@ -141,6 +141,16 @@ Full renderer-contract validation remains enabled for the offline action and
 tests; the WebRTC hot path omits the expensive per-frame projection invariant
 check to preserve cadence while still returning the contract fields.
 
+## Physical-camera throughput gate
+
+The hardware path was then measured directly with one OpenCV V4L2 handle on
+`/dev/video0` at 640 x 480. Thirty-six consecutive reads succeeded and all 36
+frames had different mean pixel values. With the current higher-detail 192px
+depth input and 256 x 192 bounded working frame, warm processing averaged
+**53.4 ms/frame (18.7 FPS)** with an 89.1 ms p95 and the renderer contract was
+valid on the final frame. This is the authoritative sensor result; the browser
+gate's ~29 FPS measures WebRTC delivery and uses a bounded fake track.
+
 Phase 1-4 temporal and Phase 5 persistent remain heavier algorithms. The UI
 therefore defaults to CUDA-current geometry for synchronized live rendering;
 those modes remain available for diagnostics but are not claimed as 30 FPS.
