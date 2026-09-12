@@ -119,6 +119,47 @@ def step_depth(camera: CameraModel, foreground: float = 1.0, background: float =
     return depth
 
 
+def sphere_depth(
+    camera: CameraModel,
+    center: ArrayLike = (0.0, 0.0, 3.0),
+    radius: float = 1.0,
+) -> np.ndarray:
+    """Generate nearest-positive Z-depth intersections with an analytic sphere."""
+
+    center_arr = np.asarray(center, dtype=np.float64)
+    if center_arr.shape != (3,) or not np.isfinite(center_arr).all():
+        raise ValueError("sphere center must have three finite values")
+    if radius <= 0 or not np.isfinite(radius):
+        raise ValueError("sphere radius must be positive and finite")
+    v, u = np.indices((camera.height, camera.width), dtype=np.float64)
+    rays = camera.pixel_to_ray(u, v)
+    a = np.sum(rays * rays, axis=-1)
+    b = -2.0 * np.sum(rays * center_arr, axis=-1)
+    c = float(np.dot(center_arr, center_arr) - radius * radius)
+    discriminant = b * b - 4.0 * a * c
+    has_hit = discriminant >= 0
+    root = np.sqrt(np.maximum(discriminant, 0.0))
+    near = (-b - root) / (2.0 * a)
+    far = (-b + root) / (2.0 * a)
+    depth = np.where((near > 0) & has_hit, near, np.where((far > 0) & has_hit, far, np.nan))
+    return depth.astype(np.float32)
+
+
+def sphere_normals(points: np.ndarray, center: ArrayLike = (0.0, 0.0, 3.0), radius: float = 1.0) -> np.ndarray:
+    """Return camera-facing analytic sphere normals for reconstructed points."""
+
+    points_arr = np.asarray(points, dtype=np.float64)
+    center_arr = np.asarray(center, dtype=np.float64)
+    if points_arr.ndim != 3 or points_arr.shape[-1] != 3 or center_arr.shape != (3,):
+        raise ValueError("points must be (H, W, 3) and center must have three values")
+    normals = points_arr - center_arr
+    lengths = np.linalg.norm(normals, axis=-1)
+    valid = np.isfinite(normals).all(axis=-1) & (lengths > 0)
+    normals = normals / np.where(valid, lengths, 1.0)[..., None]
+    normals = np.where((np.sum(normals * points_arr, axis=-1) > 0)[..., None], -normals, normals)
+    return np.where(valid[..., None], normals, np.nan).astype(np.float32)
+
+
 @dataclass(frozen=True, slots=True)
 class PlaneFit:
     coefficients: np.ndarray

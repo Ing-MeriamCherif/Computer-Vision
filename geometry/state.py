@@ -52,6 +52,9 @@ class GeometryState:
     temporal_age: np.ndarray | None = None
     history_valid: np.ndarray | None = None
     occlusion_mask: np.ndarray | None = None
+    normal_valid_mask: np.ndarray | None = None
+    normal_confidence: np.ndarray | None = None
+    selected_radius: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)
@@ -103,4 +106,22 @@ class GeometryState:
             if self.occlusion_mask.shape != (h, w):
                 raise ValueError(
                     f"occlusion_mask must have shape ({h}, {w}), got {self.occlusion_mask.shape}"
+                )
+        if self.normal_valid_mask is not None:
+            self.normal_valid_mask = np.asarray(self.normal_valid_mask, dtype=bool)
+            if self.normal_valid_mask.shape != (h, w):
+                raise ValueError(
+                    f"normal_valid_mask must have shape ({h}, {w}), got {self.normal_valid_mask.shape}"
+                )
+        if self.normal_confidence is not None:
+            self.normal_confidence = np.asarray(self.normal_confidence)
+            if self.normal_confidence.shape != (h, w):
+                raise ValueError(
+                    f"normal_confidence must have shape ({h}, {w}), got {self.normal_confidence.shape}"
+                )
+        if self.selected_radius is not None:
+            self.selected_radius = np.asarray(self.selected_radius)
+            if self.selected_radius.shape != (h, w):
+                raise ValueError(
+                    f"selected_radius must have shape ({h}, {w}), got {self.selected_radius.shape}"
                 )

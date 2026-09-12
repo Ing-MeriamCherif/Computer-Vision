@@ -47,6 +47,9 @@ def test_geometry_state_valid_all_fields() -> None:
     temporal_age = np.zeros((h, w), dtype=np.float32)
     history_valid = np.ones((h, w), dtype=int)
     occlusion_mask = np.zeros((h, w), dtype=float)
+    normal_valid_mask = np.ones((h, w), dtype=int)
+    normal_confidence = np.ones((h, w), dtype=np.float32)
+    selected_radius = np.ones((h, w), dtype=np.int16)
 
     state = GeometryState(
         timestamp=100.0,
@@ -61,6 +64,9 @@ def test_geometry_state_valid_all_fields() -> None:
         temporal_age=temporal_age,
         history_valid=history_valid,
         occlusion_mask=occlusion_mask,
+        normal_valid_mask=normal_valid_mask,
+        normal_confidence=normal_confidence,
+        selected_radius=selected_radius,
     )
     assert state.scale_mode == DepthScaleMode.METRIC
     assert state.valid_mask.dtype == bool
@@ -69,6 +75,9 @@ def test_geometry_state_valid_all_fields() -> None:
     assert state.normals.shape == (10, 12, 3)
     assert state.confidence.shape == (10, 12)
     assert state.temporal_age.shape == (10, 12)
+    assert state.normal_valid_mask is not None and state.normal_valid_mask.dtype == bool
+    assert state.normal_confidence is not None and state.normal_confidence.shape == (10, 12)
+    assert state.selected_radius is not None and state.selected_radius.shape == (10, 12)
 
 
 def test_geometry_state_rejects_shape_mismatches() -> None:
