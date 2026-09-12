@@ -729,6 +729,8 @@ class AdvancedGeometryEngine:
                         motion,
                         pose_result,
                         camera=self.base_engine.camera,
+                        current_geometry=state,
+                        current_domain=True,
                         threshold=self.config.rigid_residual_threshold,
                         min_static_confidence=self.config.min_static_confidence,
                     )

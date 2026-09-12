@@ -1,0 +1,196 @@
+"""Dedicated camera capture worker and LatestFrameSlot.
+
+Maintains continuous physical camera capture on a dedicated thread, decoupled
+from downstream processing and rendering deadlines.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from typing import Any
+
+import numpy as np
+
+
+class LatestFrameSlot:
+    """Thread-safe single-frame slot with effective capacity 1.
+
+    When downstream consumers are busy, newly arriving physical camera frames
+    overwrite the slot and increment the dropped frame counter.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(self._lock)
+        self._frame: np.ndarray | None = None
+        self._capture_sequence_id: int = -1
+        self._capture_timestamp: float = 0.0
+        self._has_new: bool = False
+        self._dropped_count: int = 0
+        self._total_arrived: int = 0
+
+    def put(
+        self,
+        frame: np.ndarray,
+        capture_sequence_id: int,
+        capture_timestamp: float,
+    ) -> None:
+        """Store a newly arrived physical camera frame."""
+        with self._condition:
+            if self._has_new:
+                self._dropped_count += 1
+            self._frame = frame
+            self._capture_sequence_id = int(capture_sequence_id)
+            self._capture_timestamp = float(capture_timestamp)
+            self._has_new = True
+            self._total_arrived += 1
+            self._condition.notify_all()
+
+    def get(self, timeout: float | None = 0.5) -> tuple[np.ndarray, int, float] | None:
+        """Block until a new unconsumed frame arrives, or until timeout."""
+        with self._condition:
+            if not self._has_new:
+                signaled = self._condition.wait(timeout=timeout)
+                if not signaled or not self._has_new:
+                    return None
+            self._has_new = False
+            assert self._frame is not None
+            return self._frame, self._capture_sequence_id, self._capture_timestamp
+
+    def get_latest(self) -> tuple[np.ndarray, int, float] | None:
+        """Non-blocking retrieval of the current frame in the slot."""
+        with self._lock:
+            if self._frame is None:
+                return None
+            return self._frame, self._capture_sequence_id, self._capture_timestamp
+
+    @property
+    def dropped_count(self) -> int:
+        with self._lock:
+            return self._dropped_count
+
+    @property
+    def total_arrived(self) -> int:
+        with self._lock:
+            return self._total_arrived
+
+
+class CameraCaptureWorker:
+    """Owns a single physical VideoCapture handle on a dedicated capture thread."""
+
+    def __init__(
+        self,
+        device: int | str = 0,
+        width: int = 640,
+        height: int = 480,
+        fps: int = 30,
+        backend: int | None = None,
+    ) -> None:
+        self.device = device
+        self.requested_width = width
+        self.requested_height = height
+        self.requested_fps = fps
+        self.backend = backend
+
+        self.slot = LatestFrameSlot()
+        self._thread: threading.Thread | None = None
+        self._running = False
+        self._cap: Any = None
+
+        self.actual_width: int = width
+        self.actual_height: int = height
+        self.actual_fps: float = float(fps)
+        self.capture_sequence_id: int = 0
+        self.latest_exception: Exception | None = None
+        self.last_capture_time: float = 0.0
+
+        self._fps_samples: list[float] = []
+        self._last_frame_ts: float | None = None
+
+    def start(self) -> None:
+        """Open camera and start the continuous capture thread."""
+        import cv2
+
+        if str(self.device).isdigit():
+            dev_idx = int(self.device)
+            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
+            self._cap = cv2.VideoCapture(dev_idx, cap_backend)
+        elif str(self.device).startswith("/dev/"):
+            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
+            self._cap = cv2.VideoCapture(str(self.device), cap_backend)
+        else:
+            self._cap = cv2.VideoCapture(self.device)
+
+        if not self._cap.isOpened():
+            raise RuntimeError(f"Unable to open physical camera: {self.device}")
+
+        # Set requested capture properties
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.requested_width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height)
+        self._cap.set(cv2.CAP_PROP_FPS, self.requested_fps)
+
+        # Query actual negotiated properties
+        act_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        act_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        act_fps = float(self._cap.get(cv2.CAP_PROP_FPS))
+        if act_w > 0:
+            self.actual_width = act_w
+        if act_h > 0:
+            self.actual_height = act_h
+        if act_fps > 0:
+            self.actual_fps = act_fps
+
+        self._running = True
+        self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="CameraCaptureWorker")
+        self._thread.start()
+
+    def _capture_loop(self) -> None:
+        import cv2
+
+        while self._running:
+            try:
+                ok, frame_bgr = self._cap.read()
+                if not ok or frame_bgr is None:
+                    time.sleep(0.005)
+                    continue
+
+                ts = time.monotonic()
+                if self._last_frame_ts is not None:
+                    delta = ts - self._last_frame_ts
+                    if delta > 1e-4:
+                        inst_fps = 1.0 / delta
+                        self._fps_samples.append(inst_fps)
+                        if len(self._fps_samples) > 30:
+                            self._fps_samples.pop(0)
+                        self.actual_fps = float(np.median(self._fps_samples))
+                self._last_frame_ts = ts
+                self.last_capture_time = ts
+
+                frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+                self.slot.put(frame_rgb, self.capture_sequence_id, ts)
+                self.capture_sequence_id += 1
+            except Exception as exc:
+                self.latest_exception = exc
+                time.sleep(0.01)
+
+    def stop(self) -> None:
+        """Deterministically stop capture and release the hardware handle."""
+        self._running = False
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
+            self._thread = None
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
+            self._cap = None
+
+    @property
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive() and self._running
+
+    @property
+    def dropped_frames(self) -> int:
+        return self.slot.dropped_count

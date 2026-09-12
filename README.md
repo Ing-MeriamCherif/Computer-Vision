@@ -1,49 +1,122 @@
 # Computer-Vision-NRW
 
-The live integration combines the geometry subsystem with the actual colleague
-hand/depth sources preserved under `integrations/` (with commit provenance),
-plus adapters that keep the shared live-state contracts. Phases 1–5 of the
-NRW AI & Vision Challenge geometry subsystem are implemented in `geometry/`. It provides a calibrated camera model, explicit
-resize/crop/letterbox transforms, vectorized depth-to-camera-space
-reconstruction, camera-facing surface normals, discontinuity-aware neighbor
-selection, spatial confidence, state contracts, optional OpenCV checkerboard
-calibration, deterministic synthetic validation tools, short-term temporal
-reconstruction with motion reprojection, history rejection, relative-depth
-alignment, confidence-aware fusion, and production integration/diagnostics.
+National Robotics Week (NRW) AI & Vision Challenge — competition repository.
 
-The camera convention is `+X` image-right, `+Y` image-down, and `+Z` forward.
-Relative depth is accepted as an arbitrary but consistent Z scale; inverse
-depth is rejected until a calibrated conversion is supplied.
+A **native, live, low-latency, camera-first, GPU-first** computer-vision system that operates continuously from a physical camera feed, performing real-time depth estimation, surface normal reconstruction, hand-driven relighting, and persistent 3D geometry mapping.
+
+---
+
+## Quick Start
 
 ```bash
-python3 -m pytest -q
-python3 main.py --shape tilted
+# Headless smoke test (CI — no camera or display required)
+python main.py --smoke
+
+# Full native live application (default: multilight mode)
+python main.py
+
+# Specify camera device, quality, fullscreen
+python main.py --camera 0 --quality high --fullscreen
+
+# Use colleague depth model
+python main.py --depth-backend colleague
+
+# All options
+python main.py --help
 ```
 
-See [`docs/geometry-phase1.md`](docs/geometry-phase1.md) for calibration and
-demo commands and [`docs/geometry-phase2.md`](docs/geometry-phase2.md) for
-normal algorithms, [`docs/geometry-phase3.md`](docs/geometry-phase3.md) for
-temporal contracts, and [`docs/geometry-integration.md`](docs/geometry-integration.md)
-plus [`docs/geometry-performance.md`](docs/geometry-performance.md) for Phase 4
-integration and benchmark guidance. The live application adds MediaPipe hand
-observations, real-depth palm back-projection, two-light diffuse/specular
-shading, and a low-cost geometry-aware screen-space shadow pass as adapters over
-the stable `DepthState`/`GeometryState` contracts.
+---
 
-Phase 4 tools: `python3 -m tools.geometry_benchmark --json`,
-`python3 -m tools.geometry_stress`, and `python3 -m tools.geometry_capabilities`.
+## Display Modes (keys 1–9)
 
-Phase 5 is optional persistent world geometry: PnP camera pose estimation and
-a bounded voxel-surfel map are available through `geometry.pose` and
-`geometry.persistent`, while `TemporalGeometryEngine` remains the safe default.
-See [`docs/geometry-phase5.md`](docs/geometry-phase5.md) and run
-`python3 -m tools.persistent_geometry_demo` for a deterministic headless demo.
+| Key | Mode | Description |
+|-----|------|-------------|
+| `1` | FEED | Raw camera RGB |
+| `2` | DEPTH | Depth map (inferno colormap) |
+| `3` | NORMALS | Surface normals (RGB-encoded) |
+| `4` | DIFFUSE | Lambertian diffuse shading |
+| `5` | SPECULAR | Specular highlight shading |
+| `6` | SHADOWS | Ray-marched soft shadow shading |
+| `7` | GESTURE | Hand skeleton overlay |
+| `8` | MULTILIGHT | Hand-driven dual lighting (default) |
+| `9` | INFINITY | Persistent 3D surfel map overlay |
 
-Optional CUDA processing and the direct OpenCV live webcam interface are documented in
-[`docs/gpu-webcam.md`](docs/gpu-webcam.md). The downloaded model and Python
-environment stay on the SATA checkout and are intentionally excluded from Git.
+**Keyboard controls**: `F` fullscreen · `D` HUD · `P` profile · `V` volumetrics · `S` shadows · `H` skeleton · `R` reset map · `Q/ESC` quit
 
-The challenge entry point is `python3 main.py`. Use
-`python3 main.py --smoke --shape tilted` for the deterministic geometry smoke
-test. The live hand model asset is expected at
-`models/hand_landmarker.task`; it remains ignored by Git like the depth model.
+---
+
+## Live Camera Acceptance Test
+
+```bash
+# 30-second soak with JSON report
+python -m tools.live_camera_acceptance --duration 30 --json-report report.json
+
+# Strict 5-minute soak
+python -m tools.live_camera_acceptance --soak --duration 300 --min-render-fps 28
+```
+
+---
+
+## Tests
+
+```bash
+python -m pytest                     # all 190+ tests
+python -m pytest -q --tb=short       # compact output
+python -m pytest tests/test_native_live_integration.py  # integration tests only
+```
+
+---
+
+## Geometry Stack (Phases 1–5)
+
+The `geometry/` package implements the complete calibrated geometry pipeline:
+
+| Phase | Features |
+|-------|---------|
+| 1 | Calibrated camera model · depth → camera-space reconstruction · coordinate transforms |
+| 2 | Camera-facing surface normals · edge-aware / multi-scale · discontinuity protection · spatial confidence |
+| 3 | Optical flow (DIS/Farneback) · forward/backward consistency · depth-aware temporal warping · temporal fusion |
+| 4 | Hand tracking (MediaPipe) · palm depth fusion · diffuse/specular/shadow shading · hand-driven lights |
+| 5 | PnP-RANSAC pose estimation · bounded voxel surfel map · persistent geometry · async sidecar |
+
+**Depth convention**: forward-Z, median normalized to ~2.0 m, `DepthScaleMode.RELATIVE`.  
+**Camera convention**: `+X` image-right, `+Y` image-down, `+Z` forward.
+
+---
+
+## Architecture
+
+```
+Physical Camera ─→ LatestFrameSlot (cap=1) ─┬─→ DepthWorker (CUDA) ─→ GeometryState
+                                             ├─→ HandTrackingWorker  ─→ GestureState ─→ LightState
+                                             └─→ NativeOpenGLWindow  ←─ shade_geometry()
+                                                        ↑
+                                              PersistentMapWorker (async, 2-10 Hz)
+```
+
+See [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) for the full thread model.
+
+---
+
+## Team Integration
+
+This repository integrates work from two team members:
+
+- **Rami Troudi** — geometry stack (Phases 1–5), native live app, persistent mapping
+- **Mariem Cherif** — colleague depth provider ([PR #2](https://github.com/Ing-MeriamCherif/Computer-Vision/pull/2))
+
+See [`docs/team-integration.md`](docs/team-integration.md) for integration contracts and contribution guide.
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|-----|---------|
+| [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) | Thread model, frame ID contract, component reference |
+| [`docs/team-integration.md`](docs/team-integration.md) | Shared contracts, contribution workflow |
+| [`docs/geometry-phase1.md`](docs/geometry-phase1.md) | Calibration, backprojection |
+| [`docs/geometry-phase2.md`](docs/geometry-phase2.md) | Normal algorithms |
+| [`docs/geometry-phase3.md`](docs/geometry-phase3.md) | Temporal fusion contracts |
+| [`docs/geometry-phase5.md`](docs/geometry-phase5.md) | Persistent geometry, surfel map |
+| [`docs/geometry-performance.md`](docs/geometry-performance.md) | Benchmark guidance |

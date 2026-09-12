@@ -66,6 +66,8 @@ class PoseEstimateResult:
     correspondence_count: int = 0
     spatial_coverage: float = 0.0
     reason: str = "none"
+    source_frame_id: int | str | None = None
+    target_frame_id: int | str | None = None
 
     def __post_init__(self) -> None:
         transform = np.asarray(self.T_current_from_previous, dtype=np.float32)
@@ -89,14 +91,13 @@ class PoseEstimateResult:
 
 @dataclass(frozen=True, slots=True)
 class PoseCorrespondences:
-    """Spatially stratified 3D-2D correspondences for PnP."""
-    object_points: np.ndarray  # (N, 3) in previous camera coordinates
-    current_pixels: np.ndarray  # (N, 2) in current frame
-    previous_pixels: np.ndarray  # (N, 2) in previous frame
+    object_points: np.ndarray  # (N, 3) 3D camera coordinates in previous frame
+    current_pixels: np.ndarray  # (N, 2) 2D pixel coordinates in current frame
+    previous_pixels: np.ndarray  # (N, 2) 2D pixel coordinates in previous frame
     weights: np.ndarray  # (N,) quality weights in [0, 1]
-    source_indices: tuple[np.ndarray, np.ndarray] | None = None  # (row_indices, col_indices)
-    correspondence_count: int = 0
-    spatial_coverage: float = 0.0
+    source_indices: tuple[np.ndarray, np.ndarray]  # (rows, cols) in previous frame
+    correspondence_count: int
+    spatial_coverage: float  # fraction of image area covered by bounding box
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +114,13 @@ class PoseConfig:
     min_motion_confidence: float = 0.35
 
 
-def _invalid(count: int, reason: str, coverage: float = 0.0) -> PoseEstimateResult:
+def _invalid(
+    count: int,
+    reason: str,
+    coverage: float = 0.0,
+    source_frame_id: int | str | None = None,
+    target_frame_id: int | str | None = None,
+) -> PoseEstimateResult:
     return PoseEstimateResult(
         False,
         np.eye(4, dtype=np.float32),
@@ -124,6 +131,8 @@ def _invalid(count: int, reason: str, coverage: float = 0.0) -> PoseEstimateResu
         correspondence_count=count,
         spatial_coverage=coverage,
         reason=reason,
+        source_frame_id=source_frame_id,
+        target_frame_id=target_frame_id,
     )
 
 
@@ -177,11 +186,13 @@ def extract_pose_correspondences(
     )
     mask &= geom_conf >= float(min_geometry_confidence)
 
-    motion_conf = (
-        np.asarray(motion.confidence, dtype=np.float32)
-        if (getattr(motion, "confidence", None) is not None and motion.confidence is not None)
-        else np.ones((h, w), dtype=np.float32)
-    )
+    motion_conf = None
+    if getattr(motion, "flow_confidence", None) is not None and motion.flow_confidence is not None:
+        motion_conf = np.asarray(motion.flow_confidence, dtype=np.float32)
+    elif getattr(motion, "confidence", None) is not None and motion.confidence is not None:
+        motion_conf = np.asarray(motion.confidence, dtype=np.float32)
+    else:
+        motion_conf = np.ones((h, w), dtype=np.float32)
     mask &= motion_conf >= float(min_motion_confidence)
 
     finite_pts = np.isfinite(pts_3d).all(axis=-1) & (pts_3d[..., 2] > 0)
@@ -329,6 +340,8 @@ class PoseEstimator:
         image_points: np.ndarray,
         *,
         camera: CameraModel | None = None,
+        source_frame_id: int | str | None = None,
+        target_frame_id: int | str | None = None,
     ) -> PoseEstimateResult:
         points3d = np.asarray(object_points, dtype=np.float32)
         pixels = np.asarray(image_points, dtype=np.float32)
@@ -337,20 +350,20 @@ class PoseEstimator:
         finite = np.isfinite(points3d).all(axis=1) & np.isfinite(pixels).all(axis=1)
         points3d, pixels = points3d[finite], pixels[finite]
         if len(points3d) < self.min_correspondences:
-            return _invalid(len(points3d), "too_few_correspondences")
+            return _invalid(len(points3d), "too_few_correspondences", source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         cam = camera or self.camera
         coverage = float(np.prod(np.clip((pixels.max(axis=0) - pixels.min(axis=0)) / np.array([cam.width, cam.height]), 0.0, 1.0)))
         if coverage < self.min_spatial_coverage:
-            return _invalid(len(points3d), "insufficient_spatial_coverage", coverage)
+            return _invalid(len(points3d), "insufficient_spatial_coverage", coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         centered = pixels - pixels.mean(axis=0, keepdims=True)
         singular = np.linalg.svd(centered, compute_uv=False)
         if len(singular) < 2 or singular[1] / max(singular[0], 1e-6) < 0.01:
-            return _invalid(len(points3d), "near_collinear_correspondences", coverage)
+            return _invalid(len(points3d), "near_collinear_correspondences", coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         points3d, pixels = self._sample(points3d, pixels, self.max_samples)
         try:
             import cv2
         except ImportError:
-            return _invalid(len(points3d), "opencv_unavailable", coverage)
+            return _invalid(len(points3d), "opencv_unavailable", coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         try:
             ok, rvec, tvec, inliers = cv2.solvePnPRansac(
                 points3d.astype(np.float64),
@@ -363,9 +376,9 @@ class PoseEstimator:
                 flags=cv2.SOLVEPNP_ITERATIVE,
             )
         except cv2.error:
-            return _invalid(len(points3d), "pnp_failed", coverage)
+            return _invalid(len(points3d), "pnp_failed", coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         if not ok or inliers is None or len(inliers) < self.min_inliers:
-            return _invalid(len(points3d), "insufficient_inliers", coverage)
+            return _invalid(len(points3d), "insufficient_inliers", coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
         rotation, _ = cv2.Rodrigues(rvec)
         transform = np.eye(4, dtype=np.float32)
         transform[:3, :3] = rotation.astype(np.float32)
@@ -392,6 +405,8 @@ class PoseEstimator:
             p95,
             len(points3d),
             coverage,
+            source_frame_id=source_frame_id,
+            target_frame_id=target_frame_id,
         )
 
     def estimate_from_correspondences(
@@ -399,11 +414,13 @@ class PoseEstimator:
         correspondences: PoseCorrespondences,
         *,
         camera: CameraModel | None = None,
+        source_frame_id: int | str | None = None,
+        target_frame_id: int | str | None = None,
     ) -> PoseEstimateResult:
         """Estimate camera motion from precomputed PoseCorrespondences."""
         if correspondences.correspondence_count < self.min_correspondences:
-            return _invalid(correspondences.correspondence_count, "too_few_correspondences", correspondences.spatial_coverage)
-        return self.estimate(correspondences.object_points, correspondences.current_pixels, camera=camera)
+            return _invalid(correspondences.correspondence_count, "too_few_correspondences", correspondences.spatial_coverage, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
+        return self.estimate(correspondences.object_points, correspondences.current_pixels, camera=camera, source_frame_id=source_frame_id, target_frame_id=target_frame_id)
 
     def estimate_from_states(
         self,
@@ -425,7 +442,14 @@ class PoseEstimator:
             min_motion_confidence=min_mot,
             max_samples=self.max_samples,
         )
-        return self.estimate_from_correspondences(corr, camera=current_camera or self.camera)
+        source_id = getattr(previous_geometry, "source_frame_id", None)
+        target_id = getattr(motion, "target_frame_id", None)
+        return self.estimate_from_correspondences(
+            corr,
+            camera=current_camera or self.camera,
+            source_frame_id=source_id,
+            target_frame_id=target_id,
+        )
 
     def estimate_from_flow(
         self,
@@ -474,6 +498,8 @@ def compute_rigid_flow_residual(
     forward_flow: np.ndarray,
     T_current_from_previous: np.ndarray,
     valid_mask: np.ndarray | None = None,
+    *,
+    current_domain: bool = False,
 ) -> np.ndarray:
     """Compute per-pixel discrepancy between observed optical flow and rigid camera motion."""
     h, w = camera.height, camera.width
@@ -522,6 +548,21 @@ def compute_rigid_flow_residual(
     rigid_pixels = camera.project(curr_pts[in_front])
     diff = np.linalg.norm(rigid_pixels - obs_pixels, axis=1)
 
+    if current_domain:
+        res_curr = np.full((h, w), np.nan, dtype=np.float32)
+        uc = np.rint(obs_pixels[:, 0]).astype(np.int32)
+        vc = np.rint(obs_pixels[:, 1]).astype(np.int32)
+        inside_curr = (uc >= 0) & (uc < w) & (vc >= 0) & (vc < h)
+        if inside_curr.any():
+            uc_in = uc[inside_curr]
+            vc_in = vc[inside_curr]
+            diff_in = diff[inside_curr].astype(np.float32)
+            for idx in range(len(uc_in)):
+                x, y, d = uc_in[idx], vc_in[idx], diff_in[idx]
+                if np.isnan(res_curr[y, x]) or d > res_curr[y, x]:
+                    res_curr[y, x] = d
+        return res_curr
+
     res_flat = residual.reshape(-1)
     res_flat[front_indices] = diff.astype(np.float32)
     return residual
@@ -562,9 +603,11 @@ class StaticGeometryResult:
 def classify_static_geometry(
     previous_geometry,
     motion,
-    pose_result: PoseEstimateResult | CameraPoseState,
+    pose_result: PoseEstimateResult | CameraPoseState | np.ndarray,
     camera: CameraModel | None = None,
     *,
+    current_geometry=None,
+    current_domain: bool = False,
     threshold: float = 1.5,
     tau: float = 2.0,
     min_static_confidence: float = 0.5,
@@ -572,21 +615,38 @@ def classify_static_geometry(
     """Classify per-pixel static vs dynamic geometry using rigid motion residual."""
     cam = camera or previous_geometry.camera
     h, w = cam.height, cam.width
-    t_mat = (
-        pose_result.T_current_from_previous
-        if isinstance(pose_result, PoseEstimateResult)
-        else pose_result.T_world_from_camera
-    )
+    if isinstance(pose_result, PoseEstimateResult):
+        t_mat = pose_result.T_current_from_previous
+    elif isinstance(pose_result, CameraPoseState):
+        if hasattr(pose_result, "T_current_from_previous"):
+            t_mat = getattr(pose_result, "T_current_from_previous")
+        else:
+            raise ValueError(
+                "classify_static_geometry requires relative transform T_current_from_previous, not T_world_from_camera"
+            )
+    elif isinstance(pose_result, np.ndarray) and pose_result.shape == (4, 4):
+        t_mat = pose_result
+    else:
+        raise TypeError(f"Unsupported pose_result type: {type(pose_result).__name__}")
+
+    use_curr = current_domain or (current_geometry is not None)
     res = compute_rigid_flow_residual(
         cam,
         previous_geometry.positions_3d,
         motion.forward_flow,
         t_mat,
         valid_mask=previous_geometry.valid_mask,
+        current_domain=use_curr,
     )
-    spatial_conf = getattr(previous_geometry, "spatial_confidence", None)
-    if spatial_conf is None:
-        spatial_conf = getattr(previous_geometry, "confidence", None)
+    if use_curr and current_geometry is not None:
+        spatial_conf = getattr(current_geometry, "spatial_confidence", None)
+        if spatial_conf is None:
+            spatial_conf = getattr(current_geometry, "confidence", None)
+    else:
+        spatial_conf = getattr(previous_geometry, "spatial_confidence", None)
+        if spatial_conf is None:
+            spatial_conf = getattr(previous_geometry, "confidence", None)
+
     conf = compute_static_confidence(
         res,
         spatial_conf,

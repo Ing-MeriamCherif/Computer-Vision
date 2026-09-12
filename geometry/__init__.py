@@ -52,10 +52,14 @@ from .persistent import (
 )
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
-from .hand_control import GestureState, HandControlEngine, HandObservation, create_hand_tracker
+from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv
 from .colleague_depth import ColleagueDepthProvider
-from .lighting import LightState, light_from_palm, sample_depth, shade_geometry
+from .lighting import LightState, light_from_palm, render_volumetric_scattering, sample_depth, shade_geometry
 from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestFrameBuffer
+from .camera_worker import CameraCaptureWorker, LatestFrameSlot
+from .persistent_worker import PersistentMapWorker
+from .native_app import AppMode, NativeLiveApp, QualityProfile
+from .native_window import NativeOpenGLWindow
 
 __all__ = [
     "CameraModel",
@@ -120,6 +124,8 @@ __all__ = [
     "DepthAnythingProvider",
     "DepthInferenceDiagnostics",
     "HandObservation",
+    "TrackedHand",
+    "transform_hand_uv",
     "GestureState",
     "HandControlEngine",
     "create_hand_tracker",
@@ -128,8 +134,16 @@ __all__ = [
     "light_from_palm",
     "sample_depth",
     "shade_geometry",
+    "render_volumetric_scattering",
     "FramePacket",
     "LatestFrameBuffer",
     "LatestDepthBuffer",
     "DepthWorker",
+    "LatestFrameSlot",
+    "CameraCaptureWorker",
+    "PersistentMapWorker",
+    "NativeLiveApp",
+    "AppMode",
+    "QualityProfile",
+    "NativeOpenGLWindow",
 ]
