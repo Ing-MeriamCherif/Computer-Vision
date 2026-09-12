@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import threading
 import time
 from dataclasses import asdict
@@ -19,12 +20,16 @@ LIVE_OUTPUT_WIDTH = 256
 LIVE_OUTPUT_HEIGHT = 192
 LIVE_DISPLAY_WIDTH = 640
 LIVE_DISPLAY_HEIGHT = 480
+# Depth and geometry may run below the transport cadence; the renderer keeps
+# consuming the newest validated state between updates (with age exposed in
+# diagnostics) as required by the challenge's temporal architecture.
+LIVE_GEOMETRY_PERIOD = 2
 
 from geometry import (
-    CameraModel, CameraPoseState, DepthAnythingProvider, OpenCVFlowProvider,
-    PersistentGeometryMapper, PoseEstimator, SurfelMap, TemporalConfig,
+    CameraModel, CameraPoseState, DepthAnythingProvider, DepthWorker, LatestDepthBuffer, LatestFrameBuffer, OpenCVFlowProvider,
+    GestureState, HandControlEngine, PersistentGeometryMapper, PoseEstimator, SurfelMap, TemporalConfig,
     TemporalGeometryEngine, TorchGeometryBackend, normals_to_rgb,
-    torch_cuda_status, validate_renderer_geometry,
+    light_from_palm, shade_geometry, torch_cuda_status, validate_renderer_geometry,
 )
 
 
@@ -43,7 +48,11 @@ def _compose_live_view(source_rgb: np.ndarray, outputs: tuple) -> np.ndarray:
     """Compose all live effects into one WebRTC video frame."""
     import cv2
 
-    depth, normals, confidence, persistent, stats = outputs
+    if len(outputs) >= 6:
+        depth, normals, confidence, persistent, relit, stats = outputs
+    else:
+        depth, normals, confidence, persistent, stats = outputs
+        relit = persistent
     width, height = LIVE_OUTPUT_WIDTH // 2, LIVE_OUTPUT_HEIGHT // 2
 
     def panel(image: np.ndarray, label: str) -> np.ndarray:
@@ -52,8 +61,8 @@ def _compose_live_view(source_rgb: np.ndarray, outputs: tuple) -> np.ndarray:
         cv2.putText(view, label, (7, 17), cv2.FONT_HERSHEY_SIMPLEX, 0.46, (255, 255, 255), 1, cv2.LINE_AA)
         return view
 
-    fourth = persistent if stats.get("mode") == "Phase 5 persistent" else confidence
-    fourth_label = "Persistent reprojection" if stats.get("mode") == "Phase 5 persistent" else "Renderer confidence"
+    fourth = relit
+    fourth_label = "Live relighting (diffuse + specular + shadows)"
     canvas = np.vstack(
         (
             np.hstack((panel(source_rgb, "Live webcam"), panel(depth, "Relative depth"))),
@@ -81,10 +90,28 @@ class WebcamGeometrySession:
         # Keep more spatial detail than the old 256x192/140px throughput preset
         # while remaining within the live frame budget on the CUDA path.
         self.depth_provider = DepthAnythingProvider(model_path, input_size=192)
+        self.hand = HandControlEngine(max_hands=2, detect_every_n=3)
+        self._async_frames = LatestFrameBuffer()
+        self._async_depth = LatestDepthBuffer()
+        self._depth_worker: DepthWorker | None = None
+        self._last_depth_source: int | str | None = None
+        self._last_depth_state = None
+        self._last_geometry_state = None
+        # The bounded worker is available for deployments with a second GPU or
+        # a decoupled renderer. On this GTX 1650 Ti, sharing one CUDA context
+        # with the callback increases contention, so the default live profile
+        # keeps inference synchronous and exposes the async path opt-in.
+        self.async_depth = os.getenv("NRW_ASYNC_DEPTH", "0") == "1"
         self.gpu_backend: TorchGeometryBackend | None = None
         self.reset()
 
     def reset(self) -> str:
+        if self._depth_worker is not None:
+            self._depth_worker.stop()
+        self._depth_worker = None
+        self._last_depth_source = None
+        self._last_depth_state = None
+        self._last_geometry_state = None
         self.frame_id = 0
         self.camera = None
         self.temporal = None
@@ -93,9 +120,21 @@ class WebcamGeometrySession:
         self.flow = OpenCVFlowProvider(method="farneback", flow_scale=0.5)
         self.previous_rgb = None
         self.previous_geometry = None
+        self.hand.reset()
         self._metric_last_start: float | None = None
         self._metric_processed_fps: float | None = None
         return "Session reset; next frame anchors a new camera/world origin."
+
+    def close(self) -> None:
+        if self._depth_worker is not None:
+            self._depth_worker.stop()
+            self._depth_worker = None
+        self.hand.close()
+
+    def _ensure_async_depth(self) -> None:
+        if self._depth_worker is None:
+            self._depth_worker = DepthWorker(self.depth_provider.compute, self._async_frames, self._async_depth)
+            self._depth_worker.start()
 
     def _update_live_metrics(self, started: float, total_ms: float) -> dict[str, float | None]:
         """Update callback-rate metrics for the currently streamed frame.
@@ -185,7 +224,30 @@ class WebcamGeometrySession:
             height, width = rgb.shape[:2]
             self._configure(width, height)
             timestamp = self.frame_id / 30.0
-            depth_state = self.depth_provider.compute(rgb, self.frame_id, timestamp)
+            # Anchor the first frame synchronously, then let the depth branch's
+            # latest-frame worker run ahead without blocking the live renderer.
+            async_enabled = self.async_depth and mode == "CUDA current geometry" and use_cuda_geometry
+            if not async_enabled:
+                try:
+                    reuse_depth = (
+                        mode == "CUDA current geometry" and use_cuda_geometry
+                        and self._last_depth_state is not None
+                        and int(self.frame_id) - int(self._last_depth_state.source_frame_id) < LIVE_GEOMETRY_PERIOD
+                    )
+                except (TypeError, ValueError):
+                    reuse_depth = False
+                depth_state = self._last_depth_state if reuse_depth else self.depth_provider.compute(rgb, self.frame_id, timestamp)
+                self._last_depth_state = depth_state
+            elif self._last_geometry_state is None:
+                depth_state = self.depth_provider.compute(rgb, self.frame_id, timestamp)
+                self._ensure_async_depth()
+            else:
+                self._ensure_async_depth()
+                self._async_frames.put(rgb, self.frame_id, timestamp)
+                depth_state = self._async_depth.get()
+                if depth_state is None:
+                    depth_state = self.depth_provider.compute(rgb, self.frame_id, timestamp)
+            self._last_depth_state = depth_state
             motion = None
             prior = self.previous_geometry
             cuda_state = None
@@ -193,11 +255,29 @@ class WebcamGeometrySession:
             if mode == "CUDA current geometry" and use_cuda_geometry:
                 if self.gpu_backend is None:
                     self.gpu_backend = TorchGeometryBackend("auto")
-                cuda_state = self.gpu_backend.process_depth(depth_state.depth, self.camera, frame_id=self.frame_id, timestamp=timestamp, input_confidence=depth_state.confidence)
+                source_changed = depth_state.source_frame_id != self._last_depth_source
+                try:
+                    enough_time = self._last_geometry_state is None or (int(self.frame_id) - int(self._last_geometry_state.source_frame_id)) >= LIVE_GEOMETRY_PERIOD
+                except (TypeError, ValueError):
+                    enough_time = True
+                if source_changed and enough_time:
+                    cuda_state = self.gpu_backend.process_depth(depth_state.depth, self.camera, frame_id=depth_state.source_frame_id, timestamp=depth_state.timestamp, input_confidence=depth_state.confidence)
+                    self._last_depth_source = depth_state.source_frame_id
+                    self._last_geometry_state = cuda_state
+                else:
+                    cuda_state = self._last_geometry_state
                 state = cuda_state
             else:
                 motion = self._motion(rgb, timestamp)
                 state = self.temporal.update(rgb, self.camera, self.frame_id, timestamp, depth_state, motion)
+            gesture = self.hand.update(rgb, timestamp, self.frame_id)
+            lights = []
+            for hand_index, observation in enumerate(gesture.hands):
+                light = light_from_palm(state, observation.palm_uv, observation.confidence,
+                                        source_hand=hand_index, timestamp=timestamp)
+                if light is not None:
+                    lights.append(light)
+            relit_image, lighting_stats = shade_geometry(rgb, state, lights, shadows=True)
             display_state = state
             persistent = None
             pose = None
@@ -232,14 +312,32 @@ class WebcamGeometrySession:
                 "temporal": asdict(self.temporal.last_diagnostics) if self.temporal.last_diagnostics is not None else None,
                 "pose": None if pose is None else {"valid": bool(pose.valid), "confidence": float(pose.confidence), "inliers": int(pose.inlier_count), "reprojection_error": float(pose.reprojection_error), "reason": getattr(pose, "reason", "none")},
                 "persistent": None if persistent is None else {"surfel_count": persistent.surfel_count, "coverage_percent": float(persistent.projected_valid.mean() * 100), **persistent.map_stats},
+                "hand": {
+                    "backend": gesture.backend,
+                    "count": len(gesture.hands),
+                    "stale": gesture.stale,
+                    "tracker_ms": gesture.tracker_ms,
+                    "confidence": [float(hand.confidence) for hand in gesture.hands],
+                    "palm_uv": [[float(x), float(y)] for hand in gesture.hands for x, y in [hand.palm_uv]],
+                },
+                "lighting": lighting_stats,
                 "renderer_contract_valid": True if report is None else report.valid,
                 "renderer_contract_errors": [] if report is None else list(report.errors),
                 "total_ms": total_ms,
                 "latency_ms": total_ms,
             }
+            if depth_state is not None:
+                try:
+                    stats["depth_age_frames"] = max(0, int(self.frame_id) - int(depth_state.source_frame_id))
+                except (TypeError, ValueError):
+                    stats["depth_age_frames"] = None
+            try:
+                stats["geometry_age_frames"] = max(0, int(self.frame_id) - int(state.source_frame_id))
+            except (TypeError, ValueError):
+                stats["geometry_age_frames"] = None
             stats["metrics"] = self._update_live_metrics(started, total_ms)
             self.frame_id += 1
-            return depth_image, normals_image, confidence_image, persistent_image, stats
+            return depth_image, normals_image, confidence_image, persistent_image, relit_image, stats
 
 
 def _format_live_metrics(stats: dict) -> str:
@@ -257,7 +355,10 @@ def _format_live_metrics(stats: dict) -> str:
         f"Frame: **{stats.get('frame_id', '—')}** &nbsp;|&nbsp; Mode: **{stats.get('mode', '—')}** &nbsp;|&nbsp; "
         f"Depth: **{float(depth.get('inference_ms', 0.0)):.1f} ms** &nbsp;|&nbsp; "
         f"CUDA geometry: **{float(cuda.get('backprojection_ms', 0.0) or 0.0) + float(cuda.get('normals_ms', 0.0) or 0.0):.1f} ms** &nbsp;|&nbsp; "
-        f"Map: **{map_text}**"
+        f"Map: **{map_text}**  \n"
+        f"Hand: **{stats.get('hand', {}).get('backend', 'n/a')}** ({int(stats.get('hand', {}).get('count', 0))}) &nbsp;|&nbsp; "
+        f"Lighting: **{float(stats.get('lighting', {}).get('lighting_ms', 0.0)):.1f} ms** &nbsp;|&nbsp; "
+        f"Depth age: **{stats.get('depth_age_frames', 'n/a')}**"
     )
 
 
@@ -315,8 +416,8 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
         def process_with_metrics(frame, selected_mode, cuda_enabled):
             outputs = session.process(frame, selected_mode, cuda_enabled)
             if outputs[-1].get("status") == "waiting_for_camera":
-                return (*outputs, "**Live metrics**  \nWaiting for the webcam stream…")
-            return (*outputs[:4], outputs[4], _format_live_metrics(outputs[4]))
+                return (None, None, None, None, outputs[-1], "**Live metrics**  \nWaiting for the webcam stream…")
+            return (outputs[0], outputs[1], outputs[2], outputs[3], outputs[5], _format_live_metrics(outputs[5]))
 
         def process_live_frame(frame, selected_mode, cuda_enabled):
             import cv2

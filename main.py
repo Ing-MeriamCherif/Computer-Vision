@@ -1,11 +1,20 @@
-"""Phase 1 geometry smoke entry point.
+"""Challenge entry point.
 
-The complete challenge application will be integrated later. This entry point
-keeps ``python main.py`` useful now by running the deterministic geometry demo.
+``python main.py`` launches the live webcam/WebRTC application required by the
+challenge.  The deterministic geometry smoke test remains available with
+``python main.py --smoke`` for headless CI and numeric validation.
 """
 
+from __future__ import annotations
+
+import sys
+
 from tools.geometry_demo import main
+from tools.webcam_geometry_app import main as live_main
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if "--smoke" in sys.argv:
+        sys.argv.remove("--smoke")
+        raise SystemExit(main())
+    raise SystemExit(live_main())

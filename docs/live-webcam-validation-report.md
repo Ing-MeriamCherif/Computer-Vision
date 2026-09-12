@@ -164,3 +164,23 @@ CUDA-current remains near the 30 FPS live-preview target in the browser gate
 uses the snapshot/queue transport that caused the earlier 0.24–3 FPS display.
 Temporal and persistent modes remain available, but their heavier CPU
 algorithms are not claimed as full-rate live processing.
+
+## Merged hand/depth/lighting verification
+
+The companion hand branches were integrated at the state boundary rather than
+as a second application. MediaPipe Tasks selected the local
+`models/hand_landmarker.task` backend, while the depth branch's latest-frame
+worker was corrected to carry frame IDs and skip duplicate packets. The live
+session now exposes hand backend/count/confidence, depth age, geometry age, and
+lighting time in diagnostics. Real palm depth is sampled from `GeometryState`
+and drives up to two diffuse/specular lights plus the bounded screen-space
+visibility pass.
+
+On the SATA checkout, a fresh physical `/dev/video0` run processed eight
+consecutive frames after warm-up at **32.4 FPS** (30.9 ms mean callback), with
+depth/geometry ages bounded to one frame and all renderer contracts valid. The
+browser WebRTC run rendered the four-panel live result and reported **15 FPS /
+24.7 ms** on the hardware media track; this is lower than the direct V4L2
+callback because the in-app camera transport negotiated a 15 FPS source, not
+because a recording was used. The hand backend was active (`mediapipe-tasks`),
+with zero detections in that particular scene.

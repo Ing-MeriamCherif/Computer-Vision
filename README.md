@@ -1,7 +1,8 @@
 # Computer-Vision-NRW
 
-Phases 1–5 of the NRW AI & Vision Challenge geometry subsystem are
-implemented in `geometry/`. It provides a calibrated camera model, explicit
+The live integration combines the geometry subsystem with hand-control and
+lighting adapters from the companion Computer-Vision work. Phases 1–5 of the
+NRW AI & Vision Challenge geometry subsystem are implemented in `geometry/`. It provides a calibrated camera model, explicit
 resize/crop/letterbox transforms, vectorized depth-to-camera-space
 reconstruction, camera-facing surface normals, discontinuity-aware neighbor
 selection, spatial confidence, state contracts, optional OpenCV checkerboard
@@ -23,8 +24,10 @@ demo commands and [`docs/geometry-phase2.md`](docs/geometry-phase2.md) for
 normal algorithms, [`docs/geometry-phase3.md`](docs/geometry-phase3.md) for
 temporal contracts, and [`docs/geometry-integration.md`](docs/geometry-integration.md)
 plus [`docs/geometry-performance.md`](docs/geometry-performance.md) for Phase 4
-integration and benchmark guidance. Neural depth, hand tracking, lighting,
-shadows, and the final renderer remain outside this geometry core.
+integration and benchmark guidance. The live application adds MediaPipe hand
+observations, real-depth palm back-projection, two-light diffuse/specular
+shading, and a low-cost geometry-aware screen-space shadow pass as adapters over
+the stable `DepthState`/`GeometryState` contracts.
 
 Phase 4 tools: `python3 -m tools.geometry_benchmark --json`,
 `python3 -m tools.geometry_stress`, and `python3 -m tools.geometry_capabilities`.
@@ -38,3 +41,8 @@ See [`docs/geometry-phase5.md`](docs/geometry-phase5.md) and run
 Optional CUDA processing and the live webcam test interface are documented in
 [`docs/gpu-webcam.md`](docs/gpu-webcam.md). The downloaded model and Python
 environment stay on the SATA checkout and are intentionally excluded from Git.
+
+The challenge entry point is `python3 main.py`. Use
+`python3 main.py --smoke --shape tilted` for the deterministic geometry smoke
+test. The live hand model asset is expected at
+`models/hand_landmarker.task`; it remains ignored by Git like the depth model.

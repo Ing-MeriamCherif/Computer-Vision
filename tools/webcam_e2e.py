@@ -31,16 +31,18 @@ def main() -> int:
     session = WebcamGeometrySession()
     results = {}
     for mode in ("CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"):
-        depth, normals, confidence, persistent, stats = session.process(rgb, mode, True)
+        depth, normals, confidence, persistent, relit, stats = session.process(rgb, mode, True)
         slug = mode.lower().replace(" ", "-")
         cv2.imwrite(str(output / f"{slug}-depth.jpg"), cv2.cvtColor(depth, cv2.COLOR_RGB2BGR))
         cv2.imwrite(str(output / f"{slug}-normals.jpg"), cv2.cvtColor(normals, cv2.COLOR_RGB2BGR))
         if persistent is not None:
             cv2.imwrite(str(output / f"{slug}-persistent.jpg"), cv2.cvtColor(persistent, cv2.COLOR_RGB2BGR))
+        cv2.imwrite(str(output / f"{slug}-relit.jpg"), cv2.cvtColor(relit, cv2.COLOR_RGB2BGR))
         results[mode] = stats
     passed = all(item["status"] == "ok" and item["renderer_contract_valid"] for item in results.values())
     payload = {"webcam": args.device, "capture_shape": list(bgr.shape), "passed": passed, "modes": results}
     (output / "report.json").write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+    session.close()
     print(json.dumps(payload, indent=2))
     return 0 if passed else 1
 
