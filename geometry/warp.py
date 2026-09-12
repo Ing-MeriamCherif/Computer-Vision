@@ -130,7 +130,7 @@ def warp_depth_backward(
     if source_valid_mask is None:
         source_valid = np.isfinite(value) & (value > epsilon)
     else:
-        source_valid = np.asarray(source_valid_mask, dtype=bool)
+        source_valid = np.array(source_valid_mask, dtype=bool, copy=True)
         if source_valid.shape != (height, width):
             raise ValueError("source_valid_mask must have shape (H, W)")
         source_valid &= np.isfinite(value) & (value > epsilon)

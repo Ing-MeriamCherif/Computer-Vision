@@ -122,3 +122,12 @@ def test_warp_depth_backward_validation_and_rejections() -> None:
     assert not valid.any()
     assert np.isnan(warped).all()
     assert np.all(conf == 0.0)
+
+
+def test_depth_source_valid_mask_is_not_mutated() -> None:
+    depth = np.ones((2, 3), dtype=np.float32)
+    depth[0, 1] = np.nan
+    source_mask = np.ones((2, 3), dtype=bool)
+    flow = np.zeros((2, 3, 2), dtype=np.float32)
+    warp_depth_backward(depth, flow, source_mask)
+    assert source_mask.all()

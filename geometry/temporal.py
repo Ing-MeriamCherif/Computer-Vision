@@ -22,7 +22,6 @@ from .warp import warp_depth_backward, warp_field_backward
 @dataclass(frozen=True, slots=True)
 class TemporalConfig:
     flow_fb_threshold: float = 1.5
-    flow_confidence_sigma: float = 1.5
     photometric_threshold: float = 0.25
     depth_disagreement_threshold: float = 0.25
     depth_warp_discontinuity_threshold: float = 0.15
@@ -37,8 +36,8 @@ class TemporalConfig:
     normal_mode: NormalMode | str = NormalMode.EDGE_AWARE
 
     def __post_init__(self) -> None:
-        if self.flow_fb_threshold <= 0 or self.flow_confidence_sigma <= 0:
-            raise ValueError("flow thresholds must be positive")
+        if self.flow_fb_threshold <= 0:
+            raise ValueError("flow_fb_threshold must be positive")
         if self.photometric_threshold <= 0 or self.depth_disagreement_threshold <= 0:
             raise ValueError("consistency thresholds must be positive")
         if self.depth_warp_discontinuity_threshold <= 0:
