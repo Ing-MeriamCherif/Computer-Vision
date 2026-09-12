@@ -53,11 +53,14 @@ def main():
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--input-size", type=int, default=DEPTH_CONFIG.input_size)
     parser.add_argument("--device", default=DEPTH_CONFIG.device)
+    parser.add_argument("--metric", action="store_true", default=DEPTH_CONFIG.metric,
+                        help="Use metric model (depth in meters)")
     args = parser.parse_args()
 
     cap = open_camera(args.camera_index)
     model = DepthModel(backend=DEPTH_CONFIG.backend, device=args.device,
-                       input_size=args.input_size, fp16=DEPTH_CONFIG.fp16)
+                       input_size=args.input_size, fp16=DEPTH_CONFIG.fp16,
+                       metric=args.metric)
     print("Loading model...", end=" ", flush=True)
     model.warmup(iterations=3)
     print("ready.")
@@ -102,7 +105,16 @@ def main():
             frame_count += 1
 
             depth = state.depth_map
-            depth_u8 = (np.clip(depth, 0.0, 1.0) * 255.0).astype(np.uint8)
+            # For display: metric needs normalization, relative is already 0-1
+            if args.metric:
+                d_min, d_max = depth.min(), depth.max()
+                if d_max - d_min > 1e-6:
+                    depth_norm = (depth - d_min) / (d_max - d_min)
+                else:
+                    depth_norm = np.zeros_like(depth)
+                depth_u8 = (np.clip(depth_norm, 0.0, 1.0) * 255.0).astype(np.uint8)
+            else:
+                depth_u8 = (np.clip(depth, 0.0, 1.0) * 255.0).astype(np.uint8)
             colored = cv2.applyColorMap(depth_u8, cv2.COLORMAP_INFERNO)
             if colored.shape[:2] != frame.shape[:2]:
                 colored = cv2.resize(colored, (frame.shape[1], frame.shape[0]))
@@ -118,14 +130,16 @@ def main():
                 val = depth[sy, sx]
                 cv2.line(view, (cam_w, mouse_y), (view.shape[1], mouse_y), (0, 255, 255), 1)
                 cv2.line(view, (mouse_x, 0), (mouse_x, view.shape[0]), (0, 255, 255), 1)
-                label = f"({sx},{sy}) {val:.4f}"
+                unit = "m" if args.metric else ""
+                label = f"({sx},{sy}) {val:.4f}{unit}"
                 lx = mouse_x + 10 if mouse_x + 120 < view.shape[1] else mouse_x - 120
                 ly = mouse_y - 10 if mouse_y > 30 else mouse_y + 20
                 cv2.putText(view, label, (lx, ly),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
             # Stats overlay
-            cv2.putText(view, f"{args.input_size}x{args.input_size}  {ema_ms:.1f}ms  {ema_fps:.1f}FPS",
+            mode = "METRIC" if args.metric else "RELATIVE"
+            cv2.putText(view, f"{mode} {args.input_size}x{args.input_size}  {ema_ms:.1f}ms  {ema_fps:.1f}FPS",
                         (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
 
             cv2.imshow(win, view)

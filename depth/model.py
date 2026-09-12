@@ -31,11 +31,12 @@ class DepthModel:
         device: str = "cuda",
         input_size: int = 518,
         fp16: bool = True,
+        metric: bool = False,
     ):
         from depth.backends import get_backend
 
         BackendCls = get_backend(backend)
-        self._backend = BackendCls(device=device, input_size=input_size, fp16=fp16)
+        self._backend = BackendCls(device=device, input_size=input_size, fp16=fp16, metric=metric)
         self._backend_name = backend
 
     def warmup(self, iterations: int = 3) -> None:

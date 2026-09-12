@@ -25,6 +25,7 @@ class DepthConfig:
     fp16: bool = True
     input_size: int = 420
     target_fps: int = 30
+    metric: bool = False  # True = metric models (meters), False = relative (0-1)
 
 
 # Importable singleton — use `from depth.config import DEPTH_CONFIG`.

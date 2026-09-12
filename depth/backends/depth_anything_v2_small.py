@@ -8,36 +8,46 @@ import torch
 
 
 class DepthAnythingV2Small:
-    """Depth Anything V2 backend (Small / Base / Large).
+    """Depth Anything V2 backend (Small / Base / Large, relative or metric).
 
     Wraps any HuggingFace `depth-anything/Depth-Anything-V2-*-hf` model.
+    Set metric=True to use metric models (output in meters).
     Install: pip install transformers
     """
 
     scale_mode = "relative"
 
-    # Default model — overridden by Base/Large subclasses
+    # Relative model IDs (normalized 0-1 output)
     _model_id = "depth-anything/Depth-Anything-V2-Small-hf"
+    # Metric model IDs (output in meters)
+    _model_id_metric = "depth-anything/Depth-Anything-V2-Small-metric-hf"
 
     def __init__(
         self,
         device: str = "cuda",
         input_size: int = 518,
         fp16: bool = True,
+        metric: bool = False,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.input_size = input_size
         self.fp16 = fp16 and self.device.type == "cuda"
+        self.metric = metric
         self._pipe = None
+
+        # Override scale_mode based on metric flag
+        if metric:
+            self.scale_mode = "metric"
 
     def _load(self) -> None:
         if self._pipe is not None:
             return
         from transformers import pipeline
 
+        model_id = self._model_id_metric if self.metric else self._model_id
         self._pipe = pipeline(
             task="depth-estimation",
-            model=self._model_id,
+            model=model_id,
             device=0 if self.device.type == "cuda" else -1,
             torch_dtype=torch.float16 if self.fp16 else torch.float32,
         )
@@ -57,7 +67,9 @@ class DepthAnythingV2Small:
             frame: (H, W, 3) uint8 BGR image.
 
         Returns:
-            depth_map: (H, W) float32, values in [0, 1] range (relative).
+            depth_map: (H, W) float32.
+                relative mode: values in [0, 1], closer=1.0 (bright).
+                metric mode: depth in meters, closer=smaller values.
             valid_mask: (H, W) bool, True where depth is valid.
         """
         self._load()
@@ -67,10 +79,6 @@ class DepthAnythingV2Small:
         # HuggingFace pipeline expects PIL RGB image; input frame is BGR.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Honor input_size so --resolutions actually changes inference load:
-        # 336 -> 336x336, 420 -> 420x420, 518 -> 518x518.
-        # Note: square resize distorts aspect ratio; fine for benchmarking,
-        # prefer the model's aspect-preserving processor for quality runs.
         resized = cv2.resize(
             rgb,
             (self.input_size, self.input_size),
@@ -89,15 +97,16 @@ class DepthAnythingV2Small:
         if depth_np.shape != (h_orig, w_orig):
             depth_np = cv2.resize(depth_np, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
 
-        # Normalize to [0, 1] — invert so closer = 1.0 (bright), farther = 0.0 (dark).
-        # Depth Anything outputs higher values for closer objects.
-        d_min, d_max = depth_np.min(), depth_np.max()
-        if d_max - d_min > 1e-6:
-            depth_np = 1.0 - (depth_np - d_min) / (d_max - d_min)
-        else:
-            depth_np = np.zeros_like(depth_np)
+        if not self.metric:
+            # Relative mode: normalize to [0, 1], invert so closer = 1.0 (bright)
+            d_min, d_max = depth_np.min(), depth_np.max()
+            if d_max - d_min > 1e-6:
+                depth_np = 1.0 - (depth_np - d_min) / (d_max - d_min)
+            else:
+                depth_np = np.zeros_like(depth_np)
+        # else: metric mode — keep raw meter values (no normalization)
 
-        # Valid mask: all pixels valid for monocular relative depth
+        # Valid mask: all pixels valid for monocular depth
         valid_mask = np.ones((h_orig, w_orig), dtype=bool)
 
         return depth_np, valid_mask
@@ -111,8 +120,10 @@ class DepthAnythingV2Small:
 class DepthAnythingV2Base(DepthAnythingV2Small):
     """Depth Anything V2 Base backend (97.5M params)."""
     _model_id = "depth-anything/Depth-Anything-V2-Base-hf"
+    _model_id_metric = "depth-anything/Depth-Anything-V2-Base-metric-hf"
 
 
 class DepthAnythingV2Large(DepthAnythingV2Small):
     """Depth Anything V2 Large backend (335.3M params)."""
     _model_id = "depth-anything/Depth-Anything-V2-Large-hf"
+    _model_id_metric = "depth-anything/Depth-Anything-V2-Large-metric-hf"

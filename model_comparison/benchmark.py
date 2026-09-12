@@ -26,6 +26,12 @@ MODELS = {
     "depth_anything_v2_large": "depth-anything/Depth-Anything-V2-Large-hf",
 }
 
+MODELS_METRIC = {
+    "depth_anything_v2_small_metric": "depth-anything/Depth-Anything-V2-Small-metric-hf",
+    "depth_anything_v2_base_metric": "depth-anything/Depth-Anything-V2-Base-metric-hf",
+    "depth_anything_v2_large_metric": "depth-anything/Depth-Anything-V2-Large-metric-hf",
+}
+
 
 def benchmark_model(
     model_id: str,
@@ -96,18 +102,22 @@ def main():
     parser.add_argument("--fp16", action="store_true", default=True)
     parser.add_argument("--no-fp16", dest="fp16", action="store_false")
     parser.add_argument("--num-frames", type=int, default=50)
+    parser.add_argument("--metric", action="store_true",
+                        help="Use metric models (depth in meters)")
     parser.add_argument("--models", default="all",
                         help="Comma-separated model names or 'all' (small,base,large)")
     parser.add_argument("--output", default="model_comparison/results.csv")
     args = parser.parse_args()
 
+    model_pool = MODELS_METRIC if args.metric else MODELS
+
     if args.models == "all":
-        models = MODELS
+        models = model_pool
     else:
         names = [n.strip() for n in args.models.split(",")]
-        models = {k: v for k, v in MODELS.items() if k in names}
+        models = {k: v for k, v in model_pool.items() if k in names}
         if not models:
-            raise SystemExit(f"Unknown models: {names}. Available: {list(MODELS.keys())}")
+            raise SystemExit(f"Unknown models: {names}. Available: {list(model_pool.keys())}")
 
     results = []
     for name, model_id in models.items():
