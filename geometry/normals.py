@@ -136,12 +136,18 @@ def _axis_tangent(
     tangent[both] = right[both] - left[both]
     tangent[choose_left] = left_tangent[choose_left]
     tangent[choose_right] = right_tangent[choose_right]
-    tangent_valid = both | choose_left | choose_right
+
     tangent_length = np.linalg.norm(tangent, axis=-1)
-    tangent_quality = tangent_length / (tangent_length + config.min_tangent_norm)
+
+    # Scale-invariant tangent quality:
+    # Normalize tangent length by local depth magnitude to obtain dimensionless relative span rho.
+    local_scale = np.maximum(np.abs(depth), 1e-12)
+    rho = tangent_length / local_scale
+    tangent_valid = (both | choose_left | choose_right) & (rho > 1e-12)
+    tangent_quality = rho / (rho + config.min_tangent_norm)
     tangent_quality = np.where(tangent_valid, np.clip(tangent_quality, 0.0, 1.0), 0.0)
-    support = left_pair.astype(np.float32) + right_pair.astype(np.float32)
-    support /= 2.0
+
+    support = (left_pair.astype(np.float32) + right_pair.astype(np.float32)) / 2.0
     discontinuity = np.maximum(left_jump, right_jump)
     discontinuity = np.clip(discontinuity / config.discontinuity_threshold, 0.0, 1.0)
     return tangent, tangent_valid, tangent_quality, np.stack((support, discontinuity), axis=-1)
@@ -159,7 +165,23 @@ def _estimate_at_radius(
     tangent_y, valid_y, quality_y, support_y = _axis_tangent(points, valid, depth, radius, 0, edge_aware, config)
     cross = np.cross(tangent_y, tangent_x)
     cross_norm = np.linalg.norm(cross, axis=-1)
-    valid_normals = valid_x & valid_y & (cross_norm >= config.min_cross_norm)
+
+    len_x = np.linalg.norm(tangent_x, axis=-1)
+    len_y = np.linalg.norm(tangent_y, axis=-1)
+    lengths_product = len_x * len_y
+
+    # Dimensionless cross-product conditioning: sin(theta) = ||Ty x Tx|| / (||Tx|| ||Ty||)
+    guard = 1e-12 * np.maximum(lengths_product, 1e-12)
+    conditioning_quality = cross_norm / (lengths_product + guard)
+    conditioning_quality = np.where(valid_x & valid_y, np.clip(conditioning_quality, 0.0, 1.0), 0.0)
+
+    valid_normals = (
+        valid_x
+        & valid_y
+        & (lengths_product > 1e-24)
+        & (cross_norm > 1e-12 * lengths_product)
+        & (conditioning_quality >= config.min_cross_norm)
+    )
     normals = np.zeros_like(points)
     safe_norm = np.where(valid_normals, cross_norm, 1.0)
     normals = cross / safe_norm[..., None]
@@ -167,16 +189,85 @@ def _estimate_at_radius(
     flip = np.sum(normals * points, axis=-1) > 0
     normals = np.where(flip[..., None], -normals, normals)
     normals = np.where(valid_normals[..., None], normals, np.nan)
+
     tangent_quality = np.sqrt(quality_x * quality_y)
     support = (support_x[..., 0] + support_y[..., 0]) / 2.0
-    cross_quality = cross_norm / (cross_norm + config.min_cross_norm)
     discontinuity = np.maximum(support_x[..., 1], support_y[..., 1])
-    confidence = support * tangent_quality * cross_quality
-    confidence *= 1.0 - config.edge_confidence_penalty * discontinuity
+    edge_penalty = 1.0 - config.edge_confidence_penalty * discontinuity
+    confidence = support * tangent_quality * conditioning_quality * edge_penalty
     confidence = np.where(valid_normals, np.clip(confidence, 0.0, 1.0), 0.0).astype(np.float32)
     return NormalResult(
-        normals.astype(np.float32), valid_normals, confidence, discontinuity.astype(np.float32),
-        np.full(valid.shape, radius, dtype=np.int16), support.astype(np.float32),
+        normals.astype(np.float32),
+        valid_normals,
+        confidence,
+        discontinuity.astype(np.float32),
+        np.full(valid.shape, radius, dtype=np.int16),
+        support.astype(np.float32),
+    )
+
+
+def _select_multiscale(
+    candidates: list[NormalResult],
+    acceptance_threshold: float,
+) -> NormalResult:
+    """Select normals across scale candidates with acceptance-first, best-fallback policy.
+
+    Pass 1 selects the first (smallest radius) valid candidate whose confidence
+    meets or exceeds ``acceptance_threshold``.
+    Pass 2 handles remaining unselected pixels by picking the valid candidate with
+    the highest confidence (breaking ties by preferring the smaller radius).
+    Pixels with no valid candidate remain invalid with zero confidence and radius 0.
+    """
+    if not candidates:
+        raise ValueError("candidates list cannot be empty")
+
+    shape = candidates[0].normal_valid_mask.shape
+    point_shape = (*shape, 3)
+
+    selected_normals = np.full(point_shape, np.nan, dtype=np.float32)
+    selected_valid = np.zeros(shape, dtype=bool)
+    selected_confidence = np.zeros(shape, dtype=np.float32)
+    selected_discontinuity = np.zeros(shape, dtype=np.float32)
+    selected_radius = np.zeros(shape, dtype=np.int16)
+    selected_support = np.zeros(shape, dtype=np.float32)
+
+    accepted_mask = np.zeros(shape, dtype=bool)
+
+    # Pass 1: first valid candidate meeting acceptance threshold
+    for candidate in candidates:
+        take = (~accepted_mask) & candidate.normal_valid_mask & (candidate.confidence >= acceptance_threshold)
+        selected_normals[take] = candidate.normals[take]
+        selected_confidence[take] = candidate.confidence[take]
+        selected_discontinuity[take] = candidate.discontinuity_strength[take]
+        selected_radius[take] = candidate.selected_radius[take]
+        selected_support[take] = candidate.neighbor_support[take]
+        selected_valid[take] = True
+        accepted_mask[take] = True
+
+    # Pass 2: fallback to valid candidate with maximum confidence
+    fallback_mask = ~accepted_mask
+    has_best = np.zeros(shape, dtype=bool)
+    best_confidence = np.full(shape, -1.0, dtype=np.float32)
+
+    for candidate in candidates:
+        eligible = fallback_mask & candidate.normal_valid_mask
+        better = eligible & ((~has_best) | (candidate.confidence > best_confidence))
+        selected_normals[better] = candidate.normals[better]
+        selected_confidence[better] = candidate.confidence[better]
+        selected_discontinuity[better] = candidate.discontinuity_strength[better]
+        selected_radius[better] = candidate.selected_radius[better]
+        selected_support[better] = candidate.neighbor_support[better]
+        selected_valid[better] = True
+        best_confidence[better] = candidate.confidence[better]
+        has_best[better] = True
+
+    return NormalResult(
+        normals=selected_normals,
+        normal_valid_mask=selected_valid,
+        confidence=selected_confidence,
+        discontinuity_strength=selected_discontinuity,
+        selected_radius=selected_radius,
+        neighbor_support=selected_support,
     )
 
 
@@ -203,40 +294,24 @@ def estimate_normals(
         result = _estimate_at_radius(points, valid, depth_arr, 1, True, config)
     else:
         candidates = [_estimate_at_radius(points, valid, depth_arr, radius, True, config) for radius in config.radii]
-        selected_normals = np.full_like(points, np.nan)
-        selected_valid = np.zeros(valid.shape, dtype=bool)
-        selected_confidence = np.zeros(valid.shape, dtype=np.float32)
-        selected_discontinuity = np.zeros(valid.shape, dtype=np.float32)
-        selected_radius = np.zeros(valid.shape, dtype=np.int16)
-        selected_support = np.zeros(valid.shape, dtype=np.float32)
-        for candidate in candidates:
-            take = (~selected_valid) & candidate.normal_valid_mask & (candidate.confidence >= config.multi_scale_acceptance)
-            selected_normals[take] = candidate.normals[take]
-            selected_confidence[take] = candidate.confidence[take]
-            selected_discontinuity[take] = candidate.discontinuity_strength[take]
-            selected_radius[take] = candidate.selected_radius[take]
-            selected_support[take] = candidate.neighbor_support[take]
-            selected_valid |= take
-        # If no radius reaches the acceptance score, retain the best valid one.
-        best_confidence = np.zeros(valid.shape, dtype=np.float32)
-        for candidate in candidates:
-            take = (~selected_valid) & candidate.normal_valid_mask & (candidate.confidence > best_confidence)
-            selected_normals[take] = candidate.normals[take]
-            selected_confidence[take] = candidate.confidence[take]
-            selected_discontinuity[take] = candidate.discontinuity_strength[take]
-            selected_radius[take] = candidate.selected_radius[take]
-            selected_support[take] = candidate.neighbor_support[take]
-            best_confidence[take] = candidate.confidence[take]
-            selected_valid |= take
-        result = NormalResult(selected_normals, selected_valid, selected_confidence, selected_discontinuity, selected_radius, selected_support)
+        result = _select_multiscale(candidates, config.multi_scale_acceptance)
     if input_confidence is not None:
         supplied = np.asarray(input_confidence, dtype=np.float32)
         if supplied.shape != valid.shape:
             raise ValueError("input_confidence must have shape (H, W)")
+        clamped_input = np.clip(np.nan_to_num(supplied, nan=0.0), 0.0, 1.0)
+        final_confidence = np.where(
+            result.normal_valid_mask,
+            np.clip(result.confidence * clamped_input, 0.0, 1.0),
+            0.0,
+        ).astype(np.float32)
         result = NormalResult(
-            result.normals, result.normal_valid_mask,
-            np.clip(result.confidence * np.clip(np.nan_to_num(supplied), 0.0, 1.0), 0.0, 1.0),
-            result.discontinuity_strength, result.selected_radius, result.neighbor_support,
+            result.normals,
+            result.normal_valid_mask,
+            final_confidence,
+            result.discontinuity_strength,
+            result.selected_radius,
+            result.neighbor_support,
         )
     return result
 
