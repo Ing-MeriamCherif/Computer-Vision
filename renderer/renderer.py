@@ -10,7 +10,15 @@ from pathlib import Path
 import numpy as np
 
 from contracts.render_types import MAX_LIGHTS, Light, RenderPacket
-from .config import LightOrbConfig, LightingConfig, SecondaryShadowMode, ShadowConfig, VolumetricConfig
+from .config import (
+    LightOrbConfig,
+    LightingConfig,
+    SecondaryShadowMode,
+    ShadowConfig,
+    StageQualityProfile,
+    VolumetricConfig,
+    stage_quality_settings,
+)
 from .orb_math import LightOrbProjection, evaluate_light_orb
 from .resources import RendererResources
 
@@ -211,6 +219,34 @@ class Renderer:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
         self.light_orb_enabled = enabled
+
+    def set_shadows_enabled(self, enabled: bool) -> None:
+        """Enable or disable both shadow layers immediately."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        self.shadow_configs = tuple(replace(config, shadow_enabled=enabled) for config in self.shadow_configs)
+
+    @property
+    def shadows_enabled(self) -> bool:
+        return any(config.shadow_enabled for config in self.shadow_configs)
+
+    def apply_stage_quality(self, profile: StageQualityProfile | str) -> None:
+        """Apply a complete profile; GPU targets resize only on profile changes."""
+        settings = stage_quality_settings(profile)
+        self.shadow_config = settings.shadow
+        self.secondary_shadow_mode = settings.secondary_shadow_mode
+        self.shadow_configs = secondary_shadow_configs(settings.shadow, settings.secondary_shadow_mode)
+        for light_index, shadow in enumerate(self.shadow_configs):
+            self._set_shadow_config_uniforms(self.composite_program, light_index, shadow)
+
+        self.volumetric_config = settings.volumetric
+        self.volumetric_enabled = settings.volumetric.volumetric_enabled
+        self.resources.reconfigure_volumetric(settings.volumetric)
+        self.volumetric_program["u_volumetric_samples"].value = settings.volumetric.volumetric_samples
+        self.volumetric_program["u_volumetric_density"].value = settings.volumetric.volumetric_density
+        self.volumetric_program["u_volumetric_intensity"].value = settings.volumetric.volumetric_intensity
+        self.volumetric_program["u_volumetric_decay"].value = settings.volumetric.volumetric_decay
+        self.light_orb_enabled = settings.light_orb_enabled
 
     @staticmethod
     def _draw(vertex_array, moderngl, query=None) -> None:

@@ -106,6 +106,11 @@ class RenderContractTests(unittest.TestCase):
         self.assertEqual(len(packet.lights.lights), 1)
         self.assertTrue(packet.lights.lights[0].active)
 
+    def test_empty_light_packet_is_supported_as_a_fail_safe(self) -> None:
+        packet = make_packet(lights=[])
+        self.assertEqual(packet.lights.lights, [])
+        self.assertEqual(Renderer._safe_light(None)[3], False)
+
     def test_second_light_can_be_inactive_without_changing_first(self) -> None:
         first = make_light((-0.4, 0.0, 0.75))
         second = Light(
@@ -133,6 +138,28 @@ class RenderContractTests(unittest.TestCase):
         np.testing.assert_allclose(position, (0.4, 0.0, 0.75))
         np.testing.assert_allclose(color, (1.0, 0.9, 0.8))
         self.assertEqual(intensity, 1.0)
+
+    def test_one_mutated_invalid_light_does_not_disable_the_other(self) -> None:
+        invalid = make_light()
+        invalid.color_rgb[1] = np.inf
+        valid = make_light((0.25, -0.1, 1.25))
+        first = Renderer._safe_light(invalid)
+        second = Renderer._safe_light(valid)
+        self.assertFalse(first[3])
+        self.assertTrue(second[3])
+        np.testing.assert_allclose(second[0], [0.25, -0.1, 1.25])
+
+    def test_rejects_nonfinite_depth_and_normal_payloads_even_when_masked(self) -> None:
+        depth = np.ones((2, 2), dtype=np.float32)
+        depth[0, 0] = np.nan
+        with self.assertRaisesRegex(ValueError, "depth_m must be finite"):
+            DepthFrame(depth, np.zeros((2, 2), dtype=np.bool_), 1, 1, 0, 0, 1)
+
+        normals = np.zeros((2, 2, 3), dtype=np.float32)
+        normals[:, :, 2] = -1.0
+        normals[0, 0, 0] = np.inf
+        with self.assertRaisesRegex(ValueError, "normals_camera"):
+            NormalFrame(normals, np.zeros((2, 2), dtype=np.bool_), 1)
 
     def test_rejects_wrong_light_coordinate_dtype_or_range(self) -> None:
         with self.assertRaisesRegex(TypeError, "float32"):

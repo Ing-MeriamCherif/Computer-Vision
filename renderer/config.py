@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 import math
 
@@ -46,6 +46,14 @@ class SecondaryShadowMode(str, Enum):
 
 
 class VolumetricQualityProfile(str, Enum):
+    SAFE = "safe"
+    BALANCED = "balanced"
+    HIGH = "high"
+
+
+class StageQualityProfile(str, Enum):
+    """Complete renderer presets used by the final demo and stage controls."""
+
     SAFE = "safe"
     BALANCED = "balanced"
     HIGH = "high"
@@ -218,3 +226,46 @@ class ShadowConfig:
             raise ValueError("depth_edge_threshold_m must be > 0")
         if self.shadow_softening_enabled and self.shadow_soft_radius <= 0.0:
             raise ValueError("shadow_soft_radius must be > 0 when softening is enabled")
+
+
+@dataclass(frozen=True)
+class StageQualitySettings:
+    """Resolved settings for one complete renderer quality profile."""
+
+    shadow: ShadowConfig
+    secondary_shadow_mode: SecondaryShadowMode
+    volumetric: VolumetricConfig
+    light_orb_enabled: bool
+
+
+def stage_quality_settings(profile: StageQualityProfile | str) -> StageQualitySettings:
+    """Resolve SAFE, BALANCED, or HIGH into all optional pipeline settings."""
+    try:
+        selected = profile if isinstance(profile, StageQualityProfile) else StageQualityProfile(profile.lower())
+    except (AttributeError, ValueError) as exc:
+        choices = ", ".join(item.value for item in StageQualityProfile)
+        raise ValueError(f"stage profile must be one of: {choices}") from exc
+    mapping = {
+        StageQualityProfile.SAFE: (
+            ShadowQualityProfile.SAFE,
+            SecondaryShadowMode.SAFE,
+            VolumetricQualityProfile.SAFE,
+        ),
+        StageQualityProfile.BALANCED: (
+            ShadowQualityProfile.BALANCED,
+            SecondaryShadowMode.BALANCED,
+            VolumetricQualityProfile.BALANCED,
+        ),
+        StageQualityProfile.HIGH: (
+            ShadowQualityProfile.HIGH,
+            SecondaryShadowMode.BALANCED,
+            VolumetricQualityProfile.HIGH,
+        ),
+    }
+    shadow_profile, secondary_mode, volume_profile = mapping[selected]
+    return StageQualitySettings(
+        shadow=ShadowConfig.for_profile(shadow_profile),
+        secondary_shadow_mode=secondary_mode,
+        volumetric=replace(VolumetricConfig.for_profile(volume_profile), volumetric_enabled=True),
+        light_orb_enabled=True,
+    )

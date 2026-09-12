@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from dataclasses import replace
 from pathlib import Path
 import sys
@@ -23,8 +24,10 @@ from renderer.config import (
     SecondaryShadowMode,
     ShadowConfig,
     ShadowQualityProfile,
+    StageQualityProfile,
     VolumetricConfig,
     VolumetricQualityProfile,
+    stage_quality_settings,
 )
 from renderer.renderer import DebugMode, Renderer
 
@@ -264,6 +267,41 @@ def _light_orb_status(renderer: Renderer) -> str:
             f"z={projection.light_z_m:.2f}m scene={scene} {projection.reason}"
         )
     return " | ".join(parts) if parts else "orb projection pending"
+
+
+def _apply_automated_stress_state(renderer: Renderer, packet: RenderPacket, state: dict, elapsed_s: float) -> None:
+    """Exercise movement, fail-safes, profiles, and views deterministically."""
+    for index, light in enumerate(packet.lights.lights):
+        phase = elapsed_s * (0.63 + 0.11 * index) + index * 2.1
+        light.position_camera_m[:] = (
+            (0.42 if index == 0 else -0.42) * np.cos(phase),
+            0.18 * np.sin(phase * 0.71),
+            1.35 + 0.55 * np.sin(phase * 0.47 + index),
+        )
+    cycle = elapsed_s % 60.0
+    if len(packet.lights.lights) >= 2:
+        packet.lights.lights[0].active = not (45.0 <= cycle < 55.0)
+        packet.lights.lights[1].active = not (35.0 <= cycle < 45.0)
+    state["selected_light"] = int(elapsed_s // 7.0) % max(1, len(packet.lights.lights))
+    renderer.set_volumetric_enabled(int(elapsed_s // 17.0) % 2 == 0)
+    renderer.set_light_orb_enabled(int(elapsed_s // 23.0) % 2 == 0)
+    renderer.set_shadows_enabled(int(elapsed_s // 29.0) % 2 == 0)
+
+    profiles = (StageQualityProfile.SAFE, StageQualityProfile.BALANCED, StageQualityProfile.HIGH)
+    profile = profiles[int(elapsed_s // 120.0) % len(profiles)]
+    if state.get("stage_profile") != profile.value:
+        renderer.apply_stage_quality(profile)
+        state["stage_profile"] = profile.value
+    modes = (
+        DebugMode.SHADOW_FINAL,
+        DebugMode.SHADOW_MASK,
+        DebugMode.SHADOW_MASK_2,
+        DebugMode.VOLUMETRIC,
+        DebugMode.ORB_DEBUG,
+        DebugMode.DEPTH,
+        DebugMode.NORMALS,
+    )
+    state["mode"] = modes[int(elapsed_s // 11.0) % len(modes)]
 
 
 def _print_light_setup(packet: RenderPacket) -> None:
@@ -538,9 +576,10 @@ def _run_webcam_live(
     duration_seconds: float | None,
     gpu_name: str,
     state: dict,
+    stress_test: bool,
 ) -> int:
     """Render latest webcam RGB while a worker continuously drains the camera."""
-    print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view, B orb diagnostics | F6 volume, F7 orbs | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
+    print("Controls: 1-9 modes, 0 Light 2 mask, V volume, B orb diagnostics | F5 shadows, F6 volume, F7 orbs | F8 SAFE, F9 BALANCED, F10 HIGH | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
 
     gpu_queries = []
     gpu_query_error = None
@@ -552,7 +591,8 @@ def _run_webcam_live(
 
     measurement_start = time.perf_counter()
     previous_time = measurement_start
-    next_report_time = measurement_start + 1.0
+    report_interval_s = 10.0 if stress_test else 1.0
+    next_report_time = measurement_start + report_interval_s
     next_query_time = measurement_start
     query_interval_s = max(0.25, (duration_seconds or 20.0) / max(1, len(gpu_queries)))
     start_camera_stats = worker.frames.stats()
@@ -580,6 +620,8 @@ def _run_webcam_live(
         frame_start_ns = time.perf_counter_ns()
         glfw.poll_events()
         now = time.perf_counter()
+        if stress_test:
+            _apply_automated_stress_state(renderer, packet, state, now - measurement_start)
         delta_s = min(now - previous_time, 0.1)
         previous_time = now
         selected = min(state["selected_light"], len(packet.lights.lights) - 1)
@@ -656,7 +698,7 @@ def _run_webcam_live(
             previous_report_time = end_time
             frame_count = 0
             presented_camera_frames = 0
-            next_report_time = end_time + 1.0
+            next_report_time = end_time + report_interval_s
 
         if duration_seconds is not None and end_time - measurement_start >= duration_seconds:
             glfw.set_window_should_close(window, True)
@@ -747,6 +789,7 @@ def run_demo(
     secondary_shadow_mode: SecondaryShadowMode,
     scene_name: str,
     include_occluders: bool,
+    stress_test: bool,
 ) -> int:
     try:
         import glfw
@@ -821,7 +864,7 @@ def run_demo(
         )
         renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
         gpu_name = _print_gl_info(context)
-        state = {"mode": initial_mode, "selected_light": 0}
+        state = {"mode": initial_mode, "selected_light": 0, "stage_profile": None}
 
         def on_key(callback_window, key, _scancode, action, _mods):
             if action not in (glfw.PRESS, glfw.REPEAT):
@@ -846,6 +889,16 @@ def run_demo(
                 renderer.set_volumetric_enabled(not renderer.volumetric_enabled)
             elif key == glfw.KEY_F7 and action == glfw.PRESS:
                 renderer.set_light_orb_enabled(not renderer.light_orb_enabled)
+            elif key == glfw.KEY_F5 and action == glfw.PRESS:
+                renderer.set_shadows_enabled(not renderer.shadows_enabled)
+            elif key in (glfw.KEY_F8, glfw.KEY_F9, glfw.KEY_F10) and action == glfw.PRESS:
+                profile = {
+                    glfw.KEY_F8: StageQualityProfile.SAFE,
+                    glfw.KEY_F9: StageQualityProfile.BALANCED,
+                    glfw.KEY_F10: StageQualityProfile.HIGH,
+                }[key]
+                renderer.apply_stage_quality(profile)
+                state["stage_profile"] = profile.value
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
                 glfw.set_window_should_close(callback_window, True)
 
@@ -887,18 +940,24 @@ def run_demo(
                 duration_seconds=duration_seconds,
                 gpu_name=gpu_name,
                 state=state,
+                stress_test=stress_test,
             )
 
-        print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view, B orb diagnostics | F6 volume, F7 orbs | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1-9 modes, 0 Light 2 mask, V volume, B orb diagnostics | F5 shadows, F6 volume, F7 orbs | F8 SAFE, F9 BALANCED, F10 HIGH | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
         fps = 0.0
         frames = 0
+        stress_start = previous_time
+        stress_frame_ms: deque[float] = deque(maxlen=20_000)
 
         while not glfw.window_should_close(window):
+            frame_start = time.perf_counter()
             glfw.poll_events()
             now = time.perf_counter()
+            if stress_test:
+                _apply_automated_stress_state(renderer, packet, state, now - stress_start)
             delta_s = min(now - previous_time, 0.1)
             previous_time = now
             selected = min(state["selected_light"], len(packet.lights.lights) - 1)
@@ -912,6 +971,8 @@ def run_demo(
             glfw.swap_buffers(window)
             frames += 1
             fps_frames += 1
+            if stress_test:
+                stress_frame_ms.append((time.perf_counter() - frame_start) * 1000.0)
 
             if now - fps_start >= 0.5:
                 fps = fps_frames / (now - fps_start)
@@ -928,10 +989,20 @@ def run_demo(
 
             if max_frames is not None and frames >= max_frames:
                 glfw.set_window_should_close(window, True)
+            if duration_seconds is not None and now - stress_start >= duration_seconds:
+                glfw.set_window_should_close(window, True)
 
         if status_line_open:
             sys.stdout.write("\n")
             sys.stdout.flush()
+        if stress_test and stress_frame_ms:
+            values = np.asarray(stress_frame_ms, dtype=np.float64)
+            elapsed = max(time.perf_counter() - stress_start, 1e-9)
+            print(
+                f"Synthetic stress metrics: duration {elapsed:.2f} s | frames {frames} | "
+                f"average FPS {frames / elapsed:.2f} | median {np.median(values):.3f} ms | "
+                f"P95 {np.percentile(values, 95):.3f} ms | max {np.max(values):.3f} ms"
+            )
         return 0
     except Exception as exc:
         if status_line_open:
@@ -965,6 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--frames", type=int, default=None, help="exit after this many frames (for smoke testing)")
     parser.add_argument("--duration-seconds", type=float, default=None, help="stop a live webcam test after this many seconds")
+    parser.add_argument("--stress-test", action="store_true", help="automatically exercise lights, fail-safes, profiles, and debug views")
     parser.add_argument("--benchmark", action="store_true", help="run a warmup plus a measured benchmark")
     parser.add_argument("--benchmark-frames", type=int, default=600, help="measured frames; benchmark requires at least 600")
     parser.add_argument("--warmup-frames", type=int, default=60, help="ignored warmup frames; benchmark requires at least 60")
@@ -1044,8 +1116,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--frames must be positive")
     if args.duration_seconds is not None and (not np.isfinite(args.duration_seconds) or args.duration_seconds <= 0.0):
         parser.error("--duration-seconds must be finite and positive")
-    if args.duration_seconds is not None and args.input != "webcam":
-        parser.error("--duration-seconds is only supported with --input webcam")
+    if args.duration_seconds is not None and args.input != "webcam" and not args.stress_test:
+        parser.error("--duration-seconds with synthetic input requires --stress-test")
     if args.duration_seconds is not None and args.benchmark:
         parser.error("use --frames or --duration-seconds without --benchmark")
     if args.benchmark and args.frames is not None:
@@ -1137,6 +1209,7 @@ def main(argv: list[str] | None = None) -> int:
         secondary_shadow_mode=secondary_shadow_mode,
         scene_name=args.synthetic_scene,
         include_occluders=not args.no_occluder,
+        stress_test=args.stress_test,
     )
 
 
