@@ -51,3 +51,29 @@ def translate(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
         return sobel_normals(depth_m, fx, fy)
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)
     return d2nt_normals(depth_m, K, version=method)
+
+
+def recipe(depth_m: np.ndarray, fx: float, fy: float, cx: float, cy: float,
+           method: str = "d2nt_v2", scale: float = 0.5,
+           bilateral_d: int = 5) -> np.ndarray:
+    """Phase-2 winning recipe: downscale -> bilateral -> translate -> upscale.
+
+    Bilateral + D2NT at half-res beats full-res Sobel on noisy depth at
+    lower cost (bench: edge 13.6 vs 44.7 deg, ~13 vs ~19ms).
+    """
+    h, w = depth_m.shape[:2]
+    if scale < 1.0:
+        dw, dh = int(w * scale), int(h * scale)
+        d = cv2.resize(depth_m.astype(np.float32), (dw, dh),
+                       interpolation=cv2.INTER_LINEAR)
+        fx_s, fy_s, cx_s, cy_s = fx * scale, fy * scale, cx * scale, cy * scale
+    else:
+        d = depth_m.astype(np.float32)
+        dh, dw, fx_s, fy_s, cx_s, cy_s = h, w, fx, fy, cx, cy
+    if bilateral_d > 0:
+        d = cv2.bilateralFilter(d, bilateral_d, 0.05, bilateral_d)
+    n = translate(d, fx_s, fy_s, cx_s, cy_s, method)
+    if scale < 1.0:
+        n = cv2.resize(n, (w, h), interpolation=cv2.INTER_LINEAR)
+        n /= np.linalg.norm(n, axis=-1, keepdims=True) + 1e-9
+    return _orient_toward_camera(n)
