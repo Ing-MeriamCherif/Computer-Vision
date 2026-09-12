@@ -1,0 +1,13 @@
+# Python 3.12 environment validated on GTX 1650 Ti / driver 595.84.
+# `torch` resolves to the CUDA wheel on Linux; verify with tools/cuda_smoke.py.
+torch==2.14.0
+torchvision==0.29.0
+transformers==5.17.0
+accelerate==1.15.0
+gradio==6.27.0
+opencv-python-headless==5.0.0.93
+numpy==2.5.3
+pillow==12.3.0
+psutil==7.2.2
+pytest==9.1.1
+playwright==1.62.0

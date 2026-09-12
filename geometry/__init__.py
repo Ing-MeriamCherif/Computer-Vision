@@ -27,6 +27,8 @@ from .validation import GeometryValidationReport, validate_renderer_geometry
 from .diagnostics import GeometryDiagnostics, StageTimer, geometry_state_nbytes, motion_state_nbytes, summarize_timings
 from .pose import CameraPoseState, PoseEstimateResult, PoseEstimator, compose_world_pose
 from .persistent import AdvancedGeometryEngine, PersistentGeometryMapper, PersistentGeometryState, Surfel, SurfelMap
+from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
+from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
 
 __all__ = [
     "CameraModel",
@@ -73,4 +75,9 @@ __all__ = [
     "SurfelMap",
     "PersistentGeometryMapper",
     "AdvancedGeometryEngine",
+    "CudaGeometryDiagnostics",
+    "TorchGeometryBackend",
+    "torch_cuda_status",
+    "DepthAnythingProvider",
+    "DepthInferenceDiagnostics",
 ]
