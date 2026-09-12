@@ -3,3 +3,6 @@ __pycache__/
 .pytest_cache/
 work/
 graphify-out/
+.venv/
+models/
+artifacts/

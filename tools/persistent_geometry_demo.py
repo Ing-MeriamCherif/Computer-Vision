@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from geometry import CameraModel, DepthState, PersistentGeometryMapper, PoseEstimator, SurfelMap, TemporalGeometryEngine  # noqa: E402
 
 
-def run(frames: int = 5, seed: int = 7) -> dict:
+def run(frames: int = 5, seed: int = 7, ply: str | None = None) -> dict:
     rng = np.random.default_rng(seed)
     camera = CameraModel(320, 240, 280.0, 275.0, 157.5, 118.5)
     points = np.column_stack((rng.uniform(-1.2, 1.2, 600), rng.uniform(-.8, .8, 600), rng.uniform(3, 6, 600))).astype(np.float32)
@@ -46,7 +46,12 @@ def run(frames: int = 5, seed: int = 7) -> dict:
             persistent = mapper.update(geometry, result)
         stats.append({"frame": frame_id, "pose_valid": result.valid, "pose_confidence": result.confidence, "inliers": result.inlier_count, "reprojection_error": result.reprojection_error, "surfel_count": mapper.map.count, "coverage_percent": float(persistent.projected_valid.mean() * 100) if persistent else 0.0})
         previous_points, previous_pixels = current_points, current_pixels
-    return {"frames": frames, "seed": seed, "map_count": mapper.map.count, "map_memory_bytes": mapper.map.nbytes(), "stats": stats}
+    if ply:
+        export_ply(ply, mapper)
+    res = {"frames": frames, "seed": seed, "map_count": mapper.map.count, "map_memory_bytes": mapper.map.nbytes(), "stats": stats}
+    if ply:
+        res["ply"] = str(ply)
+    return res
 
 
 def export_ply(path: str, mapper: PersistentGeometryMapper) -> None:
@@ -60,10 +65,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--frames", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument("--ply", type=str, default=None, help="optional path to export surfel map PLY")
     args = parser.parse_args()
     if args.frames < 1:
         parser.error("frames must be positive")
-    print(json.dumps(run(args.frames, args.seed), indent=2))
+    print(json.dumps(run(args.frames, args.seed, ply=args.ply), indent=2))
     return 0
 
 
