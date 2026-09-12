@@ -1,9 +1,13 @@
 # Live Webcam End-to-End Validation Report
 
-**Date:** 2026-09-12  
-**Storage:** SATA `/dev/sda4` through `/mnt/storage`  
-**Camera:** HP Wide Vision HD Camera (`/dev/video0`)  
-**GPU:** NVIDIA GeForce GTX 1650 Ti, 4 GiB  
+**Date:** 2026-09-12
+
+**Storage:** SATA `/dev/sda4` through `/mnt/storage`
+
+**Camera:** HP Wide Vision HD Camera (`/dev/video0`)
+
+**GPU:** NVIDIA GeForce GTX 1650 Ti, 4 GiB
+
 **Resolution:** 640 x 480
 
 ## Executive summary
