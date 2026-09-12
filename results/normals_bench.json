@@ -1,0 +1,37 @@
+{
+  "res": [
+    640,
+    480
+  ],
+  "noise_m": 0.0,
+  "methods": {
+    "sobel": {
+      "lat_ms": 23.76,
+      "mean_all": 0.56,
+      "mean_flat": 0.11,
+      "mean_edge": 29.95,
+      "med_edge": 0.0
+    },
+    "d2nt_basic": {
+      "lat_ms": 55.17,
+      "mean_all": 14.06,
+      "mean_flat": 13.79,
+      "mean_edge": 31.95,
+      "med_edge": 15.63
+    },
+    "d2nt_v2": {
+      "lat_ms": 303.03,
+      "mean_all": 13.67,
+      "mean_flat": 13.76,
+      "mean_edge": 7.92,
+      "med_edge": 15.0
+    },
+    "d2nt_v3": {
+      "lat_ms": 545.66,
+      "mean_all": 13.67,
+      "mean_flat": 13.76,
+      "mean_edge": 7.92,
+      "med_edge": 15.0
+    }
+  }
+}
