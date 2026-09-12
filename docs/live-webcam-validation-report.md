@@ -113,6 +113,18 @@ Webcam imagery remains outside Git:
 - `/tmp/cvnrw-live-webcam/persistent-live-proof.jpg`: representative Phase 5
   frame with input, depth, normals, and persistent reprojection.
 
+## Browser live-stream gate
+
+The Gradio page was opened at `http://127.0.0.1:7860/` and its webcam control
+was activated. In the Codex in-app/headless browser, camera permission could be
+requested but no hardware media track was created: the page's video element
+remained paused with `readyState=0`, zero video dimensions, and no `srcObject`.
+Therefore this browser-layer attempt is explicitly **not** counted as a live UI
+pass. A headed browser session with OS camera permission (or an equivalent
+hardware-backed browser test runner) is required to validate the final Gradio
+webcam control itself. The direct V4L2 test remains the authoritative live
+pipeline test and did use the physical camera continuously.
+
 ## Verdict
 
 All major feature families are functionally connected to continuous physical
