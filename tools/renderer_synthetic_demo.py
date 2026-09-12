@@ -1,4 +1,4 @@
-"""Interactive P0/P1 renderer demo using synthetic or webcam RGB input."""
+"""Interactive renderer demo with synthetic or webcam RGB and mock geometry."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
 from renderer.capture import CapturedRGBFrame, WebcamCaptureWorker
-from renderer.config import LightingConfig
+from renderer.config import LightingConfig, ShadowConfig
 from renderer.renderer import DebugMode, Renderer
 
 
@@ -86,7 +86,12 @@ class WebcamPacketUpdater:
         return elapsed_ms, bool(changed)
 
 
-def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
+def make_synthetic_packet(
+    width: int = 960,
+    height: int = 540,
+    *,
+    foreground_bounds: tuple[float, float, float, float] | None = (0.30, 0.25, 0.70, 0.75),
+) -> RenderPacket:
     """Build deterministic RGB/depth/normals with documented pinhole intrinsics.
 
     Synthetic calibration assumes a roughly 58-degree horizontal field of view
@@ -105,8 +110,20 @@ def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
     rgb[:, :, 1] = np.clip(45.0 + 145.0 * y + 20.0 * (1.0 - x), 0.0, 255.0).astype(np.uint8)
     rgb[:, :, 2] = np.clip(105.0 + 95.0 * (1.0 - y) + 30.0 * checker, 0.0, 255.0).astype(np.uint8)
 
-    xx, yy = np.meshgrid(np.arange(width), np.arange(height))
-    foreground = (xx >= int(width * 0.30)) & (xx < int(width * 0.70)) & (yy >= int(height * 0.25)) & (yy < int(height * 0.75))
+    if foreground_bounds is None:
+        foreground = np.zeros((height, width), dtype=np.bool_)
+        bounds = None
+    else:
+        if len(foreground_bounds) != 4 or not all(np.isfinite(value) for value in foreground_bounds):
+            raise ValueError("foreground_bounds must be finite normalized (left, top, right, bottom) bounds")
+        left, top, right, bottom = foreground_bounds
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            raise ValueError("foreground_bounds must be ordered within [0, 1]")
+        x0, x1 = int(width * left), int(width * right)
+        y0, y1 = int(height * top), int(height * bottom)
+        foreground = np.zeros((height, width), dtype=np.bool_)
+        foreground[y0:y1, x0:x1] = True
+        bounds = (x0, y0, x1, y1)
     depth_m = np.full((height, width), 3.0, dtype=np.float32)
     depth_m[foreground] = 1.5
     rgb[foreground, 0] = 225
@@ -117,7 +134,12 @@ def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
     # makes the normal debug mode show a second, distinct direction.
     normals = np.zeros((height, width, 3), dtype=np.float32)
     normals[:, :, 2] = -1.0
-    tilted = foreground & (xx >= int(width * 0.40)) & (xx < int(width * 0.52))
+    if bounds is None:
+        tilted = np.zeros((height, width), dtype=np.bool_)
+    else:
+        x0, y0, x1, y1 = bounds
+        tilted = np.zeros((height, width), dtype=np.bool_)
+        tilted[y0:y1, max(x0, int(width * 0.40)):min(x1, int(width * 0.52))] = True
     normals[tilted, 0] = 0.5
     normals[tilted, 2] = -np.sqrt(np.float32(0.75))
     valid_mask = np.ones((height, width), dtype=np.bool_)
@@ -220,6 +242,8 @@ _MODE_NAMES = {
     "lambertian": DebugMode.LAMBERTIAN,
     "specular": DebugMode.SPECULAR,
     "final": DebugMode.FINAL,
+    "shadow-mask": DebugMode.SHADOW_MASK,
+    "shadow-final": DebugMode.SHADOW_FINAL,
 }
 
 
@@ -253,11 +277,20 @@ def _run_benchmark(
 
     gpu_query_count = min(12, measured_frames)
     gpu_query_indices = set(np.linspace(0, measured_frames - 1, gpu_query_count, dtype=np.int64).tolist())
-    gpu_queries = {}
+    if benchmark_mode == DebugMode.SHADOW_FINAL:
+        gpu_stages = ("lighting", "shadow", "composition")
+    elif benchmark_mode in (DebugMode.LAMBERTIAN, DebugMode.SPECULAR, DebugMode.FINAL):
+        gpu_stages = ("lighting",)
+    else:
+        gpu_stages = ()
+    gpu_queries: dict[int, dict[str, object]] = {}
     gpu_query_error = None
     try:
-        # Allocate queries before measurement, and retrieve them only after the run.
-        gpu_queries = {index: context.query(time=True) for index in gpu_query_indices}
+        # Allocate per-stage queries before measurement and read them only afterward.
+        gpu_queries = {
+            index: {stage: context.query(time=True) for stage in gpu_stages}
+            for index in gpu_query_indices
+        }
     except Exception as exc:  # Some drivers may not expose timer queries.
         gpu_queries = {}
         gpu_query_error = f"{type(exc).__name__}: {exc}"
@@ -288,13 +321,13 @@ def _run_benchmark(
 
         render_start_ns = time.perf_counter_ns()
         measured_index = frame_index - warmup_frames
-        gpu_query = gpu_queries.get(measured_index)
-        if gpu_query is not None:
-            # Results are read only after the run, so query retrieval cannot stall measured frames.
-            with gpu_query:
-                renderer.render(packet, benchmark_mode, upload_inputs=False)
-        else:
-            renderer.render(packet, benchmark_mode, upload_inputs=False)
+        # Results are read only after the run, so query retrieval cannot stall measured frames.
+        renderer.render(
+            packet,
+            benchmark_mode,
+            upload_inputs=False,
+            gpu_queries=gpu_queries.get(measured_index),
+        )
         render_end_ns = time.perf_counter_ns()
 
         swap_start_ns = time.perf_counter_ns()
@@ -315,6 +348,14 @@ def _run_benchmark(
     average_frame_ms = float(np.mean(full_ms))
     warmup_average_ms = float(np.mean(warmup_ms))
     print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    if benchmark_mode in (DebugMode.SHADOW_MASK, DebugMode.SHADOW_FINAL):
+        print(
+            f"Shadow pass: {renderer.resources.shadow_size[0]}x{renderer.resources.shadow_size[1]} | "
+            f"steps {renderer.shadow_config.shadow_steps} | enabled {renderer.shadow_config.shadow_enabled} | "
+            f"bias {renderer.shadow_config.shadow_bias_m:.3f} m | "
+            f"thickness {renderer.shadow_config.shadow_thickness_m:.3f} m | "
+            f"start offset {renderer.shadow_config.ray_start_offset:.3f} m"
+        )
     print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
     short_sample_count = min(45, warmup_frames)
     short_sample_ms = float(np.mean(warmup_ms[:short_sample_count]))
@@ -334,14 +375,18 @@ def _run_benchmark(
     print(f"Average buffer-swap time: {float(np.mean(swap_ms)):.3f} ms/frame")
     if gpu_queries:
         try:
-            gpu_render_ms = np.array([query.elapsed / 1_000_000.0 for query in gpu_queries.values()], dtype=np.float64)
-            print(
-                "GPU render timer query (sampled draws): "
-                f"avg {float(np.mean(gpu_render_ms)):.3f} ms, "
-                f"median {float(np.median(gpu_render_ms)):.3f} ms, "
-                f"p95 {float(np.percentile(gpu_render_ms, 95)):.3f} ms, "
-                f"n={gpu_render_ms.size}; results read after run"
-            )
+            context.finish()
+            for stage in gpu_stages:
+                stage_ms = np.array(
+                    [query_set[stage].elapsed / 1_000_000.0 for query_set in gpu_queries.values()],
+                    dtype=np.float64,
+                )
+                if stage_ms.size:
+                    print(
+                        f"GPU {stage} time (sampled draws): avg {float(np.mean(stage_ms)):.4f} ms, "
+                        f"median {float(np.median(stage_ms)):.4f} ms, "
+                        f"p95 {float(np.percentile(stage_ms, 95)):.4f} ms, n={stage_ms.size}"
+                    )
         except Exception as exc:
             print(f"GPU render timer query unavailable: {type(exc).__name__}: {exc}")
     elif gpu_query_error:
@@ -366,7 +411,7 @@ def _run_webcam_live(
     state: dict,
 ) -> int:
     """Render latest webcam RGB while a worker continuously drains the camera."""
-    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final | A/D X, W/S Y, Q/E Z | Esc quit")
+    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows | A/D X, W/S Y, Q/E Z | Esc quit")
 
     gpu_queries = []
     gpu_query_error = None
@@ -558,7 +603,9 @@ def run_demo(
     camera_index: int,
     initial_mode: DebugMode,
     lighting_config: LightingConfig,
+    shadow_config: ShadowConfig,
     benchmark_mode: DebugMode,
+    foreground_bounds: tuple[float, float, float, float] | None,
 ) -> int:
     try:
         import glfw
@@ -597,7 +644,11 @@ def run_demo(
         context_setup_ms = (time.perf_counter_ns() - context_setup_start_ns) / 1_000_000.0
 
         data_prep_start_ns = time.perf_counter_ns()
-        packet = make_synthetic_packet(width=width, height=height)
+        packet = make_synthetic_packet(
+            width=width,
+            height=height,
+            foreground_bounds=foreground_bounds,
+        )
         data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
         prepare_frame = None
         if input_name == "webcam":
@@ -614,7 +665,7 @@ def run_demo(
             print("Webcam display: aspect-preserving letterbox, RGB latest-frame mailbox, local only; no saving or network transmission")
 
         renderer_setup_start_ns = time.perf_counter_ns()
-        renderer = Renderer(context, packet, config=lighting_config)
+        renderer = Renderer(context, packet, config=lighting_config, shadow_config=shadow_config)
         renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
         gpu_name = _print_gl_info(context)
         state = {"mode": initial_mode}
@@ -622,7 +673,10 @@ def run_demo(
         def on_key(callback_window, key, _scancode, action, _mods):
             if action not in (glfw.PRESS, glfw.REPEAT):
                 return
-            if key in (glfw.KEY_1, glfw.KEY_2, glfw.KEY_3, glfw.KEY_4, glfw.KEY_5, glfw.KEY_6):
+            if key in (
+                glfw.KEY_1, glfw.KEY_2, glfw.KEY_3, glfw.KEY_4,
+                glfw.KEY_5, glfw.KEY_6, glfw.KEY_7, glfw.KEY_8,
+            ):
                 state["mode"] = DebugMode(key - glfw.KEY_0)
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
                 glfw.set_window_should_close(callback_window, True)
@@ -663,7 +717,7 @@ def run_demo(
                 state=state,
             )
 
-        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
@@ -746,7 +800,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", choices=tuple(_MODE_NAMES), default="rgb", help="initial interactive visualization")
     parser.add_argument(
         "--benchmark-mode",
-        choices=("rgb", "lambertian", "specular", "final"),
+        choices=("rgb", "lambertian", "specular", "final", "shadow-mask", "shadow-final"),
         default="rgb",
         help="visualization measured by --benchmark",
     )
@@ -754,6 +808,21 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--specular-strength", type=float, default=0.20)
     parser.add_argument("--shininess", type=float, default=48.0)
     parser.add_argument("--attenuation-k", type=float, default=0.6)
+    parser.add_argument("--shadow-enabled", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--shadow-resolution-scale", type=float, default=0.5)
+    parser.add_argument("--shadow-steps", type=int, default=12)
+    parser.add_argument("--shadow-bias-m", type=float, default=0.015)
+    parser.add_argument("--shadow-thickness-m", type=float, default=0.15)
+    parser.add_argument("--ray-start-offset", type=float, default=0.01)
+    parser.add_argument(
+        "--foreground-bounds",
+        type=float,
+        nargs=4,
+        metavar=("LEFT", "TOP", "RIGHT", "BOTTOM"),
+        default=(0.30, 0.25, 0.70, 0.75),
+        help="normalized synthetic occluder bounds; use --no-occluder to remove it",
+    )
+    parser.add_argument("--no-occluder", action="store_true", help="omit the synthetic foreground rectangle")
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames <= 0:
         parser.error("--frames must be positive")
@@ -780,8 +849,21 @@ def main(argv: list[str] | None = None) -> int:
             shininess=args.shininess,
             attenuation_k=args.attenuation_k,
         )
+        shadow_config = ShadowConfig(
+            shadow_enabled=args.shadow_enabled,
+            shadow_resolution_scale=args.shadow_resolution_scale,
+            shadow_steps=args.shadow_steps,
+            shadow_bias_m=args.shadow_bias_m,
+            shadow_thickness_m=args.shadow_thickness_m,
+            ray_start_offset=args.ray_start_offset,
+        )
     except ValueError as exc:
         parser.error(str(exc))
+    foreground_bounds = None if args.no_occluder else tuple(args.foreground_bounds)
+    if foreground_bounds is not None:
+        left, top, right, bottom = foreground_bounds
+        if not (0.0 <= left < right <= 1.0 and 0.0 <= top < bottom <= 1.0):
+            parser.error("--foreground-bounds must be ordered values within [0, 1]")
     return run_demo(
         args.width,
         args.height,
@@ -796,7 +878,9 @@ def main(argv: list[str] | None = None) -> int:
         camera_index=args.camera_index,
         initial_mode=_MODE_NAMES[args.mode],
         lighting_config=lighting_config,
+        shadow_config=shadow_config,
         benchmark_mode=_MODE_NAMES[args.benchmark_mode],
+        foreground_bounds=foreground_bounds,
     )
 
 

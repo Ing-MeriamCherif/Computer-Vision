@@ -6,7 +6,7 @@ uniform sampler2D u_normals;
 uniform sampler2D u_depth_valid;
 uniform sampler2D u_normal_valid;
 
-uniform int u_lighting_mode; // 4 = ambient + diffuse, 5 = specular, 6 = final
+uniform int u_lighting_mode; // 4 = diffuse, 5 = specular, 6 = Level 02 final, 8 = linear lighting layers
 uniform float u_fx;
 uniform float u_fy;
 uniform float u_cx;
@@ -25,7 +25,8 @@ uniform float u_shininess;
 uniform float u_attenuation_k;
 
 in vec2 v_uv;
-out vec4 frag_color;
+layout(location = 0) out vec4 frag_color;
+layout(location = 1) out vec4 direct_color;
 
 bool finite_vec3(vec3 value) {
     return !any(isnan(value)) && !any(isinf(value));
@@ -45,6 +46,17 @@ vec3 linear_to_srgb(vec3 linear_rgb) {
     return mix(low, high, step(vec3(0.0031308), clamped));
 }
 
+void output_source(vec3 source_srgb) {
+    if (u_lighting_mode == 8) {
+        // Invalid geometry remains visible and contributes no direct light.
+        frag_color = vec4(srgb_to_linear(clamp(source_srgb, 0.0, 1.0)), 1.0);
+        direct_color = vec4(0.0, 0.0, 0.0, 1.0);
+    } else {
+        frag_color = vec4(source_srgb, 1.0);
+        direct_color = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+}
+
 void main() {
     vec3 source_srgb = texture(u_rgb, v_uv).rgb;
     if (!finite_vec3(source_srgb)) {
@@ -56,7 +68,7 @@ void main() {
     bool depth_valid = texture(u_depth_valid, v_uv).r > 0.0;
     if (!depth_valid || isnan(z_m) || isinf(z_m) || z_m <= 1e-6) {
         // Unknown geometry keeps the original image in all lighting views.
-        frag_color = vec4(source_srgb, 1.0);
+        output_source(source_srgb);
         return;
     }
 
@@ -65,7 +77,7 @@ void main() {
     bool normal_valid = texture(u_normal_valid, v_uv).r > 0.0;
     if (!normal_valid || !finite_vec3(normal_camera) || isnan(normal_length)
         || isinf(normal_length) || normal_length <= 1e-6) {
-        frag_color = vec4(source_srgb, 1.0);
+        output_source(source_srgb);
         return;
     }
 
@@ -76,7 +88,7 @@ void main() {
         z_m
     );
     if (!finite_vec3(point_camera_m) || !finite_vec3(u_light_position_camera_m)) {
-        frag_color = vec4(source_srgb, 1.0);
+        output_source(source_srgb);
         return;
     }
 
@@ -118,7 +130,12 @@ void main() {
     }
 
     vec3 result_linear;
-    if (u_lighting_mode == 4) {
+    if (u_lighting_mode == 8) {
+        // MRT outputs are kept linear so ambient can remain unshadowed during composition.
+        frag_color = vec4(ambient, 1.0);
+        direct_color = vec4(diffuse + specular, 1.0);
+        return;
+    } else if (u_lighting_mode == 4) {
         result_linear = ambient + diffuse;
     } else if (u_lighting_mode == 5) {
         result_linear = specular;
@@ -127,8 +144,9 @@ void main() {
     }
 
     if (!finite_vec3(result_linear)) {
-        frag_color = vec4(source_srgb, 1.0);
+        output_source(source_srgb);
         return;
     }
     frag_color = vec4(linear_to_srgb(result_linear), 1.0);
+    direct_color = vec4(0.0, 0.0, 0.0, 1.0);
 }

@@ -5,21 +5,34 @@ from __future__ import annotations
 import numpy as np
 
 from contracts.render_types import RenderPacket
+from .config import ShadowConfig
 
 
 class RendererResources:
     """Allocate input textures once and update their contents in place."""
 
-    def __init__(self, context, packet: RenderPacket) -> None:
+    def __init__(self, context, packet: RenderPacket, shadow_config: ShadowConfig | None = None) -> None:
         import moderngl
 
         self.context = context
+        self.shadow_config = shadow_config or ShadowConfig()
         self.size = (int(packet.rgb.shape[1]), int(packet.rgb.shape[0]))
+        self.shadow_size = (
+            max(1, int(round(self.size[0] * self.shadow_config.shadow_resolution_scale))),
+            max(1, int(round(self.size[1] * self.shadow_config.shadow_resolution_scale))),
+        )
         self.rgb_texture = context.texture(self.size, components=3, dtype="f1", alignment=1)
         self.depth_texture = context.texture(self.size, components=1, dtype="f4", alignment=1)
         self.normal_texture = context.texture(self.size, components=3, dtype="f4", alignment=1)
         self.depth_valid_texture = context.texture(self.size, components=1, dtype="f1", alignment=1)
         self.normal_valid_texture = context.texture(self.size, components=1, dtype="f1", alignment=1)
+        self.shadow_texture = context.texture(self.shadow_size, components=1, dtype="f1", alignment=1)
+        self.ambient_texture = context.texture(self.size, components=4, dtype="f2", alignment=1)
+        self.direct_texture = context.texture(self.size, components=4, dtype="f2", alignment=1)
+        self.shadow_framebuffer = context.framebuffer(color_attachments=[self.shadow_texture])
+        self.lighting_framebuffer = context.framebuffer(
+            color_attachments=[self.ambient_texture, self.direct_texture]
+        )
 
         for texture in (
             self.rgb_texture,
@@ -29,6 +42,13 @@ class RendererResources:
             self.normal_valid_texture,
         ):
             texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
+            texture.repeat_x = False
+            texture.repeat_y = False
+        self.shadow_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.shadow_texture.repeat_x = False
+        self.shadow_texture.repeat_y = False
+        for texture in (self.ambient_texture, self.direct_texture):
+            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
             texture.repeat_x = False
             texture.repeat_y = False
         self.upload(packet)
@@ -61,11 +81,16 @@ class RendererResources:
         self.rgb_texture.write(self._bytes(rgb), alignment=1)
 
     def release(self) -> None:
+        self.lighting_framebuffer.release()
+        self.shadow_framebuffer.release()
         for texture in (
             self.rgb_texture,
             self.depth_texture,
             self.normal_texture,
             self.depth_valid_texture,
             self.normal_valid_texture,
+            self.shadow_texture,
+            self.ambient_texture,
+            self.direct_texture,
         ):
             texture.release()

@@ -39,6 +39,16 @@ class ProjectionMathTests(unittest.TestCase):
         self.assertAlmostEqual(u, 417.25, places=10)
         self.assertAlmostEqual(v, 302.75, places=10)
 
+    def test_screen_space_shadow_ray_projection_uses_camera_axes(self) -> None:
+        receiver = self.reconstruct(self.cx, self.cy, 3.0)
+        light = np.array([0.6, 0.4, 0.75], dtype=np.float64)
+        ray_sample = receiver + 0.5 * (light - receiver)
+        u, v = project_camera_point(
+            ray_sample, fx=self.fx, fy=self.fy, cx=self.cx, cy=self.cy
+        )
+        self.assertGreater(u, self.cx)  # +X projects right.
+        self.assertGreater(v, self.cy)  # +Y projects down.
+
     def test_rejects_nonpositive_or_nonfinite_depth(self) -> None:
         for depth in (0.0, -1.0, float("nan"), float("inf")):
             with self.subTest(depth=depth), self.assertRaises(ValueError):
