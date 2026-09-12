@@ -84,7 +84,7 @@ Z_MIN_M: float = _getfloat("Z_MIN_M", 0.2)
 Z_MAX_M: float = _getfloat("Z_MAX_M", 3.0)
 # ---- Vector resilience ----
 # Hold last stable light briefly when hand is lost (edge/out-of-frame).
-HOLD_LAST_S: float = _getfloat("HOLD_LAST_S", 0.3)
+HOLD_LAST_S: float = _getfloat("HOLD_LAST_S", 0.5)
 # FILTER: "oneeuro" (smooth at rest, responsive on fast moves) or "ema".
 FILTER: str = _getenv("FILTER", "oneeuro").lower()
 ONEEURO_MINCUTOFF: float = _getfloat("ONEEURO_MINCUTOFF", 1.0)
@@ -98,7 +98,7 @@ MAX_JUMP_PX: float = _getfloat("MAX_JUMP_PX", 280.0)
 FAST_PX_S: float = _getfloat("FAST_PX_S", 900.0)
 # LK optical-flow bridge: track last palm up to N frames when detector drops
 # (edge / motion blur). 0 disables.
-LK_MAX_FRAMES: int = _getint("LK_MAX_FRAMES", 8)
+LK_MAX_FRAMES: int = _getint("LK_MAX_FRAMES", 12)
 # Torch glow radius in px @640 wide.
 GLOW_RADIUS_PX: float = _getfloat("GLOW_RADIUS_PX", 260.0)
 

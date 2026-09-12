@@ -111,8 +111,12 @@ def main() -> None:
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             # Downscaled inference + frame-skip: reuse last result on skip frames.
             # Fast hands disable skipping: a fast palm outruns a stale result.
+            # Lost hands disable skipping too: re-acquire ASAP instead of
+            # re-checking every N frames (this caused the vanish periods).
             n = max(1, config.HAND_DETECT_EVERY_N)
-            if last_speed > config.FAST_PX_S:
+            if last_res is None or not last_res.found or last_light is None:
+                n = 1
+            elif last_speed > config.FAST_PX_S:
                 n = 1
             if last_res is not None and (frame_id % n) != 0:
                 res = last_res
