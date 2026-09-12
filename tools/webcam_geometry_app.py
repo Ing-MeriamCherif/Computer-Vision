@@ -78,10 +78,9 @@ class WebcamGeometrySession:
         self.lock = threading.Lock()
         # The live path uses a bounded model input; the camera preview itself
         # remains full resolution in the browser.
-        # Depth Anything's transformer input is the dominant per-frame cost.
-        # 140px keeps the live path responsive while preserving the full-size
-        # preview and renderer output upscaled by the Gradio image component.
-        self.depth_provider = DepthAnythingProvider(model_path, input_size=140)
+        # Keep more spatial detail than the old 256x192/140px throughput preset
+        # while remaining within the live frame budget on the CUDA path.
+        self.depth_provider = DepthAnythingProvider(model_path, input_size=192)
         self.gpu_backend: TorchGeometryBackend | None = None
         self.reset()
 

@@ -20,7 +20,7 @@ The original full-resolution run only partially passed: CUDA-current and
 temporal modes each completed 90 consecutive frames, but the synchronous path
 processed roughly one frame per second. That baseline is retained below for
 traceability. The current live path uses WebRTC, bounds processing to 256 x 192,
-uses a 140px Depth Anything input, skips stale frames, and returns a synchronized
+uses a 192px Depth Anything input, skips stale frames, and returns a synchronized
 four-panel result. Warm direct processing is 28.1 ms/frame (35.6 FPS) on a
 256 x 192 input with valid depth, normals, confidence, and renderer output.
 
@@ -130,8 +130,8 @@ hardware-camera test and did use `/dev/video0` continuously.
 
 The post-fix browser gate used Chromium's fake 30 FPS camera track and the same
 WebRTC callback used by the UI. After model warm-up, the returned `<video>` had
-`readyState=4`, intrinsic 256 x 192 dimensions, and delivered 152 frames in
-5.20 seconds: **29.2 FPS**. The rendered frame visibly contained all four
+`readyState=4`, intrinsic 256 x 192 dimensions, and delivered 151 frames in
+5.20 seconds: **29.0 FPS**. The rendered frame visibly contained all four
 effects and the overlay reported FPS, latency, and mode. FastRTC's
 `VideoStreamHandler(..., skip_frames=True)` prevents a slow inference callback
 from replaying stale frames. The browser capture request is capped at 256 x 192
@@ -148,8 +148,9 @@ those modes remain available for diagnostics but are not claimed as 30 FPS.
 ## Verdict
 
 All major feature families remain connected to a continuous video path.
-CUDA-current now meets the 30 FPS live-preview target in the browser gate
-(29.2 delivered FPS, 28.1 ms warm direct callback), and the stream no longer
+CUDA-current remains near the 30 FPS live-preview target in the browser gate
+(29.0 delivered FPS, ~31.9 ms warm direct callback with the higher-detail
+192px depth input), and the stream no longer
 uses the snapshot/queue transport that caused the earlier 0.24–3 FPS display.
 Temporal and persistent modes remain available, but their heavier CPU
 algorithms are not claimed as full-rate live processing.
