@@ -96,6 +96,20 @@ curl http://<PC_IP>:8000/light          # latest packet JSON
 curl -N http://<PC_IP>:8000/stream      # SSE, one event per packet
 ```
 
+## GPU run (4060)
+
+```powershell
+copy .env.gpu.example .env
+pip install -r requirements.txt   # cuda torch build for your CUDA version
+python main.py --mode profile --save-json results/gpu_baseline.json
+python -m depth.benchmark         # depth package spread (see AGENTS.md)
+python tools/depth_live.py --depth-every 1
+```
+
+Merged branches: `talel-phase2` (D2NT normals, depth estimator) +
+`feature/depth` (`depth/` async package, `model_comparison/`, tests).
+Person-1 pipeline files kept intact; `depth/` is standalone (`python -m ...`).
+
 ## Files
 
 `main.py` loop · `pipeline.py` continuous API · `api_server.py` HTTP/SSE ·
