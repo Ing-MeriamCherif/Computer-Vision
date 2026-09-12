@@ -6,6 +6,7 @@ uniform sampler2D u_normals;
 uniform sampler2D u_depth_valid;
 uniform sampler2D u_normal_valid;
 uniform sampler2D u_shadow_visibility;
+uniform sampler2D u_shadow_visibility_2;
 uniform int u_debug_mode;
 uniform float u_depth_min_m;
 uniform float u_depth_max_m;
@@ -29,6 +30,9 @@ void main() {
         // Shadow mask convention: white = illuminated, black = shadowed.
         // This texture is a framebuffer output, so its Y origin is bottom-left.
         float visibility = texture(u_shadow_visibility, vec2(v_uv.x, 1.0 - v_uv.y)).r;
+        color = vec3(clamp(visibility, 0.0, 1.0));
+    } else if (u_debug_mode == 10) {
+        float visibility = texture(u_shadow_visibility_2, vec2(v_uv.x, 1.0 - v_uv.y)).r;
         color = vec3(clamp(visibility, 0.0, 1.0));
     } else if (u_debug_mode == 9) {
         float center_z = texture(u_depth, v_uv).r;

@@ -15,9 +15,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
+from contracts.render_types import MAX_LIGHTS, DepthFrame, Light, LightState, NormalFrame, RenderPacket
 from renderer.capture import CapturedRGBFrame, WebcamCaptureWorker
-from renderer.config import LightingConfig, ShadowConfig, ShadowQualityProfile
+from renderer.config import LightingConfig, SecondaryShadowMode, ShadowConfig, ShadowQualityProfile
 from renderer.renderer import DebugMode, Renderer
 
 
@@ -94,6 +94,7 @@ def make_synthetic_packet(
     foreground_bounds: tuple[float, float, float, float] | None = (0.30, 0.25, 0.70, 0.75),
     scene_name: str = "A",
     include_occluders: bool = True,
+    light_count: int = 2,
 ) -> RenderPacket:
     """Build deterministic RGB/depth/normals with documented pinhole intrinsics.
 
@@ -106,6 +107,8 @@ def make_synthetic_packet(
     scene_name = scene_name.upper()
     if scene_name not in ("A", "B", "C", "D"):
         raise ValueError("scene_name must be one of A, B, C, or D")
+    if isinstance(light_count, bool) or light_count not in (1, MAX_LIGHTS):
+        raise ValueError(f"light_count must be 1 or {MAX_LIGHTS}")
 
     x = np.linspace(0.0, 1.0, width, dtype=np.float32)[None, :]
     y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, None]
@@ -172,15 +175,26 @@ def make_synthetic_packet(
     valid_mask = np.ones((height, width), dtype=np.bool_)
     now = time.perf_counter()
 
-    light = Light(
-        # In front of the 1.5 m and 3.0 m surfaces so -Z-facing normals light.
-        position_camera_m=np.array([0.0, 0.0, 0.75], dtype=np.float32),
-        color_rgb=np.array([1.0, 0.92, 0.78], dtype=np.float32),
+    # The two lights sit on opposite sides to make their independent colored
+    # contributions and shadow masks obvious in the deterministic test scene.
+    # Both remain in front of the 1.5 m and 3.0 m surfaces so -Z normals light.
+    lights = [Light(
+        position_camera_m=np.array([-0.45, 0.0, 0.75], dtype=np.float32),
+        color_rgb=np.array([1.0, 0.70, 0.45], dtype=np.float32),
         intensity=1.0,
         radius_m=0.08,
         active=True,
         confidence=1.0,
-    )
+    )]
+    if light_count == MAX_LIGHTS:
+        lights.append(Light(
+            position_camera_m=np.array([0.45, 0.0, 0.75], dtype=np.float32),
+            color_rgb=np.array([0.45, 0.70, 1.0], dtype=np.float32),
+            intensity=1.0,
+            radius_m=0.08,
+            active=True,
+            confidence=1.0,
+        ))
     return RenderPacket(
         rgb=rgb,
         depth=DepthFrame(
@@ -193,7 +207,7 @@ def make_synthetic_packet(
             timestamp_s=now,
         ),
         normals=NormalFrame(normals_camera=normals, valid_mask=valid_mask.copy(), timestamp_s=now),
-        lights=LightState(lights=[light], timestamp_s=now),
+        lights=LightState(lights=lights, timestamp_s=now),
         frame_id=0,
         timestamp_s=now,
     )
@@ -216,6 +230,26 @@ def _move_light(glfw, window, light: Light, delta_s: float, speed_m_s: float) ->
     magnitude = float(np.linalg.norm(direction))
     if magnitude > 0.0:
         light.position_camera_m += direction * (speed_m_s * delta_s / magnitude)
+
+
+def _light_status(packet: RenderPacket, selected_light: int) -> str:
+    parts = []
+    for index, light in enumerate(packet.lights.lights):
+        p = light.position_camera_m
+        active = "on" if light.active else "off"
+        marker = "*" if index == selected_light else ""
+        parts.append(f"L{index + 1}{marker} {active} ({p[0]:+.2f},{p[1]:+.2f},{p[2]:+.2f})m")
+    return " | ".join(parts)
+
+
+def _print_light_setup(packet: RenderPacket) -> None:
+    for index, light in enumerate(packet.lights.lights):
+        position = ", ".join(f"{value:+.3f}" for value in light.position_camera_m)
+        color = ", ".join(f"{value:.2f}" for value in light.color_rgb)
+        print(
+            f"  Light {index + 1}: active={light.active}, position_camera_m=[{position}], "
+            f"linear_color_rgb=[{color}], intensity={light.intensity:.2f}"
+        )
 
 
 def _print_gl_info(context) -> str:
@@ -271,6 +305,7 @@ _MODE_NAMES = {
     "final": DebugMode.FINAL,
     "shadow-mask": DebugMode.SHADOW_MASK,
     "shadow-final": DebugMode.SHADOW_FINAL,
+    "shadow-mask-2": DebugMode.SHADOW_MASK_2,
     "depth-edges": DebugMode.DEPTH_EDGES,
 }
 
@@ -293,6 +328,8 @@ def _run_benchmark(
     prepare_frame: Callable[[RenderPacket, int], tuple[float, bool]] | None,
     benchmark_mode: DebugMode,
     quality_profile: ShadowQualityProfile,
+    light_count: int,
+    secondary_shadow_mode: SecondaryShadowMode,
     scene_name: str,
 ) -> int:
     """Run unlogged warmup frames, then collect per-stage CPU timings."""
@@ -308,9 +345,12 @@ def _run_benchmark(
     gpu_query_count = min(12, measured_frames)
     gpu_query_indices = set(np.linspace(0, measured_frames - 1, gpu_query_count, dtype=np.int64).tolist())
     if benchmark_mode == DebugMode.SHADOW_FINAL:
-        gpu_stages = ("lighting", "shadow", "composition")
+        gpu_stages = ["lighting", "composition"]
+        for index, light in enumerate(packet.lights.lights):
+            if light.active and renderer.shadow_configs[index].shadow_enabled:
+                gpu_stages.insert(1 + index, f"shadow_{index + 1}")
     elif benchmark_mode in (DebugMode.LAMBERTIAN, DebugMode.SPECULAR, DebugMode.FINAL):
-        gpu_stages = ("lighting",)
+        gpu_stages = ["lighting"]
     else:
         gpu_stages = ()
     gpu_queries: dict[int, dict[str, object]] = {}
@@ -378,21 +418,16 @@ def _run_benchmark(
     average_frame_ms = float(np.mean(full_ms))
     warmup_average_ms = float(np.mean(warmup_ms))
     print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | profile {quality_profile.value} | scene {scene_name} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    print(f"Active light count: {light_count} | secondary shadow mode: {secondary_shadow_mode.value}")
+    _print_light_setup(packet)
     if benchmark_mode in (DebugMode.SHADOW_MASK, DebugMode.SHADOW_FINAL):
-        print(
-            f"Shadow pass: {renderer.resources.shadow_size[0]}x{renderer.resources.shadow_size[1]} | "
-            f"steps {renderer.shadow_config.shadow_steps} | enabled {renderer.shadow_config.shadow_enabled} | "
-            f"bias {renderer.shadow_config.shadow_bias_m:.3f} m | "
-            f"thickness {renderer.shadow_config.shadow_thickness_m:.3f} m | "
-            f"start offset {renderer.shadow_config.ray_start_offset:.3f} m"
-        )
-        print(
-            f"Quality profile: {quality_profile.value} | softening "
-            f"{renderer.shadow_config.shadow_softening_enabled} "
-            f"({renderer.shadow_config.shadow_soft_samples} offsets, "
-            f"radius {renderer.shadow_config.shadow_soft_radius:.2f}) | "
-            f"depth-aware upsampling {renderer.shadow_config.shadow_edge_aware_upsampling}"
-        )
+        for index, shadow in enumerate(renderer.shadow_configs[:light_count]):
+            print(
+                f"Light {index + 1} shadow: {renderer.resources.shadow_size[0]}x{renderer.resources.shadow_size[1]} | "
+                f"steps {shadow.shadow_steps} | enabled {shadow.shadow_enabled} | "
+                f"softening {shadow.shadow_softening_enabled} ({shadow.shadow_soft_samples} offsets, "
+                f"radius {shadow.shadow_soft_radius:.2f}) | depth-aware {shadow.shadow_edge_aware_upsampling}"
+            )
     print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
     short_sample_count = min(45, warmup_frames)
     short_sample_ms = float(np.mean(warmup_ms[:short_sample_count]))
@@ -413,17 +448,21 @@ def _run_benchmark(
     if gpu_queries:
         try:
             context.finish()
-            for stage in gpu_stages:
+            for stage in ("lighting", "shadow_1", "shadow_2", "composition"):
                 stage_ms = np.array(
-                    [query_set[stage].elapsed / 1_000_000.0 for query_set in gpu_queries.values()],
+                    [query_set[stage].elapsed / 1_000_000.0 for query_set in gpu_queries.values() if stage in query_set],
                     dtype=np.float64,
                 )
                 if stage_ms.size:
                     print(
-                        f"GPU {stage} time (sampled draws): avg {float(np.mean(stage_ms)):.4f} ms, "
+                        f"GPU {stage.replace('_', ' ')} time (sampled draws): avg {float(np.mean(stage_ms)):.4f} ms, "
                         f"median {float(np.median(stage_ms)):.4f} ms, "
                         f"p95 {float(np.percentile(stage_ms, 95)):.4f} ms, n={stage_ms.size}"
                     )
+                elif stage.startswith("shadow_"):
+                    index = int(stage[-1]) - 1
+                    reason = "inactive" if index >= len(packet.lights.lights) or not packet.lights.lights[index].active else "disabled"
+                    print(f"GPU {stage.replace('_', ' ')} time: n/a ({reason})")
         except Exception as exc:
             print(f"GPU render timer query unavailable: {type(exc).__name__}: {exc}")
     elif gpu_query_error:
@@ -448,7 +487,7 @@ def _run_webcam_live(
     state: dict,
 ) -> int:
     """Render latest webcam RGB while a worker continuously drains the camera."""
-    print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows, 9 depth edges | A/D X, W/S Y, Q/E Z | Esc quit")
+    print("Controls: 1-9 existing modes, 0 Light 2 shadow mask | Tab select light, Space toggle selected | A/D X, W/S Y, Q/E Z | Esc quit")
 
     gpu_queries = []
     gpu_query_error = None
@@ -490,7 +529,8 @@ def _run_webcam_live(
         now = time.perf_counter()
         delta_s = min(now - previous_time, 0.1)
         previous_time = now
-        _move_light(glfw, window, packet.lights.lights[0], delta_s, light_speed)
+        selected = min(state["selected_light"], len(packet.lights.lights) - 1)
+        _move_light(glfw, window, packet.lights.lights[selected], delta_s, light_speed)
 
         prep_ms, rgb_updated = updater.update(packet, rendered_frames)
         webcam_packet_prep_total_ms += prep_ms
@@ -551,7 +591,8 @@ def _run_webcam_live(
             label = (
                 f"Renderer {report_fps:5.1f} FPS | capture {captured_interval / interval_s:4.1f} FPS "
                 f"({captured_interval} new, {replaced_interval} replaced) | unique {unique_fps:4.1f}/s "
-                f"| latest age {latest_age_ms:5.1f} ms | {state['mode'].name} | {gpu_name}"
+                f"| latest age {latest_age_ms:5.1f} ms | {state['mode'].name} | "
+                f"{_light_status(packet, selected)} | {gpu_name}"
             )
             glfw.set_window_title(window, label)
             sys.stdout.write("\r" + label + "   ")
@@ -644,6 +685,8 @@ def run_demo(
     benchmark_mode: DebugMode,
     foreground_bounds: tuple[float, float, float, float] | None,
     quality_profile: ShadowQualityProfile,
+    light_count: int,
+    secondary_shadow_mode: SecondaryShadowMode,
     scene_name: str,
     include_occluders: bool,
 ) -> int:
@@ -690,6 +733,7 @@ def run_demo(
             foreground_bounds=foreground_bounds,
             scene_name=scene_name,
             include_occluders=include_occluders,
+            light_count=light_count,
         )
         data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
         prepare_frame = None
@@ -707,10 +751,16 @@ def run_demo(
             print("Webcam display: aspect-preserving letterbox, RGB latest-frame mailbox, local only; no saving or network transmission")
 
         renderer_setup_start_ns = time.perf_counter_ns()
-        renderer = Renderer(context, packet, config=lighting_config, shadow_config=shadow_config)
+        renderer = Renderer(
+            context,
+            packet,
+            config=lighting_config,
+            shadow_config=shadow_config,
+            secondary_shadow_mode=secondary_shadow_mode,
+        )
         renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
         gpu_name = _print_gl_info(context)
-        state = {"mode": initial_mode}
+        state = {"mode": initial_mode, "selected_light": 0}
 
         def on_key(callback_window, key, _scancode, action, _mods):
             if action not in (glfw.PRESS, glfw.REPEAT):
@@ -720,6 +770,13 @@ def run_demo(
                 glfw.KEY_5, glfw.KEY_6, glfw.KEY_7, glfw.KEY_8, glfw.KEY_9,
             ):
                 state["mode"] = DebugMode(key - glfw.KEY_0)
+            elif key == glfw.KEY_0:
+                state["mode"] = DebugMode.SHADOW_MASK_2
+            elif key == glfw.KEY_TAB and action == glfw.PRESS:
+                state["selected_light"] = (state["selected_light"] + 1) % len(packet.lights.lights)
+            elif key == glfw.KEY_SPACE and action == glfw.PRESS:
+                light = packet.lights.lights[state["selected_light"]]
+                light.active = not light.active
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
                 glfw.set_window_should_close(callback_window, True)
 
@@ -742,6 +799,8 @@ def run_demo(
                 prepare_frame=prepare_frame,
                 benchmark_mode=benchmark_mode,
                 quality_profile=quality_profile,
+                light_count=light_count,
+                secondary_shadow_mode=secondary_shadow_mode,
                 scene_name=scene_name,
             )
 
@@ -761,7 +820,7 @@ def run_demo(
                 state=state,
             )
 
-        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final, 7 shadow mask, 8 final + shadows, 9 depth edges | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1-9 existing modes, 0 Light 2 shadow mask | Tab select light, Space toggle selected | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
@@ -773,7 +832,8 @@ def run_demo(
             now = time.perf_counter()
             delta_s = min(now - previous_time, 0.1)
             previous_time = now
-            light = packet.lights.lights[0]
+            selected = min(state["selected_light"], len(packet.lights.lights) - 1)
+            light = packet.lights.lights[selected]
             _move_light(glfw, window, light, delta_s, light_speed)
 
             if prepare_frame is not None:
@@ -789,7 +849,7 @@ def run_demo(
                 fps_frames = 0
                 fps_start = now
                 position = light.position_camera_m
-                label = f"FPS {fps:5.1f} | {state['mode'].name} | GPU {gpu_name} | Light {position[0]:+.2f},{position[1]:+.2f},{position[2]:+.2f} m"
+                label = f"FPS {fps:5.1f} | {state['mode'].name} | GPU {gpu_name} | {_light_status(packet, selected)}"
                 glfw.set_window_title(window, label)
                 sys.stdout.write("\r" + label + "   ")
                 sys.stdout.flush()
@@ -839,12 +899,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup-frames", type=int, default=60, help="ignored warmup frames; benchmark requires at least 60")
     parser.add_argument("--vsync", choices=("on", "off"), default="on", help="buffer-swap VSync mode")
     parser.add_argument("--light-speed", type=float, default=0.75, help="light movement speed in meters/second")
+    parser.add_argument("--light-count", type=int, choices=(1, MAX_LIGHTS), default=MAX_LIGHTS, help="number of active demo lights")
+    parser.add_argument(
+        "--secondary-shadow-mode",
+        choices=tuple(item.value for item in SecondaryShadowMode),
+        default=SecondaryShadowMode.BALANCED.value,
+        help="secondary light shadow quality: balanced, safe, or off",
+    )
     parser.add_argument("--input", choices=("synthetic", "webcam"), default="synthetic", help="RGB input source")
     parser.add_argument("--camera-index", type=int, default=0, help="webcam device index; default is 0")
     parser.add_argument("--mode", choices=tuple(_MODE_NAMES), default="rgb", help="initial interactive visualization")
     parser.add_argument(
         "--benchmark-mode",
-        choices=("rgb", "lambertian", "specular", "final", "shadow-mask", "shadow-final"),
+        choices=("rgb", "lambertian", "specular", "final", "shadow-mask", "shadow-mask-2", "shadow-final"),
         default="rgb",
         help="visualization measured by --benchmark",
     )
@@ -901,6 +968,7 @@ def main(argv: list[str] | None = None) -> int:
             attenuation_k=args.attenuation_k,
         )
         quality_profile = ShadowQualityProfile(args.quality_profile)
+        secondary_shadow_mode = SecondaryShadowMode(args.secondary_shadow_mode)
         profile_config = ShadowConfig.for_profile(quality_profile)
         config_overrides = {
             "shadow_enabled": args.shadow_enabled,
@@ -944,6 +1012,8 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_mode=_MODE_NAMES[args.benchmark_mode],
         foreground_bounds=foreground_bounds,
         quality_profile=quality_profile,
+        light_count=args.light_count,
+        secondary_shadow_mode=secondary_shadow_mode,
         scene_name=args.synthetic_scene,
         include_occluders=not args.no_occluder,
     )

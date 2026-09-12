@@ -14,6 +14,7 @@ import numpy as np
 
 FloatArray: TypeAlias = np.ndarray
 BoolArray: TypeAlias = np.ndarray
+MAX_LIGHTS = 2
 
 
 def _finite_scalar(name: str, value: float) -> float:
@@ -83,8 +84,8 @@ class LightState:
     def __post_init__(self) -> None:
         if not isinstance(self.lights, list):
             raise TypeError("lights must be a list[Light]")
-        if len(self.lights) > 2:
-            raise ValueError("LightState supports at most 2 lights")
+        if len(self.lights) > MAX_LIGHTS:
+            raise ValueError(f"LightState supports at most {MAX_LIGHTS} lights")
         if any(not isinstance(light, Light) for light in self.lights):
             raise TypeError("every item in lights must be a Light")
         _finite_scalar("timestamp_s", self.timestamp_s)

@@ -71,6 +71,18 @@ class ShadowMathTests(unittest.TestCase):
         self.assertEqual(self.trace(130, 60, (-0.6, 0.0, 0.75)), 0.0)
         self.assertEqual(self.trace(130, 60, (0.6, 0.0, 0.75)), 1.0)
 
+    def test_two_lights_have_independent_shadow_visibility(self) -> None:
+        light_1 = (0.6, 0.0, 0.75)
+        light_2 = (-0.6, 0.0, 0.75)
+        left_sample = (30, 60)
+        right_sample = (130, 60)
+        light_1_left = self.trace(*left_sample, light_1)
+        light_2_left = self.trace(*left_sample, light_2)
+        light_1_right = self.trace(*right_sample, light_1)
+        light_2_right = self.trace(*right_sample, light_2)
+        self.assertEqual((light_1_left, light_2_left), (0.0, 1.0))
+        self.assertEqual((light_1_right, light_2_right), (1.0, 0.0))
+
     def test_light_y_moves_shadow_opposite_camera_y_direction(self) -> None:
         # +Y is down; the corresponding shadow shifts upward on the image.
         self.assertEqual(self.trace(80, 15, (0.0, 0.6, 0.75)), 0.0)

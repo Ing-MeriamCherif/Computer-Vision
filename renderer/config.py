@@ -37,6 +37,14 @@ class ShadowQualityProfile(str, Enum):
     HIGH = "high"
 
 
+class SecondaryShadowMode(str, Enum):
+    """Quality fallback applied only to the secondary point light's shadow."""
+
+    BALANCED = "balanced"
+    SAFE = "safe"
+    OFF = "off"
+
+
 @dataclass(frozen=True)
 class ShadowConfig:
     """Controls for fixed-step screen-space shadows and edge-aware filtering."""

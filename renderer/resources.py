@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from contracts.render_types import RenderPacket
+from contracts.render_types import MAX_LIGHTS, RenderPacket
 from .config import ShadowConfig
 
 
@@ -26,12 +26,27 @@ class RendererResources:
         self.normal_texture = context.texture(self.size, components=3, dtype="f4", alignment=1)
         self.depth_valid_texture = context.texture(self.size, components=1, dtype="f1", alignment=1)
         self.normal_valid_texture = context.texture(self.size, components=1, dtype="f1", alignment=1)
-        self.shadow_texture = context.texture(self.shadow_size, components=1, dtype="f1", alignment=1)
+        self.shadow_textures = [
+            context.texture(self.shadow_size, components=1, dtype="f1", alignment=1)
+            for _ in range(MAX_LIGHTS)
+        ]
         self.ambient_texture = context.texture(self.size, components=4, dtype="f2", alignment=1)
-        self.direct_texture = context.texture(self.size, components=4, dtype="f2", alignment=1)
-        self.shadow_framebuffer = context.framebuffer(color_attachments=[self.shadow_texture])
+        self.direct_textures = [
+            context.texture(self.size, components=4, dtype="f2", alignment=1)
+            for _ in range(MAX_LIGHTS)
+        ]
+        # Preserve the original single-light resource names for callers that
+        # inspect them, while the renderer uses the fixed-size collections.
+        self.shadow_texture = self.shadow_textures[0]
+        self.shadow_texture_2 = self.shadow_textures[1]
+        self.direct_texture = self.direct_textures[0]
+        self.direct_texture_2 = self.direct_textures[1]
+        self.shadow_framebuffers = [
+            context.framebuffer(color_attachments=[texture]) for texture in self.shadow_textures
+        ]
+        self.shadow_framebuffer = self.shadow_framebuffers[0]
         self.lighting_framebuffer = context.framebuffer(
-            color_attachments=[self.ambient_texture, self.direct_texture]
+            color_attachments=[self.ambient_texture, *self.direct_textures]
         )
 
         for texture in (
@@ -44,10 +59,11 @@ class RendererResources:
             texture.filter = (moderngl.NEAREST, moderngl.NEAREST)
             texture.repeat_x = False
             texture.repeat_y = False
-        self.shadow_texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
-        self.shadow_texture.repeat_x = False
-        self.shadow_texture.repeat_y = False
-        for texture in (self.ambient_texture, self.direct_texture):
+        for texture in self.shadow_textures:
+            texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            texture.repeat_x = False
+            texture.repeat_y = False
+        for texture in (self.ambient_texture, *self.direct_textures):
             texture.filter = (moderngl.LINEAR, moderngl.LINEAR)
             texture.repeat_x = False
             texture.repeat_y = False
@@ -82,15 +98,16 @@ class RendererResources:
 
     def release(self) -> None:
         self.lighting_framebuffer.release()
-        self.shadow_framebuffer.release()
+        for framebuffer in self.shadow_framebuffers:
+            framebuffer.release()
         for texture in (
             self.rgb_texture,
             self.depth_texture,
             self.normal_texture,
             self.depth_valid_texture,
             self.normal_valid_texture,
-            self.shadow_texture,
+            *self.shadow_textures,
             self.ambient_texture,
-            self.direct_texture,
+            *self.direct_textures,
         ):
             texture.release()

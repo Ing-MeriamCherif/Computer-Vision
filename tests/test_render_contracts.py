@@ -4,7 +4,8 @@ import unittest
 
 import numpy as np
 
-from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
+from contracts.render_types import MAX_LIGHTS, DepthFrame, Light, LightState, NormalFrame, RenderPacket
+from renderer.renderer import Renderer
 
 
 def make_packet(width: int = 4, height: int = 3, lights: list[Light] | None = None) -> RenderPacket:
@@ -92,9 +93,46 @@ class RenderContractTests(unittest.TestCase):
 
     def test_accepts_up_to_two_lights_and_rejects_more(self) -> None:
         second = make_light((0.5, 0.0, 2.0))
-        self.assertEqual(len(make_packet(lights=[make_light(), second]).lights.lights), 2)
+        packet = make_packet(lights=[make_light(), second])
+        self.assertEqual(MAX_LIGHTS, 2)
+        self.assertEqual(len(packet.lights.lights), MAX_LIGHTS)
+        self.assertTrue(packet.lights.lights[1].active)
+        np.testing.assert_array_equal(packet.lights.lights[1].position_camera_m, [0.5, 0.0, 2.0])
         with self.assertRaisesRegex(ValueError, "at most 2"):
             LightState([make_light(), second, make_light()], 1.0)
+
+    def test_single_light_packet_remains_supported(self) -> None:
+        packet = make_packet(lights=[make_light()])
+        self.assertEqual(len(packet.lights.lights), 1)
+        self.assertTrue(packet.lights.lights[0].active)
+
+    def test_second_light_can_be_inactive_without_changing_first(self) -> None:
+        first = make_light((-0.4, 0.0, 0.75))
+        second = Light(
+            np.array([0.6, 0.2, 0.8], dtype=np.float32),
+            np.array([0.45, 0.70, 1.0], dtype=np.float32),
+            0.75,
+            active=False,
+        )
+        packet = make_packet(lights=[first, second])
+        np.testing.assert_allclose(packet.lights.lights[0].color_rgb, [1.0, 0.9, 0.8])
+        self.assertEqual(packet.lights.lights[0].intensity, 1.0)
+        self.assertFalse(packet.lights.lights[1].active)
+        np.testing.assert_allclose(packet.lights.lights[1].color_rgb, [0.45, 0.70, 1.0])
+        self.assertEqual(packet.lights.lights[1].intensity, 0.75)
+
+    def test_mutated_invalid_light_is_deactivated_safely(self) -> None:
+        invalid = make_light()
+        invalid.position_camera_m[0] = np.nan
+        _position, _color, _intensity, active = Renderer._safe_light(invalid)
+        self.assertFalse(active)
+
+        valid = make_light((0.4, 0.0, 0.75))
+        position, color, intensity, active = Renderer._safe_light(valid)
+        self.assertTrue(active)
+        np.testing.assert_allclose(position, (0.4, 0.0, 0.75))
+        np.testing.assert_allclose(color, (1.0, 0.9, 0.8))
+        self.assertEqual(intensity, 1.0)
 
     def test_rejects_wrong_light_coordinate_dtype_or_range(self) -> None:
         with self.assertRaisesRegex(TypeError, "float32"):

@@ -2,7 +2,8 @@
 
 import unittest
 
-from renderer.config import ShadowConfig, ShadowQualityProfile
+from renderer.config import SecondaryShadowMode, ShadowConfig, ShadowQualityProfile
+from renderer.renderer import secondary_shadow_configs
 
 
 class ShadowConfigTests(unittest.TestCase):
@@ -59,6 +60,25 @@ class ShadowConfigTests(unittest.TestCase):
         ):
             with self.subTest(values=values), self.assertRaises(ValueError):
                 ShadowConfig(**values)
+
+    def test_secondary_quality_policies_leave_primary_independent(self) -> None:
+        primary = ShadowConfig.for_profile(ShadowQualityProfile.BALANCED)
+        primary, balanced = secondary_shadow_configs(primary, SecondaryShadowMode.BALANCED)
+        self.assertEqual(balanced, primary)
+
+        primary, safe = secondary_shadow_configs(primary, "safe")
+        self.assertEqual(primary.shadow_steps, 16)
+        self.assertEqual(safe.shadow_steps, 8)
+        self.assertTrue(safe.shadow_enabled)
+        self.assertTrue(safe.shadow_edge_aware_upsampling)
+
+        primary, off = secondary_shadow_configs(primary, "off")
+        self.assertTrue(primary.shadow_enabled)
+        self.assertFalse(off.shadow_enabled)
+
+    def test_rejects_unknown_secondary_shadow_policy(self) -> None:
+        with self.assertRaisesRegex(ValueError, "secondary shadow mode"):
+            secondary_shadow_configs(ShadowConfig(), "ultra")
 
 
 if __name__ == "__main__":

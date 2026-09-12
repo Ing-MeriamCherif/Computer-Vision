@@ -1,12 +1,16 @@
-"""Fullscreen ModernGL renderer with Level 02 lighting and Level 04 shadows."""
+"""Fullscreen ModernGL renderer with independent point-light shadow layers."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from enum import IntEnum
+import math
 from pathlib import Path
 
-from contracts.render_types import RenderPacket
-from .config import LightingConfig, ShadowConfig
+import numpy as np
+
+from contracts.render_types import MAX_LIGHTS, Light, RenderPacket
+from .config import LightingConfig, SecondaryShadowMode, ShadowConfig
 from .resources import RendererResources
 
 
@@ -20,6 +24,37 @@ class DebugMode(IntEnum):
     SHADOW_MASK = 7
     SHADOW_FINAL = 8
     DEPTH_EDGES = 9
+    SHADOW_MASK_2 = 10
+
+
+def secondary_shadow_configs(
+    primary: ShadowConfig,
+    mode: SecondaryShadowMode | str,
+) -> tuple[ShadowConfig, ShadowConfig]:
+    """Resolve an independent secondary shadow quality policy."""
+    try:
+        selected = mode if isinstance(mode, SecondaryShadowMode) else SecondaryShadowMode(mode.lower())
+    except (AttributeError, ValueError) as exc:
+        choices = ", ".join(item.value for item in SecondaryShadowMode)
+        raise ValueError(f"secondary shadow mode must be one of: {choices}") from exc
+
+    if selected is SecondaryShadowMode.BALANCED:
+        secondary = primary
+    elif selected is SecondaryShadowMode.SAFE:
+        from .config import ShadowQualityProfile
+
+        safe = ShadowConfig.for_profile(ShadowQualityProfile.SAFE)
+        secondary = replace(
+            primary,
+            shadow_steps=safe.shadow_steps,
+            shadow_softening_enabled=safe.shadow_softening_enabled,
+            shadow_soft_samples=safe.shadow_soft_samples,
+            shadow_soft_radius=safe.shadow_soft_radius,
+            shadow_edge_aware_upsampling=safe.shadow_edge_aware_upsampling,
+        )
+    else:
+        secondary = replace(primary, shadow_enabled=False)
+    return primary, secondary
 
 
 class Renderer:
@@ -31,6 +66,7 @@ class Renderer:
         initial_packet: RenderPacket,
         config: LightingConfig | None = None,
         shadow_config: ShadowConfig | None = None,
+        secondary_shadow_mode: SecondaryShadowMode | str = SecondaryShadowMode.BALANCED,
     ) -> None:
         try:
             import moderngl
@@ -42,6 +78,12 @@ class Renderer:
         self._moderngl = moderngl
         self.config = config or LightingConfig()
         self.shadow_config = shadow_config or ShadowConfig()
+        self.secondary_shadow_mode = (
+            secondary_shadow_mode
+            if isinstance(secondary_shadow_mode, SecondaryShadowMode)
+            else SecondaryShadowMode(secondary_shadow_mode.lower())
+        )
+        self.shadow_configs = secondary_shadow_configs(self.shadow_config, self.secondary_shadow_mode)
         vertex_shader = (shader_dir / "fullscreen.vert").read_text(encoding="utf-8")
         self.debug_program = context.program(
             vertex_shader=vertex_shader,
@@ -72,13 +114,20 @@ class Renderer:
             program["u_depth_valid"].value = 3
             program["u_normal_valid"].value = 4
         self.debug_program["u_shadow_visibility"].value = 5
+        self.debug_program["u_shadow_visibility_2"].value = 6
         self.shadow_program["u_depth"].value = 1
         self.shadow_program["u_depth_valid"].value = 3
-        self.composite_program["u_ambient"].value = 0
-        self.composite_program["u_direct"].value = 1
-        self.composite_program["u_shadow_visibility"].value = 2
-        self.composite_program["u_depth"].value = 3
-        self.composite_program["u_depth_valid"].value = 4
+
+        for name, unit in (
+            ("u_ambient", 0),
+            ("u_direct_1", 1),
+            ("u_direct_2", 5),
+            ("u_shadow_visibility_1", 2),
+            ("u_shadow_visibility_2", 6),
+            ("u_depth", 3),
+            ("u_depth_valid", 4),
+        ):
+            self.composite_program[name].value = unit
 
         self.debug_program["u_depth_min_m"].value = 0.5
         self.debug_program["u_depth_max_m"].value = 3.5
@@ -88,19 +137,17 @@ class Renderer:
         self.lighting_program["u_shininess"].value = self.config.shininess
         self.lighting_program["u_attenuation_k"].value = self.config.attenuation_k
 
-        self.shadow_program["u_shadow_steps"].value = self.shadow_config.shadow_steps
-        self.shadow_program["u_shadow_bias_m"].value = self.shadow_config.shadow_bias_m
-        self.shadow_program["u_shadow_thickness_m"].value = self.shadow_config.shadow_thickness_m
-        self.shadow_program["u_ray_start_offset"].value = self.shadow_config.ray_start_offset
-        self.composite_program["u_shadow_softening_enabled"].value = int(
-            self.shadow_config.shadow_softening_enabled
-        )
-        self.composite_program["u_shadow_soft_samples"].value = self.shadow_config.shadow_soft_samples
-        self.composite_program["u_shadow_edge_aware_upsampling"].value = int(
-            self.shadow_config.shadow_edge_aware_upsampling
-        )
-        self.composite_program["u_shadow_soft_radius"].value = self.shadow_config.shadow_soft_radius
-        self.composite_program["u_depth_edge_threshold_m"].value = self.shadow_config.depth_edge_threshold_m
+        for light_index, shadow in enumerate(self.shadow_configs):
+            self._set_shadow_config_uniforms(self.composite_program, light_index, shadow)
+
+    @staticmethod
+    def _set_shadow_config_uniforms(program, light_index: int, config: ShadowConfig) -> None:
+        suffix = light_index + 1
+        program[f"u_shadow_softening_enabled_{suffix}"].value = int(config.shadow_softening_enabled)
+        program[f"u_shadow_soft_samples_{suffix}"].value = config.shadow_soft_samples
+        program[f"u_shadow_edge_aware_upsampling_{suffix}"].value = int(config.shadow_edge_aware_upsampling)
+        program[f"u_shadow_soft_radius_{suffix}"].value = config.shadow_soft_radius
+        program[f"u_depth_edge_threshold_m_{suffix}"].value = config.depth_edge_threshold_m
 
     def upload_packet(self, packet: RenderPacket) -> None:
         """Update existing input textures without reallocating them."""
@@ -136,39 +183,93 @@ class Renderer:
         program["u_image_height"].value = float(packet.rgb.shape[0])
 
     @staticmethod
-    def _light_uniforms(program, packet: RenderPacket) -> None:
-        if packet.lights.lights:
-            light = packet.lights.lights[0]
-            program["u_light_position_camera_m"].value = tuple(
-                float(value) for value in light.position_camera_m
-            )
-            program["u_light_active"].value = int(light.active)
-            if "u_light_color_rgb" in program:
-                program["u_light_color_rgb"].value = tuple(float(value) for value in light.color_rgb)
-                program["u_light_intensity"].value = float(light.intensity)
+    def _safe_light(light: Light | None) -> tuple[np.ndarray, np.ndarray, float, bool]:
+        """Sanitize mutated light arrays so one invalid light cannot poison the other."""
+        zeros = np.zeros(3, dtype=np.float32)
+        if light is None:
+            return zeros, zeros.copy(), 0.0, False
+        try:
+            position = np.asarray(light.position_camera_m, dtype=np.float64)
+            color = np.asarray(light.color_rgb, dtype=np.float64)
+            intensity = float(light.intensity)
+            active = bool(light.active)
+        except (TypeError, ValueError, OverflowError):
+            return zeros, zeros.copy(), 0.0, False
+        if (
+            position.shape != (3,)
+            or color.shape != (3,)
+            or not np.isfinite(position).all()
+            or not np.isfinite(color).all()
+            or np.any(color < 0.0)
+            or np.any(color > 1.0)
+            or not math.isfinite(intensity)
+            or intensity < 0.0
+        ):
+            return zeros, zeros.copy(), 0.0, False
+        return position.astype(np.float32), color.astype(np.float32), intensity, active
+
+    def _light_values(self, packet: RenderPacket) -> list[tuple[np.ndarray, np.ndarray, float, bool]]:
+        return [self._safe_light(light) for light in packet.lights.lights[:MAX_LIGHTS]]
+
+    def _set_lighting_light_uniforms(self, packet: RenderPacket) -> None:
+        lights = self._light_values(packet)
+        positions = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
+        colors = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
+        intensities = np.zeros(MAX_LIGHTS, dtype=np.float32)
+        active = np.zeros(MAX_LIGHTS, dtype=np.int32)
+        for index, (position, color, intensity, enabled) in enumerate(lights):
+            positions[index] = position
+            colors[index] = color
+            intensities[index] = intensity
+            active[index] = int(enabled and intensity > 0.0)
+        program = self.lighting_program
+        program["u_light_count"].value = len(lights)
+        program["u_light_positions_camera_m"].value = tuple(
+            tuple(float(v) for v in row) for row in positions
+        )
+        program["u_light_colors_rgb"].value = tuple(
+            tuple(float(v) for v in row) for row in colors
+        )
+        program["u_light_intensities"].value = tuple(float(v) for v in intensities)
+        program["u_light_active"].value = tuple(int(v) for v in active)
+
+    def _set_shadow_light_uniforms(self, packet: RenderPacket, light_index: int) -> bool:
+        lights = self._light_values(packet)
+        if light_index >= len(lights):
+            position, _color, _intensity, active = self._safe_light(None)
         else:
-            program["u_light_position_camera_m"].value = (0.0, 0.0, 0.0)
-            program["u_light_active"].value = 0
-            if "u_light_color_rgb" in program:
-                program["u_light_color_rgb"].value = (0.0, 0.0, 0.0)
-                program["u_light_intensity"].value = 0.0
+            position, _color, intensity, active = lights[light_index]
+            active = active and intensity > 0.0
+        self.shadow_program["u_light_position_camera_m"].value = tuple(float(v) for v in position)
+        self.shadow_program["u_light_active"].value = int(active)
+        return active
 
-    def _render_shadow_pass(self, packet: RenderPacket, query=None) -> None:
+    def _clear_shadow(self, light_index: int) -> None:
         resources = self.resources
-        if not self.shadow_config.shadow_enabled:
-            resources.shadow_framebuffer.use()
-            self.context.viewport = (0, 0, *resources.shadow_size)
-            self.context.clear(1.0, 1.0, 1.0, 1.0)
-            return
+        resources.shadow_framebuffers[light_index].use()
+        self.context.viewport = (0, 0, *resources.shadow_size)
+        self.context.clear(1.0, 1.0, 1.0, 1.0)
 
-        resources.shadow_framebuffer.use()
+    def _render_shadow_pass(self, packet: RenderPacket, light_index: int, query=None) -> bool:
+        resources = self.resources
+        config = self.shadow_configs[light_index]
+        active = self._set_shadow_light_uniforms(packet, light_index)
+        if not config.shadow_enabled or not active:
+            self._clear_shadow(light_index)
+            return False
+
+        resources.shadow_framebuffers[light_index].use()
         self.context.viewport = (0, 0, *resources.shadow_size)
         self.context.clear(1.0, 1.0, 1.0, 1.0)
         resources.depth_texture.use(location=1)
         resources.depth_valid_texture.use(location=3)
         self._set_camera_uniforms(self.shadow_program, packet)
-        self._light_uniforms(self.shadow_program, packet)
+        self.shadow_program["u_shadow_steps"].value = config.shadow_steps
+        self.shadow_program["u_shadow_bias_m"].value = config.shadow_bias_m
+        self.shadow_program["u_shadow_thickness_m"].value = config.shadow_thickness_m
+        self.shadow_program["u_ray_start_offset"].value = config.ray_start_offset
         self._draw(self.shadow_vertex_array, self._moderngl, query)
+        return True
 
     def _render_lighting(self, packet: RenderPacket, mode: DebugMode, *, layered: bool, query=None) -> None:
         if layered:
@@ -183,7 +284,7 @@ class Renderer:
         self._bind_input_textures()
         self.lighting_program["u_lighting_mode"].value = 8 if layered else int(mode)
         self._set_camera_uniforms(self.lighting_program, packet)
-        self._light_uniforms(self.lighting_program, packet)
+        self._set_lighting_light_uniforms(packet)
         self._draw(self.lighting_vertex_array, self._moderngl, query)
 
     def _render_composite(self, query=None) -> None:
@@ -191,11 +292,24 @@ class Renderer:
         self.context.viewport = (0, 0, *self.context.screen.size)
         self.context.clear(0.04, 0.04, 0.05, 1.0)
         self.resources.ambient_texture.use(location=0)
-        self.resources.direct_texture.use(location=1)
-        self.resources.shadow_texture.use(location=2)
+        self.resources.direct_textures[0].use(location=1)
+        self.resources.shadow_textures[0].use(location=2)
         self.resources.depth_texture.use(location=3)
         self.resources.depth_valid_texture.use(location=4)
+        self.resources.direct_textures[1].use(location=5)
+        self.resources.shadow_textures[1].use(location=6)
         self._draw(self.composite_vertex_array, self._moderngl, query)
+
+    def _render_shadow_debug(self, packet: RenderPacket, light_index: int, query=None) -> None:
+        self._render_shadow_pass(packet, light_index, query)
+        self.context.screen.use()
+        self.context.viewport = (0, 0, *self.context.screen.size)
+        self.context.clear(0.04, 0.04, 0.05, 1.0)
+        self.resources.shadow_textures[light_index].use(location=5 + light_index)
+        self.debug_program["u_debug_mode"].value = int(
+            DebugMode.SHADOW_MASK if light_index == 0 else DebugMode.SHADOW_MASK_2
+        )
+        self._draw(self.debug_vertex_array, self._moderngl)
 
     def render(
         self,
@@ -212,17 +326,14 @@ class Renderer:
         self._bind_input_textures()
 
         if mode == DebugMode.SHADOW_MASK:
-            self._render_shadow_pass(packet, queries.get("shadow"))
-            self.context.screen.use()
-            self.context.viewport = (0, 0, *self.context.screen.size)
-            self.context.clear(0.04, 0.04, 0.05, 1.0)
-            self.resources.shadow_texture.use(location=5)
-            self.debug_program["u_debug_mode"].value = int(mode)
-            self._draw(self.debug_vertex_array, self._moderngl)
+            self._render_shadow_debug(packet, 0, queries.get("shadow_1", queries.get("shadow")))
             return
-
+        if mode == DebugMode.SHADOW_MASK_2:
+            self._render_shadow_debug(packet, 1, queries.get("shadow_2"))
+            return
         if mode == DebugMode.SHADOW_FINAL:
-            self._render_shadow_pass(packet, queries.get("shadow"))
+            self._render_shadow_pass(packet, 0, queries.get("shadow_1", queries.get("shadow")))
+            self._render_shadow_pass(packet, 1, queries.get("shadow_2"))
             self._render_lighting(packet, mode, layered=True, query=queries.get("lighting"))
             self._render_composite(queries.get("composition"))
             return
