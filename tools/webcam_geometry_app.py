@@ -46,7 +46,32 @@ class WebcamGeometrySession:
         self.flow = OpenCVFlowProvider(method="farneback", flow_scale=0.5)
         self.previous_rgb = None
         self.previous_geometry = None
+        self._metric_last_start: float | None = None
+        self._metric_processed_fps: float | None = None
         return "Session reset; next frame anchors a new camera/world origin."
+
+    def _update_live_metrics(self, started: float, total_ms: float) -> dict[str, float | None]:
+        """Update callback-rate metrics for the currently streamed frame.
+
+        Gradio invokes ``process`` once per webcam stream event. Measuring the
+        interval between callback starts gives the actual processed stream rate,
+        while ``total_ms`` is the end-to-end latency for this frame. The first
+        frame intentionally has no FPS value because there is no prior sample.
+        """
+        if self._metric_last_start is not None:
+            interval_s = max(started - self._metric_last_start, 1e-6)
+            instant_fps = 1.0 / interval_s
+            alpha = 0.25
+            self._metric_processed_fps = (
+                instant_fps
+                if self._metric_processed_fps is None
+                else alpha * instant_fps + (1.0 - alpha) * self._metric_processed_fps
+            )
+        self._metric_last_start = started
+        return {
+            "processed_fps": self._metric_processed_fps,
+            "latency_ms": total_ms,
+        }
 
     def _configure(self, width: int, height: int) -> None:
         if self.camera is not None and (self.camera.width, self.camera.height) == (width, height):
@@ -116,6 +141,7 @@ class WebcamGeometrySession:
             confidence = np.asarray(display_state.confidence if display_state.confidence is not None else np.zeros((height, width)), dtype=np.float32)
             confidence_image = np.repeat((np.clip(confidence, 0, 1) * 255).astype(np.uint8)[..., None], 3, axis=-1)
             persistent_image = _heatmap(persistent.projected_depth, persistent.projected_valid) if persistent is not None else np.zeros_like(depth_image)
+            total_ms = (time.perf_counter() - started) * 1000.0
             stats = {
                 "status": "ok" if report.valid else "validation_failed",
                 "frame_id": self.frame_id,
@@ -129,17 +155,38 @@ class WebcamGeometrySession:
                 "persistent": None if persistent is None else {"surfel_count": persistent.surfel_count, "coverage_percent": float(persistent.projected_valid.mean() * 100), **persistent.map_stats},
                 "renderer_contract_valid": report.valid,
                 "renderer_contract_errors": list(report.errors),
-                "total_ms": (time.perf_counter() - started) * 1000.0,
+                "total_ms": total_ms,
+                "latency_ms": total_ms,
             }
+            stats["metrics"] = self._update_live_metrics(started, total_ms)
             self.frame_id += 1
             return depth_image, normals_image, confidence_image, persistent_image, stats
+
+
+def _format_live_metrics(stats: dict) -> str:
+    """Render a compact live metrics card from the current frame diagnostics."""
+    fps = stats.get("metrics", {}).get("processed_fps")
+    fps_text = "warming up" if fps is None else f"{float(fps):.2f} FPS"
+    latency = float(stats.get("latency_ms", stats.get("total_ms", 0.0)))
+    depth = stats.get("depth") or {}
+    cuda = stats.get("cuda_geometry") or {}
+    persistent = stats.get("persistent") or {}
+    map_text = "n/a" if not persistent else f"{int(persistent.get('surfel_count', 0)):,} surfels"
+    return (
+        f"**Live metrics**  \n"
+        f"Processed: **{fps_text}** &nbsp;|&nbsp; End-to-end latency: **{latency:.1f} ms**  \n"
+        f"Frame: **{stats.get('frame_id', '—')}** &nbsp;|&nbsp; Mode: **{stats.get('mode', '—')}** &nbsp;|&nbsp; "
+        f"Depth: **{float(depth.get('inference_ms', 0.0)):.1f} ms** &nbsp;|&nbsp; "
+        f"CUDA geometry: **{float(cuda.get('backprojection_ms', 0.0) or 0.0) + float(cuda.get('normals_ms', 0.0) or 0.0):.1f} ms** &nbsp;|&nbsp; "
+        f"Map: **{map_text}**"
+    )
 
 
 def build_demo(model_path: str = "models/depth-anything-v2-small"):
     import gradio as gr
     session = WebcamGeometrySession(model_path)
     with gr.Blocks(title="NRW Geometry Lab") as demo:
-        gr.Markdown("# NRW Geometry Lab\nLive CUDA depth, stable Phase 1–4 geometry, and optional Phase 5 world-memory diagnostics.")
+        gr.Markdown("# NRW Geometry Lab\nLive CUDA depth, stable Phase 1–4 geometry, and optional Phase 5 world-memory diagnostics. Effects are streamed directly from each webcam frame.")
         with gr.Row():
             camera = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Live webcam")
             upload = gr.Image(sources=["upload"], type="numpy", label="Offline/test image")
@@ -155,9 +202,16 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
         with gr.Row():
             confidence = gr.Image(label="Renderer confidence", streaming=True)
             persistent = gr.Image(label="Persistent reprojection", streaming=True)
+        live_metrics = gr.Markdown("**Live metrics**  \nWaiting for the webcam stream…", label="Live performance")
         diagnostics = gr.JSON(label="Runtime diagnostics")
-        camera.stream(session.process, [camera, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics], stream_every=0.35, concurrency_limit=1, api_name="process_frame")
-        process_once.click(session.process, [upload, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics], concurrency_limit=1, api_name="process_once")
+        def process_with_metrics(frame, selected_mode, cuda_enabled):
+            outputs = session.process(frame, selected_mode, cuda_enabled)
+            if outputs[-1].get("status") == "waiting_for_camera":
+                return (*outputs, "**Live metrics**  \nWaiting for the webcam stream…")
+            return (*outputs[:4], outputs[4], _format_live_metrics(outputs[4]))
+
+        camera.stream(process_with_metrics, [camera, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics, live_metrics], stream_every=0.35, concurrency_limit=1, api_name="process_frame")
+        process_once.click(process_with_metrics, [upload, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics, live_metrics], concurrency_limit=1, api_name="process_once")
         reset.click(session.reset, outputs=reset_status)
     return demo
 
