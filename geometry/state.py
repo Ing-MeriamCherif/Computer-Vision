@@ -55,6 +55,10 @@ class GeometryState:
     normal_valid_mask: np.ndarray | None = None
     normal_confidence: np.ndarray | None = None
     selected_radius: np.ndarray | None = None
+    spatial_confidence: np.ndarray | None = None
+    history_confidence: np.ndarray | None = None
+    temporal_confidence: np.ndarray | None = None
+    depth_alignment_residual: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)
@@ -125,3 +129,10 @@ class GeometryState:
                 raise ValueError(
                     f"selected_radius must have shape ({h}, {w}), got {self.selected_radius.shape}"
                 )
+        for name in ("spatial_confidence", "history_confidence", "temporal_confidence", "depth_alignment_residual"):
+            value = getattr(self, name)
+            if value is not None:
+                value = np.asarray(value)
+                if value.shape != (h, w):
+                    raise ValueError(f"{name} must have shape ({h}, {w}), got {value.shape}")
+                setattr(self, name, value)

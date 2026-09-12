@@ -19,6 +19,10 @@ from .normals import (
     geometry_from_depth_state,
     normals_to_rgb,
 )
+from .motion import MotionState, OpticalFlowProvider, OpenCVFlowProvider, flow_consistency
+from .temporal import TemporalConfig, TemporalGeometryEngine, photometric_error
+from .warp import warp_field_backward, warp_normals_backward
+from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
 
 __all__ = [
     "CameraModel",
@@ -36,4 +40,16 @@ __all__ = [
     "estimate_normals",
     "geometry_from_depth_state",
     "normals_to_rgb",
+    "MotionState",
+    "OpticalFlowProvider",
+    "OpenCVFlowProvider",
+    "flow_consistency",
+    "TemporalConfig",
+    "TemporalGeometryEngine",
+    "photometric_error",
+    "warp_field_backward",
+    "warp_normals_backward",
+    "DepthAlignmentResult",
+    "align_history_depth",
+    "align_inverse_depth",
 ]
