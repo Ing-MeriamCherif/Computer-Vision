@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import warnings
 
 import numpy as np
 
@@ -29,7 +30,8 @@ class NormalConfig:
     discontinuity_threshold: float = 0.15
     depth_epsilon: float = 1e-6
     min_tangent_norm: float = 1e-6
-    min_cross_norm: float = 1e-8
+    min_tangent_conditioning: float = 1e-8
+    min_cross_norm: float | None = None
     radii: tuple[int, ...] = (1, 2, 4)
     multi_scale_acceptance: float = 0.75
     edge_confidence_penalty: float = 0.5
@@ -37,10 +39,18 @@ class NormalConfig:
     def __post_init__(self) -> None:
         if self.discontinuity_threshold <= 0:
             raise ValueError("discontinuity_threshold must be positive")
-        if self.depth_epsilon <= 0 or self.min_tangent_norm <= 0 or self.min_cross_norm <= 0:
+        if self.min_cross_norm is not None:
+            warnings.warn("min_cross_norm is deprecated; use min_tangent_conditioning", DeprecationWarning, stacklevel=2)
+            if self.min_tangent_conditioning != 1e-8 and not np.isclose(self.min_tangent_conditioning, self.min_cross_norm):
+                raise ValueError("min_cross_norm conflicts with min_tangent_conditioning")
+            object.__setattr__(self, "min_tangent_conditioning", float(self.min_cross_norm))
+        if self.depth_epsilon <= 0 or self.min_tangent_norm <= 0 or self.min_tangent_conditioning <= 0:
             raise ValueError("geometry minimums must be positive")
-        if not self.radii or any(radius <= 0 for radius in self.radii):
+        raw_radii = tuple(self.radii)
+        if not raw_radii or any(isinstance(radius, bool) or not isinstance(radius, (int, np.integer)) or radius <= 0 for radius in raw_radii):
             raise ValueError("radii must contain positive values")
+        normalized_radii = tuple(sorted(set(int(radius) for radius in raw_radii)))
+        object.__setattr__(self, "radii", normalized_radii)
         if not 0 <= self.multi_scale_acceptance <= 1:
             raise ValueError("multi_scale_acceptance must be in [0, 1]")
         if not 0 <= self.edge_confidence_penalty <= 1:
@@ -74,7 +84,7 @@ def _validate_inputs(points: np.ndarray, valid_mask: np.ndarray | None) -> tuple
     if valid_mask is None:
         valid = finite
     else:
-        valid = np.asarray(valid_mask, dtype=bool)
+        valid = np.array(valid_mask, dtype=bool, copy=True)
         if valid.shape != points_arr.shape[:2]:
             raise ValueError("valid_mask must have shape (H, W)")
         valid &= finite
@@ -180,7 +190,7 @@ def _estimate_at_radius(
         & valid_y
         & (lengths_product > 1e-24)
         & (cross_norm > 1e-12 * lengths_product)
-        & (conditioning_quality >= config.min_cross_norm)
+        & (conditioning_quality >= config.min_tangent_conditioning)
     )
     normals = np.zeros_like(points)
     safe_norm = np.where(valid_normals, cross_norm, 1.0)
@@ -201,7 +211,7 @@ def _estimate_at_radius(
         valid_normals,
         confidence,
         discontinuity.astype(np.float32),
-        np.full(valid.shape, radius, dtype=np.int16),
+        np.where(valid_normals, radius, 0).astype(np.int16),
         support.astype(np.float32),
     )
 

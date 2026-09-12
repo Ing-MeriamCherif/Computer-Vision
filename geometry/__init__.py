@@ -23,6 +23,8 @@ from .motion import MotionState, OpticalFlowProvider, OpenCVFlowProvider, flow_c
 from .temporal import TemporalConfig, TemporalGeometryEngine, photometric_error
 from .warp import warp_depth_backward, warp_field_backward, warp_normals_backward
 from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
+from .validation import GeometryValidationReport, validate_renderer_geometry
+from .diagnostics import GeometryDiagnostics, StageTimer, geometry_state_nbytes, motion_state_nbytes, summarize_timings
 
 __all__ = [
     "CameraModel",
@@ -53,4 +55,11 @@ __all__ = [
     "DepthAlignmentResult",
     "align_history_depth",
     "align_inverse_depth",
+    "GeometryValidationReport",
+    "validate_renderer_geometry",
+    "GeometryDiagnostics",
+    "StageTimer",
+    "geometry_state_nbytes",
+    "motion_state_nbytes",
+    "summarize_timings",
 ]

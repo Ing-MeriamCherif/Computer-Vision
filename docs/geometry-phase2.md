@@ -7,6 +7,12 @@ normal estimators:
 - `edge_aware`: rejects neighboring samples whose relative Z jump exceeds `discontinuity_threshold`, then selects same-surface one-sided support where needed.
 - `multi_scale`: evaluates configured radii (default `1, 2, 4`) and selects the smallest radius meeting the confidence acceptance score, falling back to the best valid radius.
 
+`NormalConfig.min_tangent_conditioning` is the dimensionless sine-angle
+conditioning threshold `||T_y × T_x|| / (||T_y|| ||T_x||)`.  The legacy
+`min_cross_norm` keyword remains a deprecated compatibility alias.  Radii are
+validated as positive integers, sorted ascending, and duplicate values are
+deduplicated before multi-scale selection.
+
 All modes are fully vectorized over pixels. Normals are oriented toward the
 camera using `N dot P <= 0`; invalid normals are NaN and have zero confidence.
 Confidence is intentionally spatial-only and interpretable: compatible-neighbor

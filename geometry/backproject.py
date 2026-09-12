@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from enum import Enum
+from functools import lru_cache
 
 import numpy as np
 
@@ -13,6 +14,17 @@ class DepthScaleMode(str, Enum):
     METRIC = "metric"
     RELATIVE = "relative"
     INVERSE = "inverse"
+
+
+@lru_cache(maxsize=8)
+def _cached_normalized_rays(width: int, height: int, fx: float, fy: float, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return read-only float32 x/z and y/z grids for a camera resolution."""
+    v, u = np.indices((height, width), dtype=np.float32)
+    x = (u - np.float32(cx)) / np.float32(fx)
+    y = (v - np.float32(cy)) / np.float32(fy)
+    x.setflags(write=False)
+    y.setflags(write=False)
+    return x, y
 
 
 def depth_valid_mask(depth: np.ndarray, valid_mask: np.ndarray | None = None) -> np.ndarray:
@@ -44,7 +56,7 @@ def backproject_depth(
     mode = DepthScaleMode(scale_mode)
     if mode is DepthScaleMode.INVERSE:
         raise ValueError("inverse depth requires an explicit calibrated disparity-to-Z conversion")
-    depth_arr = np.asarray(depth, dtype=np.float64)
+    depth_arr = np.asarray(depth, dtype=np.float32)
     if depth_arr.ndim != 2:
         raise ValueError("depth must be a 2D array")
     if depth_arr.shape != (camera.height, camera.width):
@@ -56,7 +68,10 @@ def backproject_depth(
         )
     valid = depth_valid_mask(depth_arr, valid_mask)
     height, width = depth_arr.shape
-    v, u = np.indices((height, width), dtype=np.float64)
-    points = camera.unproject(u, v, depth_arr)
+    x_norm, y_norm = _cached_normalized_rays(width, height, camera.fx, camera.fy, camera.cx, camera.cy)
+    points = np.empty((height, width, 3), dtype=np.float32)
+    points[..., 0] = x_norm * depth_arr
+    points[..., 1] = y_norm * depth_arr
+    points[..., 2] = depth_arr
     points[~valid] = np.nan
     return points.astype(np.float32), valid

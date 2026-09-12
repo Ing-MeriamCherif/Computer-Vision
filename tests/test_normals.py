@@ -82,6 +82,15 @@ def test_invalid_hole_and_border_are_explicit() -> None:
     assert result.normal_valid_mask[0, 0]
 
 
+def test_normal_estimation_does_not_mutate_valid_mask() -> None:
+    cam = _camera(12, 10)
+    depth = fronto_parallel_plane(cam)
+    points, valid = backproject_depth(depth, cam)
+    original = valid.copy()
+    estimate_normals(points, valid, depth)
+    np.testing.assert_array_equal(valid, original)
+
+
 def test_multiscale_selects_smallest_reliable_radius() -> None:
     cam = _camera(32, 24)
     depth = fronto_parallel_plane(cam)
@@ -173,6 +182,19 @@ def test_select_multiscale_synthetic_cases() -> None:
 def test_select_multiscale_empty_raises_value_error() -> None:
     with pytest.raises(ValueError, match="candidates list cannot be empty"):
         _select_multiscale([], acceptance_threshold=0.6)
+
+
+def test_normal_config_sorts_and_deduplicates_radii() -> None:
+    config = NormalConfig(radii=(4, 1, 2, 2))
+    assert config.radii == (1, 2, 4)
+    with pytest.raises(ValueError, match="radii"):
+        NormalConfig(radii=(0, 1))
+
+
+def test_deprecated_conditioning_alias_maps_to_dimensionless_threshold() -> None:
+    with pytest.warns(DeprecationWarning):
+        config = NormalConfig(min_cross_norm=0.02)
+    assert config.min_tangent_conditioning == 0.02
 
 
 @pytest.mark.parametrize("scale", [0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0])

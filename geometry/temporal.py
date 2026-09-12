@@ -33,6 +33,7 @@ class TemporalConfig:
     alignment_residual_threshold: float = 0.04
     alignment_epsilon: float = 1e-6
     timestamp_gap_reset: float = 0.5
+    depth_timestamp_tolerance: float = 0.1
     normal_mode: NormalMode | str = NormalMode.EDGE_AWARE
 
     def __post_init__(self) -> None:
@@ -50,6 +51,8 @@ class TemporalConfig:
             raise ValueError("alignment settings are invalid")
         if self.timestamp_gap_reset <= 0:
             raise ValueError("timestamp_gap_reset must be positive")
+        if self.depth_timestamp_tolerance < 0:
+            raise ValueError("depth_timestamp_tolerance must be non-negative")
         object.__setattr__(self, "normal_mode", NormalMode(self.normal_mode))
 
 
@@ -277,6 +280,15 @@ class TemporalGeometryEngine:
 
         if not np.isfinite(timestamp):
             raise ValueError("timestamp must be finite")
+        if depth_state is not None:
+            if depth_state.source_frame_id != frame_id:
+                raise ValueError(
+                    f"DepthState.source_frame_id {depth_state.source_frame_id!r} does not match current frame_id {frame_id!r}"
+                )
+            if not np.isfinite(depth_state.timestamp):
+                raise ValueError("DepthState.timestamp must be finite")
+            if abs(float(depth_state.timestamp) - float(timestamp)) > self.config.depth_timestamp_tolerance:
+                raise ValueError("DepthState.timestamp is stale relative to the current frame timestamp")
         current_mode = None if depth_state is None else DepthScaleMode(depth_state.scale_mode)
         had_previous = self.previous_state is not None
         previous_mode = None if self.previous_state is None else self.previous_state.scale_mode
