@@ -10,11 +10,40 @@ import numpy as np
 
 
 def apply_warm_tint(bgr: np.ndarray, intensity: float) -> np.ndarray:
+    # Legacy global tint (kept for compat). Prefer apply_torch_glow: the
+    # global version flashes the whole screen whenever the hand appears.
     out = bgr.astype(np.float32)
     out[:, :, 2] *= intensity * 1.1  # R
     out[:, :, 1] *= intensity        # G
     out[:, :, 0] *= intensity * 0.9  # B
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+def apply_torch_glow(bgr: np.ndarray, palm_uv, intensity: float,
+                     radius_px: float = 260.0) -> np.ndarray:
+    """Torch-style light: LOCAL radial glow around the hand, base image untouched.
+
+    This is why the old view "turned lighter": the tint multiplied every pixel
+    by intensity, so the whole screen flashed on appear/disappear. The glow
+    adds warm light with gaussian falloff only near the torch, like a real
+    flame — further pixels get nothing, matching the intensity falloff model.
+    Computed at half-res for speed, then upscaled.
+    """
+    if palm_uv is None or intensity <= 0.01:
+        return bgr
+    h, w = bgr.shape[:2]
+    sh, sw = h // 2, w // 2
+    yy, xx = np.mgrid[0:sh, 0:sw].astype(np.float32)
+    u, v = palm_uv[0] * sw / w, palm_uv[1] * sh / h
+    r = max(radius_px * sw / w, 1.0)
+    d2 = ((xx - u) ** 2 + (yy - v) ** 2) / (r * r)
+    fall = np.exp(-d2 * 2.5).astype(np.float32) * min(float(intensity), 1.5)
+    glow = np.zeros((sh, sw, 3), dtype=np.float32)
+    glow[:, :, 2] = 255.0 * fall * 0.55   # warm R
+    glow[:, :, 1] = 170.0 * fall * 0.35   # G
+    glow[:, :, 0] = 100.0 * fall * 0.25   # B
+    glow = cv2.resize(glow, (w, h), interpolation=cv2.INTER_LINEAR)
+    return np.clip(bgr.astype(np.float32) + glow, 0, 255).astype(np.uint8)
 
 
 def draw_light_arrow(bgr: np.ndarray, palm_uv, intensity: float,

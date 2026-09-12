@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pt
+*.task
+results/*.mp4
+results/*.png
+.env

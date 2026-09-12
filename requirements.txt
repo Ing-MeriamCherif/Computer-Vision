@@ -3,3 +3,5 @@ numpy>=1.26
 opencv-python>=4.8
 mediapipe>=0.10
 PyYAML>=6.0
+# Optional: YOLO backend (HAND_BACKEND=yolo). Needs torch; cuda on 4060.
+ultralytics>=8.0

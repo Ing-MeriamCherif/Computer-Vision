@@ -157,21 +157,103 @@ def _try_tasks_tracker(max_hands: int) -> HandTrackerBase | None:
         return None
 
 
+class YOLOPoseTracker(HandTrackerBase):
+    """Ultralytics YOLO pose backend (edge: fast detector, GPU on 4060).
+
+    Uses wrist keypoints (COCO 9/10) as the torch handle — no finger detail,
+    but detection is stronger at edges/odd poses than MediaPipe. palm_px is
+    proxied from shoulder width so the size->Z falloff keeps working.
+    Set HAND_BACKEND=yolo, YOLO_MODEL=yolo11n-pose.pt, YOLO_DEVICE=auto|cpu|cuda.
+    """
+    backend_name = "yolo-pose"
+
+    def __init__(self, model: str | None = None, device: str | None = None,
+                 conf: float | None = None) -> None:
+        from ultralytics import YOLO
+        import torch
+        self._torch = torch
+        dev = (device or config.YOLO_DEVICE).lower()
+        if dev == "auto":
+            dev = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = dev
+        self.model = YOLO(model or config.YOLO_MODEL)
+        try:
+            self.model.to(dev)
+        except Exception:
+            pass
+        self.conf = conf if conf is not None else config.YOLO_CONF
+        try:
+            names = getattr(self.model, "names", {})
+            self._is_pose = any("wrist" in str(v).lower() or True for v in names.values())
+        except Exception:
+            self._is_pose = True
+
+    def process(self, rgb: np.ndarray) -> HandResult:
+        h, w = rgb.shape[:2]
+        r = self.model.predict(rgb, conf=self.conf, verbose=False, device=self.device)[0]
+        if r.keypoints is None or len(r.keypoints.xy) == 0:
+            return HandResult(False, None, None, 0.0, self.backend_name, None)
+        kpts = r.keypoints.xy[0].detach().cpu().numpy()  # (17,2) COCO
+        confs = None
+        try:
+            confs = r.keypoints.conf[0].detach().cpu().numpy()
+        except Exception:
+            pass
+
+        def c(i: int) -> float:
+            try:
+                return float(confs[i]) if confs is not None else 0.6
+            except Exception:
+                return 0.6
+
+        # pick best wrist; both wrists -> brighter/closest wins (multi-light later)
+        cands = [(9, c(9)), (10, c(10))]
+        wi, wc = max(cands, key=lambda t: t[1])
+        if wc < self.conf:
+            return HandResult(False, None, None, wc, self.backend_name, None)
+        palm = (float(kpts[wi, 0]), float(kpts[wi, 1]))
+        # size proxy: shoulder width -> palm-ish scale for Z falloff
+        try:
+            shoulder = float(np.linalg.norm(kpts[5] - kpts[6]))
+            palm_px = shoulder * 0.35 if shoulder > 10 else None
+        except Exception:
+            palm_px = None
+        lm = np.zeros((21, 2), dtype=np.float64)
+        lm[:, 0], lm[:, 1] = palm
+        return HandResult(True, palm, lm, float(wc), self.backend_name, palm_px)
+
+    def close(self) -> None:
+        pass
+
+
 def create_tracker(max_hands: int | None = None) -> HandTrackerBase:
     """Auto-select best available backend. Never crashes: falls back to mock."""
     mh = max_hands or config.MAX_HANDS
-    forced = __import__("os").getenv("HAND_BACKEND", "auto").lower()
+    forced = config.HAND_BACKEND
     if forced == "mock":
         return MockTracker()
+    if forced == "yolo":
+        try:
+            return YOLOPoseTracker()
+        except Exception as e:
+            print(f"[hand_tracker] yolo unavailable ({e}); using MockTracker.")
+            return MockTracker()
     if forced in ("legacy", "mediapipe-legacy"):
         try:
             return LegacyMPTracker(mh)
         except Exception:
             return MockTracker()
-    # auto: tasks bundle -> legacy -> mock
+    if forced == "tasks":
+        t = _try_tasks_tracker(mh)
+        return t if t is not None else MockTracker()
+    # auto: tasks bundle -> yolo (if installed) -> legacy -> mock
     t = _try_tasks_tracker(mh)
     if t is not None:
         return t
+    try:
+        return YOLOPoseTracker()
+    except Exception:
+        pass
     try:
         return LegacyMPTracker(mh)
     except Exception as e:
