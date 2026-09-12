@@ -17,6 +17,8 @@ LIVE_MAX_WIDTH = 256
 LIVE_MAX_HEIGHT = 192
 LIVE_OUTPUT_WIDTH = 256
 LIVE_OUTPUT_HEIGHT = 192
+LIVE_DISPLAY_WIDTH = 640
+LIVE_DISPLAY_HEIGHT = 480
 
 from geometry import (
     CameraModel, CameraPoseState, DepthAnythingProvider, OpenCVFlowProvider,
@@ -265,43 +267,52 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
     from fastrtc import AdditionalOutputs, VideoStreamHandler, WebRTC
 
     session = WebcamGeometrySession(model_path)
-    with gr.Blocks(title="NRW Geometry Lab") as demo:
-        gr.Markdown("# NRW Geometry Lab\nLow-latency WebRTC depth, normals, confidence, and optional Phase 5 world-memory diagnostics.")
-        with gr.Row():
-            live_video = WebRTC(
-                label="Live WebRTC effects",
-                width=LIVE_OUTPUT_WIDTH,
-                height=LIVE_OUTPUT_HEIGHT,
-                mode="send-receive",
-                modality="video",
-                mirror_webcam=True,
-                track_constraints={
-                    "width": {"ideal": LIVE_MAX_WIDTH, "max": LIVE_MAX_WIDTH},
-                    "height": {"ideal": LIVE_MAX_HEIGHT, "max": LIVE_MAX_HEIGHT},
-                    "frameRate": {"ideal": 30, "max": 30},
-                },
-                rtp_params={"degradationPreference": "maintain-framerate"},
-                full_screen=False,
-            )
-            upload = gr.Image(sources=["upload"], type="numpy", label="Offline/test image")
-            with gr.Column():
+    live_css = """
+    #live-stage { min-height: 480px; background: #111827; border: 1px solid #334155; border-radius: 12px; overflow: hidden; }
+    #live-stage video { width: 100% !important; height: auto !important; min-height: 480px; aspect-ratio: 4 / 3; object-fit: contain; background: #020617; }
+    #live-stage > div { width: 100%; }
+    .live-section-note { color: #94a3b8; margin: 0.25rem 0 0.75rem; }
+    """
+    with gr.Blocks(title="NRW Geometry Lab", css=live_css) as demo:
+        gr.Markdown("# NRW Geometry Lab\nLive depth and geometry workspace")
+        gr.Markdown("The large canvas is the live result. It contains the synchronized webcam, depth, normals, confidence, FPS, and latency overlays.", elem_classes=["live-section-note"])
+        with gr.Row(equal_height=False):
+            with gr.Column(scale=3, min_width=640):
+                live_video = WebRTC(
+                    label="Live rendered output",
+                    width=LIVE_DISPLAY_WIDTH,
+                    height=LIVE_DISPLAY_HEIGHT,
+                    mode="send-receive",
+                    modality="video",
+                    mirror_webcam=True,
+                    track_constraints={
+                        "width": {"ideal": LIVE_MAX_WIDTH, "max": LIVE_MAX_WIDTH},
+                        "height": {"ideal": LIVE_MAX_HEIGHT, "max": LIVE_MAX_HEIGHT},
+                        "frameRate": {"ideal": 30, "max": 30},
+                    },
+                    rtp_params={"degradationPreference": "maintain-framerate"},
+                    full_screen=False,
+                    elem_id="live-stage",
+                )
+            with gr.Column(scale=1, min_width=280):
+                gr.Markdown("### Live controls")
                 mode = gr.Radio(["CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"], value="CUDA current geometry", label="Pipeline mode")
                 use_cuda = gr.Checkbox(value=True, label="CUDA geometry processing")
-                process_once = gr.Button("Process current frame", variant="primary")
                 reset = gr.Button("Reset temporal + world state")
                 reset_status = gr.Markdown()
-        gr.Markdown(
-            "**Live mode:** start the WebRTC stream above. The returned video is a synchronized four-panel "
-            "view with measured delivered FPS and latency overlaid on the frame. Slow frames are dropped, not queued."
-        )
-        with gr.Row():
-            depth = gr.Image(label="Relative depth", streaming=True)
-            normals = gr.Image(label="Camera-facing normals", streaming=True)
-        with gr.Row():
-            confidence = gr.Image(label="Renderer confidence", streaming=True)
-            persistent = gr.Image(label="Persistent reprojection", streaming=True)
-        live_metrics = gr.Markdown("**Live metrics**  \nWaiting for the webcam stream…", label="Live performance")
-        diagnostics = gr.JSON(label="Runtime diagnostics")
+                gr.Markdown("**How to start:** click the camera button, grant permission, then click **Enregistrer**. The stream is processed frame-by-frame; it is not a recording.", elem_classes=["live-section-note"])
+        live_metrics = gr.Markdown("**Live metrics**  \nStart the live canvas to see measured FPS and end-to-end latency.", label="Live performance")
+        diagnostics = gr.JSON(label="Live diagnostics")
+        with gr.Accordion("Offline inspector (upload one frame)", open=False):
+            gr.Markdown("This section is separate from the live canvas and is only for inspecting one uploaded frame.", elem_classes=["live-section-note"])
+            upload = gr.Image(sources=["upload"], type="numpy", label="Upload test image")
+            process_once = gr.Button("Process uploaded frame", variant="primary")
+            with gr.Row():
+                depth = gr.Image(label="Relative depth")
+                normals = gr.Image(label="Camera-facing normals")
+            with gr.Row():
+                confidence = gr.Image(label="Renderer confidence")
+                persistent = gr.Image(label="Persistent reprojection")
         def process_with_metrics(frame, selected_mode, cuda_enabled):
             outputs = session.process(frame, selected_mode, cuda_enabled)
             if outputs[-1].get("status") == "waiting_for_camera":
