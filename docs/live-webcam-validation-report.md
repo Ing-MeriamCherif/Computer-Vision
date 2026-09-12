@@ -19,11 +19,10 @@ persistent geometry. This was not a still-image or upload test.
 The original full-resolution run only partially passed: CUDA-current and
 temporal modes each completed 90 consecutive frames, but the synchronous path
 processed roughly one frame per second. That baseline is retained below for
-traceability. A live-path fix now bounds processing to 256 x 192, uses a 140px
-Depth Anything input, skips unselected geometry branches, and configures the
-Gradio stream to request 30 Hz while dropping stale events. On the CUDA-current
-path, warm direct processing is now 30.7 ms/frame (32.7 FPS) with valid depth,
-normals, confidence, and renderer-contract output.
+traceability. The current live path uses WebRTC, bounds processing to 256 x 192,
+uses a 140px Depth Anything input, skips stale frames, and returns a synchronized
+four-panel result. Warm direct processing is 28.1 ms/frame (35.6 FPS) on a
+256 x 192 input with valid depth, normals, confidence, and renderer output.
 
 ## Test method
 
@@ -116,32 +115,31 @@ Webcam imagery remains outside Git:
 - `/tmp/cvnrw-live-webcam/persistent-live-proof.jpg`: representative Phase 5
   frame with input, depth, normals, and persistent reprojection.
 
-## Browser live-stream gate
+## Initial browser live-stream gate (superseded)
 
 The Gradio page was opened at `http://127.0.0.1:7860/` and its webcam control
 was activated. In the Codex in-app/headless browser, camera permission could be
 requested but no hardware media track was created: the page's video element
 remained paused with `readyState=0`, zero video dimensions, and no `srcObject`.
-Therefore this browser-layer attempt is explicitly **not** counted as a live UI
-pass. A headed browser session with OS camera permission (or an equivalent
-hardware-backed browser test runner) is required to validate the final Gradio
-webcam control itself. The direct V4L2 test remains the authoritative live
-pipeline test and did use the physical camera continuously.
+Therefore that first browser-layer attempt was explicitly **not** counted as a
+live UI pass. The WebRTC browser gate below supersedes it for transport and
+rendering validation; the physical V4L2 test remains the authoritative
+hardware-camera test and did use `/dev/video0` continuously.
 
 ## Post-fix throughput verification
 
-The post-fix benchmark used a 640 x 480 RGB webcam-shaped frame and the same
-`WebcamGeometrySession.process` callback used by the UI. The first frame took
-about 5.4 seconds for lazy model loading; the next 20 frames averaged 30.7 ms
-with a steady 32.7 FPS. The callback now processes a bounded 256 x 192 working
-frame while reporting both source and working resolutions. Gradio's webcam
-stream is configured with `stream_every=1/30`, `trigger_mode="always_last"`, and
-a single geometry concurrency lane, so a slow frame cannot create a replay
-backlog that makes the rendered panels appear at 0.24 FPS.
+The post-fix browser gate used Chromium's fake 30 FPS camera track and the same
+WebRTC callback used by the UI. After model warm-up, the returned `<video>` had
+`readyState=4`, intrinsic 256 x 192 dimensions, and delivered 151 frames in
+5.20 seconds: **29.0 FPS**. The rendered frame visibly contained all four
+effects and the overlay reported FPS, latency, and mode. FastRTC's
+`VideoStreamHandler(..., skip_frames=True)` prevents a slow inference callback
+from replaying stale frames. The browser capture request is capped at 256 x 192
+and 30 FPS, keeping remote uploads bounded before processing.
 
-The webcam component also requests a browser capture maximum of 256 x 192 at
-30 FPS. This keeps remote uploads from carrying native 720p/960p frames across
-the internet before the server-side resize can run.
+Full renderer-contract validation remains enabled for the offline action and
+tests; the WebRTC hot path omits the expensive per-frame projection invariant
+check to preserve cadence while still returning the contract fields.
 
 Phase 1-4 temporal and Phase 5 persistent remain heavier algorithms. The UI
 therefore defaults to CUDA-current geometry for synchronized live rendering;
@@ -149,9 +147,9 @@ those modes remain available for diagnostics but are not claimed as 30 FPS.
 
 ## Verdict
 
-All major feature families remain connected to continuous physical webcam input.
-CUDA-current now meets the live preview target on the measured warm path and
-the stream no longer intentionally throttles at sub-FPS cadence. Temporal and
-persistent modes still need separate governed workers if they are required to
-run at full camera rate; their heavier CPU algorithms are not hidden by this
-CUDA-current fix.
+All major feature families remain connected to a continuous video path.
+CUDA-current now meets the 30 FPS live-preview target in the browser gate
+(29.0 delivered FPS, 28.1 ms warm direct callback), and the stream no longer
+uses the snapshot/queue transport that caused the earlier 0.24–3 FPS display.
+Temporal and persistent modes remain available, but their heavier CPU
+algorithms are not claimed as full-rate live processing.

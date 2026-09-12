@@ -15,12 +15,13 @@ Open <http://127.0.0.1:7860>. The interface exposes:
 - optional Phase 5 PnP plus bounded persistent surfels;
 - depth, normals, renderer confidence, persistent reprojection, and detailed
   stage/device diagnostics;
-- live browser webcam streaming and deterministic upload testing.
+- live WebRTC webcam streaming and deterministic upload testing.
 
-For remote access, the browser capture is constrained to 256 x 192 at 30 FPS
-before upload. The server requests the latest frame (`always_last`) so internet
-latency cannot build a stale replay queue. The first frame includes lazy model
-startup; use the warm FPS/latency values in the Live metrics card for acceptance.
+For remote access, the browser capture is constrained to 256 x 192 at 30 FPS.
+FastRTC returns a synchronized four-panel video frame over WebRTC, drops stale
+frames when inference is busy, and overlays measured processed FPS and
+end-to-end latency. The first frame includes lazy model startup; use the warm
+overlay values for acceptance.
 
 The setup downloads `depth-anything/Depth-Anything-V2-Small-hf` into the
 ignored `models/depth-anything-v2-small` directory so later runs are offline.
@@ -37,7 +38,7 @@ The model supplies session-relative monocular depth; values are not metres.
 ```
 
 Validated host snapshot (2026-09-12): GTX 1650 Ti 4 GB, driver 595.84,
-PyTorch 2.14.0+cu130, compute capability 7.5, OpenCV 5.0.0, Gradio 6.27.0,
-and an HP Wide Vision HD camera at `/dev/video0`. CUDA geometry and model
+PyTorch 2.14.0+cu130, compute capability 7.5, OpenCV 5.0.0, Gradio 5.50.0,
+FastRTC 0.0.34, and an HP Wide Vision HD camera at `/dev/video0`. CUDA geometry and model
 inference fall back explicitly or fail closed when unavailable; Phase 1–4
 remains usable with the base `requirements.txt` environment.

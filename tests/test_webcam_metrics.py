@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import numpy as np
 
-from tools.webcam_geometry_app import WebcamGeometrySession, _format_live_metrics
+from tools.webcam_geometry_app import WebcamGeometrySession, _compose_live_view, _format_live_metrics
 
 
 def test_live_metrics_report_callback_fps_and_latency() -> None:
@@ -15,6 +15,16 @@ def test_live_metrics_report_callback_fps_and_latency() -> None:
 
     assert metrics["processed_fps"] == pytest.approx(5.0)
     assert metrics["latency_ms"] == 250.0
+
+
+def test_live_metrics_ignore_model_warmup_gap() -> None:
+    session = object.__new__(WebcamGeometrySession)
+    session._metric_last_start = 10.0
+    session._metric_processed_fps = 30.0
+
+    metrics = session._update_live_metrics(12.0, 2000.0)
+
+    assert metrics["processed_fps"] is None
 
 
 def test_live_metrics_formatter_contains_current_values() -> None:
@@ -41,3 +51,18 @@ def test_live_resolution_bounds_processing_without_changing_preview_contract() -
     bounded = WebcamGeometrySession._live_resolution(frame)
 
     assert bounded.shape == (192, 256, 3)
+
+
+def test_live_view_is_single_four_panel_video_frame() -> None:
+    source = np.zeros((192, 256, 3), dtype=np.uint8)
+    rendered = np.full((192, 256, 3), 64, dtype=np.uint8)
+    stats = {
+        "mode": "CUDA current geometry",
+        "latency_ms": 32.0,
+        "metrics": {"processed_fps": 30.0},
+    }
+
+    frame = _compose_live_view(source, (rendered, rendered, rendered, rendered, stats))
+
+    assert frame.shape == (192, 256, 3)
+    assert frame.dtype == np.uint8
