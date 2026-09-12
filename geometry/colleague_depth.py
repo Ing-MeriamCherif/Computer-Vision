@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .depth_provider import DepthInferenceDiagnostics
 from .state import DepthState
 
 
@@ -34,18 +35,42 @@ class ColleagueDepthProvider:
             except Exception:
                 device = "cpu"
         self._model = DepthModel(device=device, input_size=input_size, fp16=fp16)
+        self.last_diagnostics: DepthInferenceDiagnostics | None = None
 
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
         import cv2
 
         frame = np.asarray(rgb_frame, dtype=np.uint8)[..., :3]
+        t0 = time.perf_counter()
         upstream = self._model.infer(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        elapsed = (time.perf_counter() - t0) * 1000.0
+
+        depth_arr = np.asarray(upstream.depth_map, dtype=np.float32)
+        valid = upstream.valid_mask if upstream.valid_mask is not None else np.isfinite(depth_arr)
+        min_d = float(np.min(depth_arr[valid])) if valid.any() else float(np.min(depth_arr))
+        max_d = float(np.max(depth_arr[valid])) if valid.any() else float(np.max(depth_arr))
+        peak_vram = None
+        try:
+            import torch
+            if torch.cuda.is_available():
+                peak_vram = float(torch.cuda.max_memory_allocated() / 1048576.0)
+        except Exception:
+            pass
+
+        self.last_diagnostics = DepthInferenceDiagnostics(
+            str(getattr(self._model, "device", "unknown")),
+            elapsed,
+            min_d,
+            max_d,
+            peak_vram,
+        )
+
         return DepthState(
-            np.asarray(upstream.depth_map, dtype=np.float32),
+            depth_arr,
             timestamp if timestamp is not None else time.time(),
             source_frame_id,
             upstream.scale_mode,
-            valid_mask=upstream.valid_mask,
-            confidence=np.asarray(upstream.valid_mask, dtype=np.float32) if upstream.valid_mask is not None else None,
+            valid_mask=valid,
+            confidence=np.asarray(valid, dtype=np.float32),
         )
 

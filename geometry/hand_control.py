@@ -1,10 +1,7 @@
 """Live hand tracking and gesture state for the geometry/renderer boundary.
 
-This module ports the useful parts of the colleague hand branch (MediaPipe
-Tasks/legacy backends, adaptive detector cadence, One-Euro smoothing and a
-short optical-flow coast) without importing its fixed-depth or placeholder
-renderer.  The output is deliberately independent from any lighting model so
-the real :class:`~geometry.state.GeometryState` can supply depth.
+Supports single-hand (L3) and true two-hand (L5) tracking with One-Euro / EMA
+smoothing, continuous optical-flow coasting, and depth-fused hand Z coordinates.
 """
 
 from __future__ import annotations
@@ -18,16 +15,23 @@ import numpy as np
 
 
 @dataclass(slots=True)
-class HandObservation:
+class TrackedHand:
     """One tracked hand in pixel coordinates of the processed RGB frame."""
 
-    palm_uv: tuple[float, float]
+    hand_id: int
     landmarks_uv: np.ndarray | None
+    palm_uv: tuple[float, float]
     confidence: float
+    depth_z: float | None = None
+    timestamp: float = 0.0
+    velocity_px_s: float = 0.0
     handedness: str | None = None
     palm_width_px: float | None = None
-    velocity_px_s: float = 0.0
     stale: bool = False
+
+
+# Backward-compatible alias for existing tests
+HandObservation = TrackedHand
 
 
 @dataclass(slots=True)
@@ -36,7 +40,7 @@ class GestureState:
 
     timestamp: float
     source_frame_id: int | str
-    hands: tuple[HandObservation, ...]
+    hands: tuple[TrackedHand, ...]
     backend: str
     tracker_ms: float
     stale: bool = False
@@ -46,10 +50,21 @@ class GestureState:
         return bool(self.hands)
 
 
+def transform_hand_uv(
+    uv: tuple[float, float],
+    from_size: tuple[int, int],
+    to_size: tuple[int, int],
+) -> tuple[float, float]:
+    """Transform pixel coordinates between input, camera, and render resolutions."""
+    scale_x = to_size[0] / max(from_size[0], 1)
+    scale_y = to_size[1] / max(from_size[1], 1)
+    return (float(uv[0] * scale_x), float(uv[1] * scale_y))
+
+
 class _Backend(Protocol):
     name: str
 
-    def process(self, rgb: np.ndarray) -> list[HandObservation]: ...
+    def process(self, rgb: np.ndarray) -> list[TrackedHand]: ...
 
     def close(self) -> None: ...
 
@@ -63,7 +78,7 @@ def _palm_width(points: np.ndarray | None) -> float | None:
 class _NullBackend:
     name = "unavailable"
 
-    def process(self, rgb: np.ndarray) -> list[HandObservation]:
+    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
         return []
 
     def close(self) -> None:
@@ -87,8 +102,6 @@ class _ColleagueBackend:
             _os.environ["MP_HAND_BUNDLE"] = model_path
         else:
             self._old_bundle = None
-        # The upstream config is read at import time; force its maintained
-        # Tasks backend for this adapter instead of its synthetic fallback.
         upstream.config.HAND_BACKEND = "tasks"
         self._tracker = upstream.create_tracker(max_hands=max_hands)
         if self._tracker.backend_name == "mock":
@@ -97,11 +110,12 @@ class _ColleagueBackend:
         self._upstream = upstream
         self.name = f"colleague-{self._tracker.backend_name}"
 
-    def process(self, rgb: np.ndarray) -> list[HandObservation]:
+    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
         result = self._tracker.process(rgb)
         if not result.found or result.palm_uv is None:
             return []
-        return [HandObservation(
+        return [TrackedHand(
+            hand_id=0,
             palm_uv=(float(result.palm_uv[0]), float(result.palm_uv[1])),
             landmarks_uv=None if result.landmarks_uv is None else np.asarray(result.landmarks_uv, dtype=np.float64),
             confidence=float(result.confidence),
@@ -127,7 +141,7 @@ class _TasksBackend:
         base = mp_python.BaseOptions(model_asset_path=model_path)
         options = mp_vision.HandLandmarkerOptions(
             base_options=base,
-            num_hands=max_hands,
+            num_hands=max(1, int(max_hands)),
             min_hand_detection_confidence=0.3,
             min_hand_presence_confidence=0.3,
             min_tracking_confidence=0.3,
@@ -135,11 +149,11 @@ class _TasksBackend:
         self._mp = mp
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
 
-    def process(self, rgb: np.ndarray) -> list[HandObservation]:
+    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
         h, w = rgb.shape[:2]
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect(image)
-        observations: list[HandObservation] = []
+        observations: list[TrackedHand] = []
         for index, hand in enumerate(result.hand_landmarks):
             points = np.asarray([[p.x * w, p.y * h] for p in hand], dtype=np.float64)
             handedness = None
@@ -151,14 +165,23 @@ class _TasksBackend:
             except Exception:
                 pass
             palm = points[9]
-            observations.append(HandObservation(
-                (float(palm[0]), float(palm[1])), points, confidence,
-                handedness, _palm_width(points),
+            observations.append(TrackedHand(
+                hand_id=index,
+                landmarks_uv=points,
+                palm_uv=(float(palm[0]), float(palm[1])),
+                confidence=confidence,
+                handedness=handedness,
+                palm_width_px=_palm_width(points),
             ))
         return observations
 
     def close(self) -> None:
-        self._landmarker.close()
+        if hasattr(self, "_landmarker") and self._landmarker is not None:
+            try:
+                self._landmarker.close()
+            except Exception:
+                pass
+            self._landmarker = None
 
 
 class _LegacyBackend:
@@ -168,29 +191,34 @@ class _LegacyBackend:
         import mediapipe as mp
         self._hands = mp.solutions.hands.Hands(
             static_image_mode=False,
-            max_num_hands=max_hands,
+            max_num_hands=max(1, int(max_hands)),
             min_detection_confidence=0.3,
             min_tracking_confidence=0.3,
         )
 
-    def process(self, rgb: np.ndarray) -> list[HandObservation]:
+    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
         h, w = rgb.shape[:2]
         result = self._hands.process(rgb)
-        output: list[HandObservation] = []
+        output: list[TrackedHand] = []
         for index, hand in enumerate(result.multi_hand_landmarks or []):
-            points = np.asarray([[p.x * w, p.y * h] for p in hand.landmark], dtype=np.float64)
+            pts = np.array([[p.x * w, p.y * h] for p in hand.landmark], dtype=np.float64)
+            palm = pts[9]
+            conf = 1.0
             handedness = None
-            confidence = 1.0
-            try:
-                category = result.multi_handedness[index].classification[0]
-                handedness = str(category.label)
-                confidence = float(category.score)
-            except Exception:
-                pass
-            palm = points[9]
-            output.append(HandObservation(
-                (float(palm[0]), float(palm[1])), points, confidence,
-                handedness, _palm_width(points),
+            if result.multi_handedness and index < len(result.multi_handedness):
+                try:
+                    cat = result.multi_handedness[index].classification[0]
+                    conf = float(cat.score)
+                    handedness = str(cat.label)
+                except Exception:
+                    pass
+            output.append(TrackedHand(
+                hand_id=index,
+                landmarks_uv=pts,
+                palm_uv=(float(palm[0]), float(palm[1])),
+                confidence=conf,
+                handedness=handedness,
+                palm_width_px=_palm_width(pts),
             ))
         return output
 
@@ -201,21 +229,20 @@ class _LegacyBackend:
 def create_hand_tracker(
     *, model_path: str | None = None, max_hands: int = 2, backend: str = "auto"
 ) -> _Backend:
-    """Select a real local backend, returning a safe no-op if unavailable."""
-
+    """Select a real local backend, supporting 1 or 2 simultaneous hands."""
     requested = backend.lower()
     path = model_path or os.getenv("MP_HAND_BUNDLE", "models/hand_landmarker.task")
-    if requested in ("auto", "colleague"):
-        try:
-            return _ColleagueBackend(path, max_hands)
-        except Exception:
-            if requested == "colleague":
-                return _NullBackend()
     if requested in ("auto", "tasks") and os.path.exists(path):
         try:
             return _TasksBackend(path, max_hands)
         except Exception:
             if requested == "tasks":
+                return _NullBackend()
+    if requested in ("auto", "colleague"):
+        try:
+            return _ColleagueBackend(path, max_hands)
+        except Exception:
+            if requested == "colleague":
                 return _NullBackend()
     if requested in ("auto", "legacy"):
         try:
@@ -227,9 +254,6 @@ def create_hand_tracker(
 
 class _OneEuro:
     def __init__(self, min_cutoff: float = 1.0, beta: float = 0.3) -> None:
-        # Use the colleague's One-Euro implementation at runtime.  The
-        # fallback remains for environments where only the core package is
-        # copied without the integrations tree.
         try:
             from integrations.colleague_hand.filters import OneEuroFilter
             self._filter = OneEuroFilter(mincutoff=min_cutoff, beta=beta)
@@ -258,7 +282,7 @@ class _OneEuro:
 
 
 class HandControlEngine:
-    """Adaptive, smoothed hand state with bounded dropout recovery."""
+    """Adaptive, smoothed multi-hand state with bounded dropout recovery and depth fusion."""
 
     def __init__(
         self,
@@ -271,13 +295,14 @@ class HandControlEngine:
         input_size: tuple[int, int] = (320, 240),
         filter_mode: str = "oneeuro",
     ) -> None:
-        self.backend = create_hand_tracker(model_path=model_path, max_hands=max_hands, backend=backend)
+        self.max_hands = max(1, int(max_hands))
+        self.backend = create_hand_tracker(model_path=model_path, max_hands=self.max_hands, backend=backend)
         self.detect_every_n = max(1, int(detect_every_n))
         self.max_coast_frames = max(0, int(max_coast_frames))
         self.input_size = input_size
         self.filter_mode = str(filter_mode).lower()
-        self._last: list[HandObservation] = []
-        self._filters: dict[int, tuple[_OneEuro, _OneEuro]] = {}
+        self._last: list[TrackedHand] = []
+        self._filters: dict[int, tuple[_OneEuro, _OneEuro, _OneEuro]] = {}
         self._ema_filters: dict[int, object] = {}
         self._previous_gray: np.ndarray | None = None
         self._coast = 0
@@ -288,7 +313,53 @@ class HandControlEngine:
     def backend_name(self) -> str:
         return self.backend.name
 
-    def update(self, rgb: np.ndarray, timestamp: float, frame_id: int | str) -> GestureState:
+    def _assign_stable_ids(self, raw_obs: list[TrackedHand]) -> list[TrackedHand]:
+        """Greedy matching of new detections to previous hands to maintain stable hand_ids."""
+        if not self._last:
+            for idx, obs in enumerate(raw_obs[:self.max_hands]):
+                obs.hand_id = idx
+            return raw_obs[:self.max_hands]
+
+        assigned: list[TrackedHand] = []
+        available_ids = list(range(self.max_hands))
+        used_new = set()
+
+        # Prioritize matching existing hands
+        for old in self._last:
+            best_idx = None
+            best_dist = float("inf")
+            for n_idx, n_obs in enumerate(raw_obs):
+                if n_idx in used_new:
+                    continue
+                dist = float(np.hypot(n_obs.palm_uv[0] - old.palm_uv[0], n_obs.palm_uv[1] - old.palm_uv[1]))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = n_idx
+
+            if best_idx is not None and best_dist < 200.0:
+                n_obs = raw_obs[best_idx]
+                n_obs.hand_id = old.hand_id
+                if old.hand_id in available_ids:
+                    available_ids.remove(old.hand_id)
+                assigned.append(n_obs)
+                used_new.add(best_idx)
+
+        # Assign remaining detections to available IDs
+        for n_idx, n_obs in enumerate(raw_obs):
+            if n_idx not in used_new and available_ids:
+                n_obs.hand_id = available_ids.pop(0)
+                assigned.append(n_obs)
+
+        return assigned
+
+    def update(
+        self,
+        rgb: np.ndarray,
+        timestamp: float,
+        frame_id: int | str,
+        *,
+        depth_map: np.ndarray | None = None,
+    ) -> GestureState:
         import cv2
 
         started = time.perf_counter()
@@ -297,56 +368,76 @@ class HandControlEngine:
         iw, ih = self.input_size
         scale_x, scale_y = width / iw, height / ih
         small = cv2.resize(source, (iw, ih), interpolation=cv2.INTER_AREA)
-        # Do not force a detector pass on every frame merely because the last
-        # pass found no hand; that was the main FPS regression in the original
-        # branch.  Always anchor frame zero, then follow the configured cadence.
+
         should_detect = self._last_timestamp is None or (
             isinstance(frame_id, int) and frame_id % self.detect_every_n == 0
         )
         self.last_detection_ran = bool(should_detect)
-        observations: list[HandObservation] = []
+        observations: list[TrackedHand] = []
+
         if should_detect:
-            observations = self.backend.process(small)
-            for obs in observations:
+            raw_observations = self.backend.process(small)
+            for obs in raw_observations:
                 obs.palm_uv = (obs.palm_uv[0] * scale_x, obs.palm_uv[1] * scale_y)
                 if obs.landmarks_uv is not None:
                     obs.landmarks_uv = obs.landmarks_uv * np.array([scale_x, scale_y])
                 if obs.palm_width_px is not None:
                     obs.palm_width_px *= (scale_x + scale_y) * 0.5
+            observations = self._assign_stable_ids(raw_observations)
         else:
             observations = self._last
 
         if observations:
-            filtered: list[HandObservation] = []
-            for index, obs in enumerate(observations):
-                old = self._last[index] if index < len(self._last) else None
+            filtered: list[TrackedHand] = []
+            for obs in observations:
+                hid = obs.hand_id
+                old = next((h for h in self._last if h.hand_id == hid), None)
                 uv = obs.palm_uv
+
+                # Depth estimation from depth map if available
+                hand_z = obs.depth_z
+                if depth_map is not None:
+                    from .lighting import sample_depth
+                    z_val, z_conf = sample_depth(depth_map, None, uv[0], uv[1])
+                    if z_val > 0.0:
+                        hand_z = z_val
+
                 if self.filter_mode == "ema":
                     try:
                         from integrations.colleague_hand.filters import EMAFilter
-                        ema = self._ema_filters.setdefault(index, EMAFilter(alpha=0.4))
+                        ema = self._ema_filters.setdefault(hid, EMAFilter(alpha=0.4))
                         smooth_arr = ema.update_dynamic(np.asarray(uv), 0.4)
                         smooth_uv = (float(smooth_arr[0]), float(smooth_arr[1]))
                     except Exception:
                         smooth_uv = uv
+                    smooth_z = hand_z
                 else:
-                    if index not in self._filters:
-                        self._filters[index] = (_OneEuro(), _OneEuro())
-                    fx, fy = self._filters[index]
+                    if hid not in self._filters:
+                        self._filters[hid] = (_OneEuro(), _OneEuro(), _OneEuro())
+                    fx, fy, fz = self._filters[hid]
                     smooth_uv = (fx(uv[0], timestamp), fy(uv[1], timestamp))
+                    smooth_z = fz(hand_z, timestamp) if hand_z is not None else None
+
                 velocity = 0.0
                 if old is not None:
-                    velocity = float(np.linalg.norm(np.subtract(smooth_uv, old.palm_uv)) / max(timestamp - getattr(self, "_last_timestamp", timestamp), 1e-3))
+                    velocity = float(
+                        np.linalg.norm(np.subtract(smooth_uv, old.palm_uv))
+                        / max(timestamp - getattr(self, "_last_timestamp", timestamp), 1e-3)
+                    )
+
                 obs.palm_uv = smooth_uv
+                obs.depth_z = smooth_z
                 obs.velocity_px_s = velocity
+                obs.timestamp = timestamp
                 obs.stale = not should_detect
                 filtered.append(obs)
+
             self._last = filtered
             self._coast = 0
         elif self._last and self._coast < self.max_coast_frames and self._previous_gray is not None:
             gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
             prior_gray = self._previous_gray
-            coasted: list[HandObservation] = []
+            coasted: list[TrackedHand] = []
             for obs in self._last:
                 point = np.asarray([[obs.palm_uv[0] / scale_x, obs.palm_uv[1] / scale_y]], dtype=np.float32)
                 nxt, status, _ = cv2.calcOpticalFlowPyrLK(prior_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
@@ -354,8 +445,9 @@ class HandControlEngine:
                     u, v = float(nxt[0, 0, 0] * scale_x), float(nxt[0, 0, 1] * scale_y)
                     if 0 <= u < width and 0 <= v < height:
                         obs.palm_uv = (u, v)
-                        obs.confidence *= 0.75
+                        obs.confidence *= 0.85
                         obs.stale = True
+                        obs.timestamp = timestamp
                         coasted.append(obs)
             observations = coasted
             self._last = coasted
@@ -363,10 +455,18 @@ class HandControlEngine:
         else:
             self._last = []
             self._coast = 0
+
         self._previous_gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
         self._last_timestamp = timestamp
         elapsed = (time.perf_counter() - started) * 1000.0
-        return GestureState(timestamp, frame_id, tuple(observations), self.backend_name, elapsed, any(o.stale for o in observations))
+        return GestureState(
+            timestamp,
+            frame_id,
+            tuple(observations),
+            self.backend_name,
+            elapsed,
+            any(o.stale for o in observations),
+        )
 
     def reset(self) -> None:
         self._last = []
