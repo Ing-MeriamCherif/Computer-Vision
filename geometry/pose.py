@@ -15,6 +15,20 @@ import numpy as np
 from .camera import CameraModel
 
 
+def _validate_rigid_transform(transform: np.ndarray, name: str = "transform") -> None:
+    if transform.shape != (4, 4) or not np.isfinite(transform).all():
+        raise ValueError(f"{name} must be a finite 4x4 matrix")
+    bottom = transform[3, :]
+    if not np.allclose(bottom, [0.0, 0.0, 0.0, 1.0], atol=1e-2):
+        raise ValueError(f"{name} bottom row must be approximately [0, 0, 0, 1]")
+    r = transform[:3, :3]
+    if not np.allclose(r.T @ r, np.eye(3, dtype=r.dtype), atol=5e-2):
+        raise ValueError(f"{name} rotation matrix must be approximately orthonormal")
+    det = float(np.linalg.det(r))
+    if not math.isclose(det, 1.0, abs_tol=5e-2):
+        raise ValueError(f"{name} rotation determinant must be approximately +1, got {det:.4f}")
+
+
 @dataclass(frozen=True, slots=True)
 class CameraPoseState:
     timestamp: float
@@ -27,12 +41,15 @@ class CameraPoseState:
 
     def __post_init__(self) -> None:
         transform = np.asarray(self.T_world_from_camera, dtype=np.float32)
-        if transform.shape != (4, 4) or not np.isfinite(transform).all():
-            raise ValueError("T_world_from_camera must be a finite 4x4 matrix")
         if not np.isfinite(self.timestamp):
             raise ValueError("timestamp must be finite")
         if not 0.0 <= float(self.confidence) <= 1.0:
             raise ValueError("pose confidence must be in [0, 1]")
+        if self.valid:
+            _validate_rigid_transform(transform, "T_world_from_camera")
+        else:
+            if transform.shape != (4, 4) or not np.isfinite(transform).all():
+                raise ValueError("T_world_from_camera must be a finite 4x4 matrix")
         object.__setattr__(self, "T_world_from_camera", transform)
 
 
@@ -55,40 +72,264 @@ class PoseEstimateResult:
         mask = np.asarray(self.inlier_mask, dtype=bool)
         if transform.shape != (4, 4) or mask.ndim != 1:
             raise ValueError("pose result has invalid transform or inlier mask")
+        if not np.isfinite(transform).all():
+            raise ValueError("pose transform must be finite")
+        if self.valid:
+            _validate_rigid_transform(transform, "T_current_from_previous")
+        if self.inlier_count < 0:
+            raise ValueError("inlier_count cannot be negative")
+        if self.correspondence_count > 0 and self.inlier_count > self.correspondence_count:
+            raise ValueError("inlier_count cannot exceed correspondence_count")
+        if self.reprojection_error < 0.0:
+            raise ValueError("reprojection_error cannot be negative")
         object.__setattr__(self, "T_current_from_previous", transform)
         object.__setattr__(self, "inlier_mask", mask)
         object.__setattr__(self, "confidence", float(np.clip(self.confidence, 0.0, 1.0)))
 
 
+@dataclass(frozen=True, slots=True)
+class PoseCorrespondences:
+    """Spatially stratified 3D-2D correspondences for PnP."""
+    object_points: np.ndarray  # (N, 3) in previous camera coordinates
+    current_pixels: np.ndarray  # (N, 2) in current frame
+    previous_pixels: np.ndarray  # (N, 2) in previous frame
+    weights: np.ndarray  # (N,) quality weights in [0, 1]
+    source_indices: tuple[np.ndarray, np.ndarray] | None = None  # (row_indices, col_indices)
+    correspondence_count: int = 0
+    spatial_coverage: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class PoseConfig:
+    """Centralized governor for pose estimation."""
+    max_samples: int = 1000
+    min_correspondences: int = 6
+    min_inliers: int = 6
+    reprojection_error: float = 3.0
+    iterations: int = 100
+    confidence: float = 0.995
+    min_spatial_coverage: float = 1e-4
+    min_geometry_confidence: float = 0.35
+    min_motion_confidence: float = 0.35
+
+
 def _invalid(count: int, reason: str, coverage: float = 0.0) -> PoseEstimateResult:
-    return PoseEstimateResult(False, np.eye(4, dtype=np.float32), 0.0, np.zeros(count, dtype=bool), 0, float("inf"), correspondence_count=count, spatial_coverage=coverage, reason=reason)
+    return PoseEstimateResult(
+        False,
+        np.eye(4, dtype=np.float32),
+        0.0,
+        np.zeros(count, dtype=bool),
+        0,
+        float("inf"),
+        correspondence_count=count,
+        spatial_coverage=coverage,
+        reason=reason,
+    )
+
+
+def extract_pose_correspondences(
+    previous_geometry,
+    motion,
+    *,
+    current_camera: CameraModel | None = None,
+    min_geometry_confidence: float = 0.35,
+    min_motion_confidence: float = 0.35,
+    max_samples: int = 1000,
+    grid_cells: tuple[int, int] = (16, 16),
+) -> PoseCorrespondences:
+    """Extract spatially stratified, confidence-gated 3D-2D correspondences from states."""
+    if motion.source_frame_id != previous_geometry.source_frame_id:
+        raise ValueError(
+            f"Frame contract mismatch: motion.source_frame_id ({motion.source_frame_id}) "
+            f"!= previous_geometry.source_frame_id ({previous_geometry.source_frame_id})"
+        )
+
+    cam = current_camera or previous_geometry.camera
+    h, w = cam.height, cam.width
+    pts_3d = np.asarray(previous_geometry.positions_3d, dtype=np.float32)
+    flow = np.asarray(motion.forward_flow, dtype=np.float32)
+
+    if pts_3d.shape != (h, w, 3):
+        raise ValueError(f"Geometry positions_3d shape {pts_3d.shape} does not match camera ({h}, {w}, 3)")
+
+    if flow.ndim != 3:
+        raise ValueError(f"Flow ndim {flow.ndim} must be 3")
+
+    if flow.shape == (h, w, 2):
+        flow_u = flow[..., 0]
+        flow_v = flow[..., 1]
+        finite_flow = np.isfinite(flow).all(axis=-1)
+    elif flow.shape == (2, h, w):
+        flow_u = flow[0]
+        flow_v = flow[1]
+        finite_flow = np.isfinite(flow).all(axis=0)
+    else:
+        raise ValueError(f"Flow shape {flow.shape} does not match resolution ({h}, {w})")
+
+    mask = np.asarray(previous_geometry.valid_mask, dtype=bool) & np.asarray(motion.valid_mask, dtype=bool)
+    if getattr(previous_geometry, "normal_valid_mask", None) is not None:
+        mask &= np.asarray(previous_geometry.normal_valid_mask, dtype=bool)
+
+    geom_conf = (
+        np.asarray(previous_geometry.confidence, dtype=np.float32)
+        if getattr(previous_geometry, "confidence", None) is not None
+        else np.ones((h, w), dtype=np.float32)
+    )
+    mask &= geom_conf >= float(min_geometry_confidence)
+
+    motion_conf = (
+        np.asarray(motion.confidence, dtype=np.float32)
+        if (getattr(motion, "confidence", None) is not None and motion.confidence is not None)
+        else np.ones((h, w), dtype=np.float32)
+    )
+    mask &= motion_conf >= float(min_motion_confidence)
+
+    finite_pts = np.isfinite(pts_3d).all(axis=-1) & (pts_3d[..., 2] > 0)
+    mask &= finite_pts & finite_flow
+
+    # Target pixel coordinates
+    u_grid, v_grid = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    u_curr = u_grid + flow_u
+    v_curr = v_grid + flow_v
+
+    # Filter target within image bounds
+    inside = (u_curr >= 0) & (u_curr < w) & (v_curr >= 0) & (v_curr < h)
+    mask &= inside
+
+    valid_indices = np.flatnonzero(mask)
+    if len(valid_indices) == 0:
+        return PoseCorrespondences(
+            object_points=np.empty((0, 3), dtype=np.float32),
+            current_pixels=np.empty((0, 2), dtype=np.float32),
+            previous_pixels=np.empty((0, 2), dtype=np.float32),
+            weights=np.empty((0,), dtype=np.float32),
+            source_indices=(np.empty((0,), dtype=np.int64), np.empty((0,), dtype=np.int64)),
+            correspondence_count=0,
+            spatial_coverage=0.0,
+        )
+
+    # Calculate quality weights
+    qual_weights = (geom_conf * motion_conf).reshape(-1)
+
+    # Spatial stratification via image grid
+    n_rows, n_cols = grid_cells
+    cell_h = max(1, h // n_rows)
+    cell_w = max(1, w // n_cols)
+
+    row_indices = (valid_indices // w)
+    col_indices = (valid_indices % w)
+
+    grid_y = np.clip(row_indices // cell_h, 0, n_rows - 1)
+    grid_x = np.clip(col_indices // cell_w, 0, n_cols - 1)
+    cell_ids = grid_y * n_cols + grid_x
+
+    # Select best candidate per cell first, then fill remaining quota
+    unique_cells = np.unique(cell_ids)
+    selected_indices: list[int] = []
+
+    for cell_id in unique_cells:
+        cell_mask = cell_ids == cell_id
+        cell_cand_indices = valid_indices[cell_mask]
+        cell_cand_weights = qual_weights[cell_cand_indices]
+        best_cand = cell_cand_indices[np.argmax(cell_cand_weights)]
+        selected_indices.append(int(best_cand))
+
+    selected_set = set(selected_indices)
+    if len(selected_indices) < max_samples:
+        remaining = [idx for idx in valid_indices if idx not in selected_set]
+        if remaining:
+            rem_arr = np.asarray(remaining, dtype=np.int64)
+            rem_weights = qual_weights[rem_arr]
+            top_rem = rem_arr[np.argsort(-rem_weights)[: max_samples - len(selected_indices)]]
+            selected_indices.extend(top_rem.tolist())
+    elif len(selected_indices) > max_samples:
+        sel_arr = np.asarray(selected_indices, dtype=np.int64)
+        sel_weights = qual_weights[sel_arr]
+        selected_indices = sel_arr[np.argsort(-sel_weights)[:max_samples]].tolist()
+
+    sel_arr = np.asarray(selected_indices, dtype=np.int64)
+    sel_rows = sel_arr // w
+    sel_cols = sel_arr % w
+
+    obj_pts = pts_3d[sel_rows, sel_cols]
+    prev_px = np.column_stack((sel_cols.astype(np.float32), sel_rows.astype(np.float32)))
+    curr_px = np.column_stack((u_curr[sel_rows, sel_cols], v_curr[sel_rows, sel_cols]))
+    weights = qual_weights[sel_arr].astype(np.float32)
+
+    dx = float(curr_px[:, 0].max() - curr_px[:, 0].min()) / w if len(curr_px) > 0 else 0.0
+    dy = float(curr_px[:, 1].max() - curr_px[:, 1].min()) / h if len(curr_px) > 0 else 0.0
+    coverage = float(np.clip(dx * dy, 0.0, 1.0))
+
+    return PoseCorrespondences(
+        object_points=obj_pts.astype(np.float32),
+        current_pixels=curr_px.astype(np.float32),
+        previous_pixels=prev_px.astype(np.float32),
+        weights=weights,
+        source_indices=(sel_rows, sel_cols),
+        correspondence_count=len(sel_arr),
+        spatial_coverage=coverage,
+    )
 
 
 class PoseEstimator:
     """PnP-RANSAC pose estimator using ``T_current_from_previous`` semantics."""
 
-    def __init__(self, camera: CameraModel, *, max_samples: int = 2000, min_correspondences: int = 6, min_inliers: int = 6, reprojection_error: float = 3.0, iterations: int = 100, confidence: float = 0.995) -> None:
-        if max_samples < min_correspondences or min_correspondences < 4 or min_inliers < 4:
-            raise ValueError("pose correspondence limits are invalid")
+    def __init__(
+        self,
+        camera: CameraModel,
+        *,
+        config: PoseConfig | None = None,
+        max_samples: int = 1000,
+        min_correspondences: int = 6,
+        min_inliers: int = 6,
+        reprojection_error: float = 3.0,
+        iterations: int = 100,
+        confidence: float = 0.995,
+        min_spatial_coverage: float = 1e-4,
+    ) -> None:
         self.camera = camera
-        self.max_samples = int(max_samples)
-        self.min_correspondences = int(min_correspondences)
-        self.min_inliers = int(min_inliers)
-        self.reprojection_error = float(reprojection_error)
-        self.iterations = int(iterations)
-        self.ransac_confidence = float(confidence)
+        if config is not None:
+            self.config = config
+        else:
+            self.config = PoseConfig(
+                max_samples=max_samples,
+                min_correspondences=min_correspondences,
+                min_inliers=min_inliers,
+                reprojection_error=reprojection_error,
+                iterations=iterations,
+                confidence=confidence,
+                min_spatial_coverage=min_spatial_coverage,
+            )
+        if (
+            self.config.max_samples < self.config.min_correspondences
+            or self.config.min_correspondences < 4
+            or self.config.min_inliers < 4
+        ):
+            raise ValueError("pose correspondence limits are invalid")
+        self.max_samples = self.config.max_samples
+        self.min_correspondences = self.config.min_correspondences
+        self.min_inliers = self.config.min_inliers
+        self.reprojection_error = self.config.reprojection_error
+        self.iterations = self.config.iterations
+        self.ransac_confidence = self.config.confidence
+        self.min_spatial_coverage = self.config.min_spatial_coverage
 
     @staticmethod
     def _sample(object_points: np.ndarray, image_points: np.ndarray, max_samples: int) -> tuple[np.ndarray, np.ndarray]:
         if len(object_points) <= max_samples:
             return object_points, image_points
-        # Deterministic spatial ordering of image correspondences, then evenly sample.
         order = np.lexsort((image_points[:, 0], image_points[:, 1]))
         take = np.linspace(0, len(order) - 1, max_samples, dtype=np.int64)
         selected = order[take]
         return object_points[selected], image_points[selected]
 
-    def estimate(self, object_points: np.ndarray, image_points: np.ndarray, *, camera: CameraModel | None = None) -> PoseEstimateResult:
+    def estimate(
+        self,
+        object_points: np.ndarray,
+        image_points: np.ndarray,
+        *,
+        camera: CameraModel | None = None,
+    ) -> PoseEstimateResult:
         points3d = np.asarray(object_points, dtype=np.float32)
         pixels = np.asarray(image_points, dtype=np.float32)
         if points3d.ndim != 2 or points3d.shape[1] != 3 or pixels.shape != (len(points3d), 2):
@@ -97,8 +338,9 @@ class PoseEstimator:
         points3d, pixels = points3d[finite], pixels[finite]
         if len(points3d) < self.min_correspondences:
             return _invalid(len(points3d), "too_few_correspondences")
-        coverage = float(np.prod(np.clip((pixels.max(axis=0) - pixels.min(axis=0)) / np.array([self.camera.width, self.camera.height]), 0.0, 1.0)))
-        if coverage < 1e-4:
+        cam = camera or self.camera
+        coverage = float(np.prod(np.clip((pixels.max(axis=0) - pixels.min(axis=0)) / np.array([cam.width, cam.height]), 0.0, 1.0)))
+        if coverage < self.min_spatial_coverage:
             return _invalid(len(points3d), "insufficient_spatial_coverage", coverage)
         centered = pixels - pixels.mean(axis=0, keepdims=True)
         singular = np.linalg.svd(centered, compute_uv=False)
@@ -109,12 +351,16 @@ class PoseEstimator:
             import cv2
         except ImportError:
             return _invalid(len(points3d), "opencv_unavailable", coverage)
-        cam = camera or self.camera
         try:
             ok, rvec, tvec, inliers = cv2.solvePnPRansac(
-                points3d.astype(np.float64), pixels.astype(np.float64), cam.camera_matrix, None,
-                iterationsCount=self.iterations, reprojectionError=self.reprojection_error,
-                confidence=self.ransac_confidence, flags=cv2.SOLVEPNP_ITERATIVE,
+                points3d.astype(np.float64),
+                pixels.astype(np.float64),
+                cam.camera_matrix,
+                None,
+                iterationsCount=self.iterations,
+                reprojectionError=self.reprojection_error,
+                confidence=self.ransac_confidence,
+                flags=cv2.SOLVEPNP_ITERATIVE,
             )
         except cv2.error:
             return _invalid(len(points3d), "pnp_failed", coverage)
@@ -135,7 +381,51 @@ class PoseEstimator:
         count_score = min(1.0, len(inlier_errors) / 100.0)
         residual_score = math.exp(-median / max(self.reprojection_error, 1e-6))
         confidence = float(np.clip(inlier_ratio * (0.35 + 0.35 * count_score + 0.30 * residual_score) * min(1.0, 10.0 * coverage), 0.0, 1.0))
-        return PoseEstimateResult(True, transform, confidence, inlier_mask, int(inlier_mask.sum()), float(np.mean(inlier_errors)), median, p95, len(points3d), coverage)
+        return PoseEstimateResult(
+            True,
+            transform,
+            confidence,
+            inlier_mask,
+            int(inlier_mask.sum()),
+            float(np.mean(inlier_errors)),
+            median,
+            p95,
+            len(points3d),
+            coverage,
+        )
+
+    def estimate_from_correspondences(
+        self,
+        correspondences: PoseCorrespondences,
+        *,
+        camera: CameraModel | None = None,
+    ) -> PoseEstimateResult:
+        """Estimate camera motion from precomputed PoseCorrespondences."""
+        if correspondences.correspondence_count < self.min_correspondences:
+            return _invalid(correspondences.correspondence_count, "too_few_correspondences", correspondences.spatial_coverage)
+        return self.estimate(correspondences.object_points, correspondences.current_pixels, camera=camera)
+
+    def estimate_from_states(
+        self,
+        previous_geometry,
+        motion,
+        *,
+        current_camera: CameraModel | None = None,
+        min_geometry_confidence: float | None = None,
+        min_motion_confidence: float | None = None,
+    ) -> PoseEstimateResult:
+        """High-level pose estimation directly from previous GeometryState and MotionState."""
+        min_geom = self.config.min_geometry_confidence if min_geometry_confidence is None else min_geometry_confidence
+        min_mot = self.config.min_motion_confidence if min_motion_confidence is None else min_motion_confidence
+        corr = extract_pose_correspondences(
+            previous_geometry,
+            motion,
+            current_camera=current_camera or self.camera,
+            min_geometry_confidence=min_geom,
+            min_motion_confidence=min_mot,
+            max_samples=self.max_samples,
+        )
+        return self.estimate_from_correspondences(corr, camera=current_camera or self.camera)
 
     def estimate_from_flow(
         self,
@@ -145,58 +435,13 @@ class PoseEstimator:
         min_geometry_confidence: float = 0.35,
         min_motion_confidence: float = 0.35,
     ) -> PoseEstimateResult:
-        """Estimate camera motion from previous GeometryState and MotionState forward flow."""
-        cam = previous_geometry.camera or self.camera
-        h, w = cam.height, cam.width
-        pts_3d = np.asarray(previous_geometry.positions_3d, dtype=np.float32)
-        flow = np.asarray(motion.forward_flow, dtype=np.float32)
-        if pts_3d.shape != (h, w, 3) or flow.ndim != 3:
-            return _invalid(0, "dimension_mismatch")
-
-        if flow.shape == (h, w, 2):
-            flow_u = flow[..., 0]
-            flow_v = flow[..., 1]
-            finite_flow = np.isfinite(flow).all(axis=-1)
-        elif flow.shape == (2, h, w):
-            flow_u = flow[0]
-            flow_v = flow[1]
-            finite_flow = np.isfinite(flow).all(axis=0)
-        else:
-            return _invalid(0, "dimension_mismatch")
-
-        mask = np.asarray(previous_geometry.valid_mask, dtype=bool) & np.asarray(motion.valid_mask, dtype=bool)
-        if getattr(previous_geometry, "normal_valid_mask", None) is not None:
-            mask &= np.asarray(previous_geometry.normal_valid_mask, dtype=bool)
-        if getattr(previous_geometry, "confidence", None) is not None:
-            mask &= np.asarray(previous_geometry.confidence, dtype=np.float32) >= float(min_geometry_confidence)
-        if getattr(motion, "confidence", None) is not None and motion.confidence is not None:
-            mask &= np.asarray(motion.confidence, dtype=np.float32) >= float(min_motion_confidence)
-
-        finite_pts = np.isfinite(pts_3d).all(axis=-1) & (pts_3d[..., 2] > 0)
-        mask &= finite_pts & finite_flow
-
-        valid_count = int(mask.sum())
-        if valid_count < self.min_correspondences:
-            return _invalid(valid_count, "too_few_reliable_correspondences")
-
-        u_grid, v_grid = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-        u_sel = u_grid[mask]
-        v_sel = v_grid[mask]
-        u_flow_sel = flow_u[mask]
-        v_flow_sel = flow_v[mask]
-
-        p_prev = np.column_stack((u_sel, v_sel))
-        p_curr = np.column_stack((u_sel + u_flow_sel, v_sel + v_flow_sel))
-        obj_pts = pts_3d[mask]
-
-        inside = (p_curr[:, 0] >= 0) & (p_curr[:, 0] < w) & (p_curr[:, 1] >= 0) & (p_curr[:, 1] < h)
-        obj_pts = obj_pts[inside]
-        p_curr = p_curr[inside]
-
-        if len(obj_pts) < self.min_correspondences:
-            return _invalid(len(obj_pts), "correspondences_out_of_frame")
-
-        return self.estimate(obj_pts, p_curr, camera=cam)
+        """Backward-compatible alias for estimate_from_states."""
+        return self.estimate_from_states(
+            previous_geometry,
+            motion,
+            min_geometry_confidence=min_geometry_confidence,
+            min_motion_confidence=min_motion_confidence,
+        )
 
 
 def compose_world_pose(previous_world_from_camera: np.ndarray, current_from_previous: np.ndarray) -> np.ndarray:
@@ -205,7 +450,22 @@ def compose_world_pose(previous_world_from_camera: np.ndarray, current_from_prev
     relative = np.asarray(current_from_previous, dtype=np.float64)
     if previous.shape != (4, 4) or relative.shape != (4, 4):
         raise ValueError("poses must be 4x4")
-    return (previous @ np.linalg.inv(relative)).astype(np.float32)
+    composed = previous @ np.linalg.inv(relative)
+    return composed.astype(np.float32)
+
+
+def pose_error(
+    estimated_world_from_camera: np.ndarray,
+    ground_truth_world_from_camera: np.ndarray,
+) -> tuple[float, float]:
+    """Compute rotation error in degrees and translation error norm between two 4x4 poses."""
+    T_est = np.asarray(estimated_world_from_camera, dtype=np.float64)
+    T_gt = np.asarray(ground_truth_world_from_camera, dtype=np.float64)
+    R_rel = T_est[:3, :3] @ T_gt[:3, :3].T
+    tr = np.clip((np.trace(R_rel) - 1.0) / 2.0, -1.0, 1.0)
+    rot_err_deg = float(np.rad2deg(np.arccos(tr)))
+    trans_err = float(np.linalg.norm(T_est[:3, 3] - T_gt[:3, 3]))
+    return rot_err_deg, trans_err
 
 
 def compute_rigid_flow_residual(
@@ -286,3 +546,66 @@ def compute_static_confidence(
         static *= spatial
     return np.clip(static, 0.0, 1.0).astype(np.float32)
 
+
+@dataclass(frozen=True, slots=True)
+class StaticGeometryResult:
+    """Per-pixel static vs dynamic classification outcome."""
+    static_confidence: np.ndarray  # (H, W) in [0, 1]
+    rigid_residual: np.ndarray  # (H, W) flow residual in pixels
+    static_mask: np.ndarray  # (H, W) bool
+    dynamic_mask: np.ndarray  # (H, W) bool
+    valid_mask: np.ndarray  # (H, W) bool
+    static_pixel_percent: float
+    dynamic_pixel_percent: float
+
+
+def classify_static_geometry(
+    previous_geometry,
+    motion,
+    pose_result: PoseEstimateResult | CameraPoseState,
+    camera: CameraModel | None = None,
+    *,
+    threshold: float = 1.5,
+    tau: float = 2.0,
+    min_static_confidence: float = 0.5,
+) -> StaticGeometryResult:
+    """Classify per-pixel static vs dynamic geometry using rigid motion residual."""
+    cam = camera or previous_geometry.camera
+    h, w = cam.height, cam.width
+    t_mat = (
+        pose_result.T_current_from_previous
+        if isinstance(pose_result, PoseEstimateResult)
+        else pose_result.T_world_from_camera
+    )
+    res = compute_rigid_flow_residual(
+        cam,
+        previous_geometry.positions_3d,
+        motion.forward_flow,
+        t_mat,
+        valid_mask=previous_geometry.valid_mask,
+    )
+    spatial_conf = getattr(previous_geometry, "spatial_confidence", None)
+    if spatial_conf is None:
+        spatial_conf = getattr(previous_geometry, "confidence", None)
+    conf = compute_static_confidence(
+        res,
+        spatial_conf,
+        threshold=threshold,
+        tau=tau,
+    )
+    finite = np.isfinite(res)
+    static_mask = finite & (conf >= float(min_static_confidence))
+    dynamic_mask = finite & (conf < float(min_static_confidence))
+    total_pixels = h * w
+    static_pct = float(static_mask.sum() / max(1, total_pixels) * 100.0)
+    dynamic_pct = float(dynamic_mask.sum() / max(1, total_pixels) * 100.0)
+
+    return StaticGeometryResult(
+        static_confidence=conf,
+        rigid_residual=res,
+        static_mask=static_mask,
+        dynamic_mask=dynamic_mask,
+        valid_mask=finite,
+        static_pixel_percent=static_pct,
+        dynamic_pixel_percent=dynamic_pct,
+    )
