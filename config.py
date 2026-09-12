@@ -102,6 +102,13 @@ LK_MAX_FRAMES: int = _getint("LK_MAX_FRAMES", 12)
 # Torch glow radius in px @640 wide.
 GLOW_RADIUS_PX: float = _getfloat("GLOW_RADIUS_PX", 260.0)
 
+# ---- Phase 2 depth ----
+# DepthAnythingV2-Small via transformers (relative depth, working volume).
+DEPTH_MODEL_ID: str = _getenv("DEPTH_MODEL_ID",
+                              "depth-anything/Depth-Anything-V2-Small-hf")
+DEPTH_DEVICE: str = _getenv("DEPTH_DEVICE", "auto").lower()  # auto|cpu|cuda
+DEPTH_INPUT_SIZE: int = _getint("DEPTH_INPUT_SIZE", 518)
+
 # ---- Phase 2 normals ----
 # NORMALS_METHOD: sobel | d2nt_basic | d2nt_v2 | d2nt_v3 (bench winner: d2nt_v2)
 NORMALS_METHOD: str = _getenv("NORMALS_METHOD", "d2nt_v2").lower()
