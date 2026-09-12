@@ -1,7 +1,12 @@
 __pycache__/
 *.pyc
+.venv/
 *.pt
 *.task
+*.csv
 results/*.mp4
 results/*.png
+benchmark_results.csv
+camera_*.csv
+model_comparison/results.csv
 .env

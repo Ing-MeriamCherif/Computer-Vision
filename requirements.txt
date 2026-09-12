@@ -3,5 +3,10 @@ numpy>=1.26
 opencv-python>=4.8
 mediapipe>=0.10
 PyYAML>=6.0
+Pillow>=8.0
 # Optional: YOLO backend (HAND_BACKEND=yolo). Needs torch; cuda on 4060.
 ultralytics>=8.0
+# Phase 2: depth backends (depth/ package) + D2NT normals
+torch>=1.8
+transformers>=4.40
+d2nt>=0.1.0
