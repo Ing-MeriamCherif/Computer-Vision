@@ -33,12 +33,18 @@ def main() -> int:
         page.locator("input[type=file]").last.set_input_files(args.image)
         page.get_by_role("button", name="Process current frame").click()
         page.get_by_text("renderer_contract_valid", exact=False).wait_for(timeout=90_000)
+        page.get_by_text("CUDA current geometry", exact=True).click()
+        page.get_by_role("button", name="Process current frame").click()
+        page.wait_for_timeout(2_000)
+        page.get_by_text("Phase 5 persistent", exact=True).click()
+        page.get_by_role("button", name="Process current frame").click()
+        page.get_by_text("surfel_count", exact=False).wait_for(timeout=90_000)
         page.screenshot(path=args.screenshot, full_page=True)
         body = page.locator("body").inner_text()
         assert "Relative depth" in body and "Camera-facing normals" in body
         assert "renderer_contract_valid" in body and "true" in body.lower()
         browser.close()
-    print({"ui_loaded": True, "frame_processed": True, "renderer_contract_valid": True, "console_errors": console_errors, "screenshot": args.screenshot})
+    print({"ui_loaded": True, "modes_processed": ["Phase 1-4 temporal", "CUDA current geometry", "Phase 5 persistent"], "renderer_contract_valid": True, "console_errors": console_errors, "screenshot": args.screenshot})
     return 0 if not console_errors else 1
 
 
