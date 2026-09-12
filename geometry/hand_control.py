@@ -269,16 +269,20 @@ class HandControlEngine:
         detect_every_n: int = 2,
         max_coast_frames: int = 6,
         input_size: tuple[int, int] = (320, 240),
+        filter_mode: str = "oneeuro",
     ) -> None:
         self.backend = create_hand_tracker(model_path=model_path, max_hands=max_hands, backend=backend)
         self.detect_every_n = max(1, int(detect_every_n))
         self.max_coast_frames = max(0, int(max_coast_frames))
         self.input_size = input_size
+        self.filter_mode = str(filter_mode).lower()
         self._last: list[HandObservation] = []
         self._filters: dict[int, tuple[_OneEuro, _OneEuro]] = {}
+        self._ema_filters: dict[int, object] = {}
         self._previous_gray: np.ndarray | None = None
         self._coast = 0
         self._last_timestamp: float | None = None
+        self.last_detection_ran = False
 
     @property
     def backend_name(self) -> str:
@@ -299,6 +303,7 @@ class HandControlEngine:
         should_detect = self._last_timestamp is None or (
             isinstance(frame_id, int) and frame_id % self.detect_every_n == 0
         )
+        self.last_detection_ran = bool(should_detect)
         observations: list[HandObservation] = []
         if should_detect:
             observations = self.backend.process(small)
@@ -316,10 +321,19 @@ class HandControlEngine:
             for index, obs in enumerate(observations):
                 old = self._last[index] if index < len(self._last) else None
                 uv = obs.palm_uv
-                if index not in self._filters:
-                    self._filters[index] = (_OneEuro(), _OneEuro())
-                fx, fy = self._filters[index]
-                smooth_uv = (fx(uv[0], timestamp), fy(uv[1], timestamp))
+                if self.filter_mode == "ema":
+                    try:
+                        from integrations.colleague_hand.filters import EMAFilter
+                        ema = self._ema_filters.setdefault(index, EMAFilter(alpha=0.4))
+                        smooth_arr = ema.update_dynamic(np.asarray(uv), 0.4)
+                        smooth_uv = (float(smooth_arr[0]), float(smooth_arr[1]))
+                    except Exception:
+                        smooth_uv = uv
+                else:
+                    if index not in self._filters:
+                        self._filters[index] = (_OneEuro(), _OneEuro())
+                    fx, fy = self._filters[index]
+                    smooth_uv = (fx(uv[0], timestamp), fy(uv[1], timestamp))
                 velocity = 0.0
                 if old is not None:
                     velocity = float(np.linalg.norm(np.subtract(smooth_uv, old.palm_uv)) / max(timestamp - getattr(self, "_last_timestamp", timestamp), 1e-3))
@@ -357,9 +371,11 @@ class HandControlEngine:
     def reset(self) -> None:
         self._last = []
         self._filters.clear()
+        self._ema_filters.clear()
         self._previous_gray = None
         self._coast = 0
         self._last_timestamp = None
+        self.last_detection_ran = False
 
     def close(self) -> None:
         self.backend.close()

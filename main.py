@@ -1,7 +1,7 @@
 """Challenge entry point.
 
-``python main.py`` launches the live webcam/WebRTC application required by the
-challenge.  The deterministic geometry smoke test remains available with
+``python main.py`` launches the direct OpenCV live webcam application required
+by the challenge. The deterministic geometry smoke test remains available with
 ``python main.py --smoke`` for headless CI and numeric validation.
 """
 

@@ -84,7 +84,7 @@ the palm (bilinear first, 5x5 median fallback), calls the colleague
 `light_vector.palm_to_light` math, and adapts the result through the calibrated
 camera. `shade_geometry` then applies up to two diffuse/specular lights and a
 bounded screen-space visibility pass. The result is composed into the same
-WebRTC frame as the webcam, depth, normals, and metrics.
+live OpenCV frame as the webcam, depth, normals, and metrics.
 
 The complete colleague `feature/depth` tree is preserved under
 `integrations/colleague_depth/depth`. `geometry.ColleagueDepthProvider` loads

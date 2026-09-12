@@ -19,9 +19,10 @@ persistent geometry. This was not a still-image or upload test.
 The original full-resolution run only partially passed: CUDA-current and
 temporal modes each completed 90 consecutive frames, but the synchronous path
 processed roughly one frame per second. That baseline is retained below for
-traceability. The current live path uses WebRTC, bounds processing to 256 x 192,
-uses a 192px Depth Anything input, skips stale frames, and returns a synchronized
-four-panel result. Warm direct processing is 28.1 ms/frame (35.6 FPS) on a
+traceability. The current live path uses direct OpenCV/V4L2, bounds processing
+to 256 x 192, uses a 192px Depth Anything input, skips stale frames, and
+returns a synchronized four-panel result. Warm direct processing is 28.1
+ms/frame (35.6 FPS) on a
 256 x 192 input with valid depth, normals, confidence, and renderer output.
 
 ## Test method

@@ -39,7 +39,7 @@ a bounded voxel-surfel map are available through `geometry.pose` and
 See [`docs/geometry-phase5.md`](docs/geometry-phase5.md) and run
 `python3 -m tools.persistent_geometry_demo` for a deterministic headless demo.
 
-Optional CUDA processing and the live webcam test interface are documented in
+Optional CUDA processing and the direct OpenCV live webcam interface are documented in
 [`docs/gpu-webcam.md`](docs/gpu-webcam.md). The downloaded model and Python
 environment stay on the SATA checkout and are intentionally excluded from Git.
 
