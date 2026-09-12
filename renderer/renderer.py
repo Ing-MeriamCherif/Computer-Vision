@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from contracts.render_types import MAX_LIGHTS, Light, RenderPacket
-from .config import LightingConfig, SecondaryShadowMode, ShadowConfig
+from .config import LightingConfig, SecondaryShadowMode, ShadowConfig, VolumetricConfig
 from .resources import RendererResources
 
 
@@ -25,6 +25,7 @@ class DebugMode(IntEnum):
     SHADOW_FINAL = 8
     DEPTH_EDGES = 9
     SHADOW_MASK_2 = 10
+    VOLUMETRIC = 11
 
 
 def secondary_shadow_configs(
@@ -67,6 +68,7 @@ class Renderer:
         config: LightingConfig | None = None,
         shadow_config: ShadowConfig | None = None,
         secondary_shadow_mode: SecondaryShadowMode | str = SecondaryShadowMode.BALANCED,
+        volumetric_config: VolumetricConfig | None = None,
     ) -> None:
         try:
             import moderngl
@@ -84,6 +86,8 @@ class Renderer:
             else SecondaryShadowMode(secondary_shadow_mode.lower())
         )
         self.shadow_configs = secondary_shadow_configs(self.shadow_config, self.secondary_shadow_mode)
+        self.volumetric_config = volumetric_config or VolumetricConfig()
+        self.volumetric_enabled = self.volumetric_config.volumetric_enabled
         vertex_shader = (shader_dir / "fullscreen.vert").read_text(encoding="utf-8")
         self.debug_program = context.program(
             vertex_shader=vertex_shader,
@@ -101,11 +105,21 @@ class Renderer:
             vertex_shader=vertex_shader,
             fragment_shader=(shader_dir / "composite.frag").read_text(encoding="utf-8"),
         )
+        self.volumetric_program = context.program(
+            vertex_shader=vertex_shader,
+            fragment_shader=(shader_dir / "volumetric.frag").read_text(encoding="utf-8"),
+        )
         self.debug_vertex_array = context.vertex_array(self.debug_program, [])
         self.lighting_vertex_array = context.vertex_array(self.lighting_program, [])
         self.shadow_vertex_array = context.vertex_array(self.shadow_program, [])
         self.composite_vertex_array = context.vertex_array(self.composite_program, [])
-        self.resources = RendererResources(context, initial_packet, self.shadow_config)
+        self.volumetric_vertex_array = context.vertex_array(self.volumetric_program, [])
+        self.resources = RendererResources(
+            context,
+            initial_packet,
+            self.shadow_config,
+            self.volumetric_config,
+        )
 
         for program in (self.debug_program, self.lighting_program):
             program["u_rgb"].value = 0
@@ -115,6 +129,7 @@ class Renderer:
             program["u_normal_valid"].value = 4
         self.debug_program["u_shadow_visibility"].value = 5
         self.debug_program["u_shadow_visibility_2"].value = 6
+        self.debug_program["u_volumetric"].value = 7
         self.shadow_program["u_depth"].value = 1
         self.shadow_program["u_depth_valid"].value = 3
 
@@ -126,8 +141,21 @@ class Renderer:
             ("u_shadow_visibility_2", 6),
             ("u_depth", 3),
             ("u_depth_valid", 4),
+            ("u_volumetric", 7),
         ):
             self.composite_program[name].value = unit
+        self.composite_program["u_volumetric_enabled"].value = 0
+
+        self.volumetric_program["u_depth"].value = 1
+        self.volumetric_program["u_depth_valid"].value = 3
+        self.volumetric_program["u_shadow_visibility_1"].value = 5
+        self.volumetric_program["u_shadow_visibility_2"].value = 6
+        self.volumetric_program["u_attenuation_k"].value = self.config.attenuation_k
+        self.volumetric_program["u_volumetric_samples"].value = self.volumetric_config.volumetric_samples
+        self.volumetric_program["u_volumetric_density"].value = self.volumetric_config.volumetric_density
+        self.volumetric_program["u_volumetric_intensity"].value = self.volumetric_config.volumetric_intensity
+        self.volumetric_program["u_volumetric_decay"].value = self.volumetric_config.volumetric_decay
+        self.debug_program["u_volumetric_debug_scale"].value = 2.0
 
         self.debug_program["u_depth_min_m"].value = 0.5
         self.debug_program["u_depth_max_m"].value = 3.5
@@ -156,6 +184,12 @@ class Renderer:
     def upload_rgb(self, rgb) -> None:
         """Update only RGB when depth and normals remain resident (webcam mock mode)."""
         self.resources.upload_rgb(rgb)
+
+    def set_volumetric_enabled(self, enabled: bool) -> None:
+        """Enable/disable scattering immediately without reallocating GPU resources."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        self.volumetric_enabled = enabled
 
     @staticmethod
     def _draw(vertex_array, moderngl, query=None) -> None:
@@ -211,7 +245,7 @@ class Renderer:
     def _light_values(self, packet: RenderPacket) -> list[tuple[np.ndarray, np.ndarray, float, bool]]:
         return [self._safe_light(light) for light in packet.lights.lights[:MAX_LIGHTS]]
 
-    def _set_lighting_light_uniforms(self, packet: RenderPacket) -> None:
+    def _set_lighting_light_uniforms(self, packet: RenderPacket, program=None) -> None:
         lights = self._light_values(packet)
         positions = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
         colors = np.zeros((MAX_LIGHTS, 3), dtype=np.float32)
@@ -222,7 +256,7 @@ class Renderer:
             colors[index] = color
             intensities[index] = intensity
             active[index] = int(enabled and intensity > 0.0)
-        program = self.lighting_program
+        program = self.lighting_program if program is None else program
         program["u_light_count"].value = len(lights)
         program["u_light_positions_camera_m"].value = tuple(
             tuple(float(v) for v in row) for row in positions
@@ -298,7 +332,49 @@ class Renderer:
         self.resources.depth_valid_texture.use(location=4)
         self.resources.direct_textures[1].use(location=5)
         self.resources.shadow_textures[1].use(location=6)
+        self.resources.volumetric_texture.use(location=7)
+        self.composite_program["u_volumetric_enabled"].value = int(self.volumetric_enabled)
         self._draw(self.composite_vertex_array, self._moderngl, query)
+
+    def _clear_volumetric(self) -> None:
+        self.resources.volumetric_framebuffer.use()
+        self.context.viewport = (0, 0, *self.resources.volumetric_size)
+        self.context.clear(0.0, 0.0, 0.0, 0.0)
+
+    def _render_volumetric(self, packet: RenderPacket, query=None, *, clear_when_disabled: bool = False) -> bool:
+        if not self.volumetric_enabled:
+            if clear_when_disabled:
+                self._clear_volumetric()
+            return False
+
+        self.resources.volumetric_framebuffer.use()
+        self.context.viewport = (0, 0, *self.resources.volumetric_size)
+        self.context.clear(0.0, 0.0, 0.0, 0.0)
+        self.resources.depth_texture.use(location=1)
+        self.resources.depth_valid_texture.use(location=3)
+        self.resources.shadow_textures[0].use(location=5)
+        self.resources.shadow_textures[1].use(location=6)
+        self._set_camera_uniforms(self.volumetric_program, packet)
+        self._set_lighting_light_uniforms(packet, self.volumetric_program)
+        self._draw(self.volumetric_vertex_array, self._moderngl, query)
+        return True
+
+    def _render_volumetric_debug(self, packet: RenderPacket, queries: dict[str, object] | None = None) -> None:
+        queries = queries or {}
+        if self.volumetric_enabled:
+            self._render_shadow_pass(packet, 0, queries.get("shadow_1"))
+            self._render_shadow_pass(packet, 1, queries.get("shadow_2"))
+        self._render_volumetric(
+            packet,
+            queries.get("volumetric"),
+            clear_when_disabled=True,
+        )
+        self.context.screen.use()
+        self.context.viewport = (0, 0, *self.context.screen.size)
+        self.context.clear(0.0, 0.0, 0.0, 1.0)
+        self.resources.volumetric_texture.use(location=7)
+        self.debug_program["u_debug_mode"].value = int(DebugMode.VOLUMETRIC)
+        self._draw(self.debug_vertex_array, self._moderngl)
 
     def _render_shadow_debug(self, packet: RenderPacket, light_index: int, query=None) -> None:
         self._render_shadow_pass(packet, light_index, query)
@@ -331,10 +407,14 @@ class Renderer:
         if mode == DebugMode.SHADOW_MASK_2:
             self._render_shadow_debug(packet, 1, queries.get("shadow_2"))
             return
+        if mode == DebugMode.VOLUMETRIC:
+            self._render_volumetric_debug(packet, queries)
+            return
         if mode == DebugMode.SHADOW_FINAL:
             self._render_shadow_pass(packet, 0, queries.get("shadow_1", queries.get("shadow")))
             self._render_shadow_pass(packet, 1, queries.get("shadow_2"))
             self._render_lighting(packet, mode, layered=True, query=queries.get("lighting"))
+            self._render_volumetric(packet, queries.get("volumetric"))
             self._render_composite(queries.get("composition"))
             return
 
@@ -354,8 +434,10 @@ class Renderer:
         self.lighting_vertex_array.release()
         self.shadow_vertex_array.release()
         self.composite_vertex_array.release()
+        self.volumetric_vertex_array.release()
         self.debug_program.release()
         self.lighting_program.release()
         self.shadow_program.release()
         self.composite_program.release()
+        self.volumetric_program.release()
         self.resources.release()

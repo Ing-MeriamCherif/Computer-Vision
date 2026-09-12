@@ -7,6 +7,8 @@ uniform sampler2D u_shadow_visibility_1;
 uniform sampler2D u_shadow_visibility_2;
 uniform sampler2D u_depth;
 uniform sampler2D u_depth_valid;
+uniform sampler2D u_volumetric;
+uniform int u_volumetric_enabled;
 uniform int u_shadow_softening_enabled_1;
 uniform int u_shadow_softening_enabled_2;
 uniform int u_shadow_soft_samples_1;
@@ -157,6 +159,15 @@ void main() {
     vec3 result_linear = ambient + visibility_1 * direct_1 + visibility_2 * direct_2;
     if (any(isnan(result_linear)) || any(isinf(result_linear))) {
         result_linear = ambient;
+    }
+    if (u_volumetric_enabled != 0) {
+        vec3 volume = texture(u_volumetric, layer_uv).rgb;
+        if (!any(isnan(volume)) && !any(isinf(volume))) {
+            // Add within available linear-light headroom to avoid washing
+            // highlights to white; when disabled the P11 expression is exact.
+            vec3 headroom = max(vec3(1.0) - clamp(result_linear, 0.0, 1.0), vec3(0.0));
+            result_linear += min(max(volume, vec3(0.0)), headroom * 0.8);
+        }
     }
     frag_color = vec4(linear_to_srgb(result_linear), 1.0);
 }

@@ -45,6 +45,60 @@ class SecondaryShadowMode(str, Enum):
     OFF = "off"
 
 
+class VolumetricQualityProfile(str, Enum):
+    SAFE = "safe"
+    BALANCED = "balanced"
+    HIGH = "high"
+
+
+@dataclass(frozen=True)
+class VolumetricConfig:
+    """Low-resolution camera-ray scattering controls; disabled by default."""
+
+    volumetric_enabled: bool = False
+    volumetric_resolution_scale: float = 0.25
+    volumetric_samples: int = 12
+    volumetric_density: float = 0.8
+    volumetric_intensity: float = 0.15
+    volumetric_decay: float = 0.95
+
+    @classmethod
+    def for_profile(cls, profile: VolumetricQualityProfile | str) -> "VolumetricConfig":
+        try:
+            selected = profile if isinstance(profile, VolumetricQualityProfile) else VolumetricQualityProfile(profile.lower())
+        except (AttributeError, ValueError) as exc:
+            choices = ", ".join(item.value for item in VolumetricQualityProfile)
+            raise ValueError(f"volumetric profile must be one of: {choices}") from exc
+
+        profiles = {
+            VolumetricQualityProfile.SAFE: {"volumetric_resolution_scale": 0.25, "volumetric_samples": 8},
+            VolumetricQualityProfile.BALANCED: {"volumetric_resolution_scale": 0.25, "volumetric_samples": 12},
+            VolumetricQualityProfile.HIGH: {"volumetric_resolution_scale": 0.5, "volumetric_samples": 20},
+        }
+        return cls(**profiles[selected])
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.volumetric_enabled, bool):
+            raise TypeError("volumetric_enabled must be a bool")
+        if (
+            not math.isfinite(self.volumetric_resolution_scale)
+            or not 0.0 < self.volumetric_resolution_scale <= 1.0
+        ):
+            raise ValueError("volumetric_resolution_scale must be finite and in (0, 1]")
+        if isinstance(self.volumetric_samples, bool) or not isinstance(self.volumetric_samples, int):
+            raise TypeError("volumetric_samples must be an integer")
+        if not 1 <= self.volumetric_samples <= 24:
+            raise ValueError("volumetric_samples must be between 1 and 24")
+        for name, value in (
+            ("volumetric_density", self.volumetric_density),
+            ("volumetric_intensity", self.volumetric_intensity),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and >= 0")
+        if not math.isfinite(self.volumetric_decay) or not 0.0 <= self.volumetric_decay <= 1.0:
+            raise ValueError("volumetric_decay must be finite and in [0, 1]")
+
+
 @dataclass(frozen=True)
 class ShadowConfig:
     """Controls for fixed-step screen-space shadows and edge-aware filtering."""
