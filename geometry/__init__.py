@@ -25,6 +25,8 @@ from .warp import warp_depth_backward, warp_field_backward, warp_normals_backwar
 from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
 from .validation import GeometryValidationReport, validate_renderer_geometry
 from .diagnostics import GeometryDiagnostics, StageTimer, geometry_state_nbytes, motion_state_nbytes, summarize_timings
+from .pose import CameraPoseState, PoseEstimateResult, PoseEstimator, compose_world_pose
+from .persistent import AdvancedGeometryEngine, PersistentGeometryMapper, PersistentGeometryState, Surfel, SurfelMap
 
 __all__ = [
     "CameraModel",
@@ -62,4 +64,13 @@ __all__ = [
     "geometry_state_nbytes",
     "motion_state_nbytes",
     "summarize_timings",
+    "CameraPoseState",
+    "PoseEstimateResult",
+    "PoseEstimator",
+    "compose_world_pose",
+    "PersistentGeometryState",
+    "Surfel",
+    "SurfelMap",
+    "PersistentGeometryMapper",
+    "AdvancedGeometryEngine",
 ]

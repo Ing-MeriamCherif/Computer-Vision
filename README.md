@@ -1,6 +1,6 @@
 # Computer-Vision-NRW
 
-Phases 1–4 of the NRW AI & Vision Challenge geometry subsystem are
+Phases 1–5 of the NRW AI & Vision Challenge geometry subsystem are
 implemented in `geometry/`. It provides a calibrated camera model, explicit
 resize/crop/letterbox transforms, vectorized depth-to-camera-space
 reconstruction, camera-facing surface normals, discontinuity-aware neighbor
@@ -28,3 +28,9 @@ shadows, and the final renderer remain outside this geometry core.
 
 Phase 4 tools: `python3 -m tools.geometry_benchmark --json`,
 `python3 -m tools.geometry_stress`, and `python3 -m tools.geometry_capabilities`.
+
+Phase 5 is optional persistent world geometry: PnP camera pose estimation and
+a bounded voxel-surfel map are available through `geometry.pose` and
+`geometry.persistent`, while `TemporalGeometryEngine` remains the safe default.
+See [`docs/geometry-phase5.md`](docs/geometry-phase5.md) and run
+`python3 -m tools.persistent_geometry_demo` for a deterministic headless demo.
