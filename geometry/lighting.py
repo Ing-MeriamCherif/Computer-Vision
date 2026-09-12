@@ -77,12 +77,29 @@ def light_from_palm(
     z, sample_conf = sample_depth(geometry.depth, geometry.valid_mask, *palm_uv)
     if z <= 0:
         return None
-    position = geometry.camera.unproject(palm_uv[0], palm_uv[1], z).astype(np.float32)
-    distance = float(np.linalg.norm(position))
-    falloff = 1.0 / (1.0 + (distance / max(d_ref, 1e-3)) ** 2)
+    # Reuse the colleague branch's audited palm->light back-projection and
+    # inverse-square intensity math, then adapt its LightState to our richer
+    # renderer contract.  The fallback keeps this module standalone.
+    try:
+        from integrations.colleague_hand.light_vector import palm_to_light
+        from integrations.colleague_hand.utils import Intrinsics
+        upstream = palm_to_light(
+            palm_uv[0], palm_uv[1],
+            Intrinsics(geometry.camera.fx, geometry.camera.fy, geometry.camera.cx, geometry.camera.cy,
+                       geometry.camera.width, geometry.camera.height),
+            time.time() if timestamp is None else float(timestamp),
+            depth_m=z, d_ref=d_ref, i0=intensity,
+            color_rgb=color_rgb, confidence=float(np.clip(confidence, 0, 1) * sample_conf),
+        )
+        position = np.asarray(upstream.position_camera_m, dtype=np.float32)
+        computed_intensity = float(upstream.intensity)
+    except Exception:
+        position = geometry.camera.unproject(palm_uv[0], palm_uv[1], z).astype(np.float32)
+        distance = float(np.linalg.norm(position))
+        computed_intensity = float(intensity / (1.0 + (distance / max(d_ref, 1e-3)) ** 2))
     return LightState(
         position_camera_m=np.asarray(position, dtype=np.float32),
-        intensity=float(intensity * falloff),
+        intensity=computed_intensity,
         color_rgb=np.asarray(color_rgb, dtype=np.float32),
         confidence=float(np.clip(confidence, 0, 1) * sample_conf),
         source_hand=source_hand,

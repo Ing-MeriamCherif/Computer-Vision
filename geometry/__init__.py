@@ -53,6 +53,7 @@ from .persistent import (
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
 from .hand_control import GestureState, HandControlEngine, HandObservation, create_hand_tracker
+from .colleague_depth import ColleagueDepthProvider
 from .lighting import LightState, light_from_palm, sample_depth, shade_geometry
 from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestFrameBuffer
 
@@ -122,6 +123,7 @@ __all__ = [
     "GestureState",
     "HandControlEngine",
     "create_hand_tracker",
+    "ColleagueDepthProvider",
     "LightState",
     "light_from_palm",
     "sample_depth",

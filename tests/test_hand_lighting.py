@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from geometry import CameraModel, DepthState, DepthWorker, HandControlEngine, LatestDepthBuffer, LatestFrameBuffer, TorchGeometryBackend, light_from_palm, sample_depth, shade_geometry
+from geometry import CameraModel, DepthState, DepthWorker, HandControlEngine, LatestDepthBuffer, LatestFrameBuffer, TorchGeometryBackend, create_hand_tracker, light_from_palm, sample_depth, shade_geometry
 import time
 
 
@@ -19,6 +19,15 @@ def test_hand_engine_unavailable_backend_is_safe():
     assert not state.active
     assert state.backend == "unavailable"
     engine.close()
+
+
+def test_colleague_tracker_is_real_upstream_backend():
+    """The merged adapter must execute the preserved colleague tracker."""
+    tracker = create_hand_tracker(model_path="models/hand_landmarker.task", backend="colleague", max_hands=2)
+    try:
+        assert tracker.name.startswith("colleague-mediapipe-")
+    finally:
+        tracker.close()
 
 
 def test_sample_depth_uses_median_fallback_for_invalid_palm():

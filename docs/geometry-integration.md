@@ -72,23 +72,25 @@ Quality knobs are `NormalConfig`, `TemporalConfig`, and the explicit
 fallback; no CUDA or NVIDIA Optical Flow dependency is required.
 # Live integration boundary
 
-The live application consumes the companion hand-control work through
-`geometry.hand_control.HandControlEngine`. Its MediaPipe Tasks/legacy backends,
-adaptive detector cadence, One-Euro smoothing, and short LK coast publish a
-timestamped `GestureState`. Fixed-Z and synthetic-depth code from that project
-is intentionally excluded from production.
+The actual colleague sources are preserved under `integrations/` with their
+branch/commit provenance in `integrations/README.md` and each `SOURCE.md`.
+`geometry.hand_control.HandControlEngine` now calls their real
+`create_tracker()` and `OneEuroFilter` implementations through an adapter;
+their `talel-hand` reacquire/hold settings are retained in the imported
+`config.py` and `upstream_main.py` reference.
 
 `geometry.lighting.light_from_palm` samples the real `GeometryState.depth` at
-the palm (bilinear first, 5x5 median fallback) and back-projects it through the
-calibrated camera. `shade_geometry` then applies up to two diffuse/specular
-lights and a bounded screen-space visibility pass. The result is composed into
-the same WebRTC frame as the webcam, depth, normals, and metrics.
+the palm (bilinear first, 5x5 median fallback), calls the colleague
+`light_vector.palm_to_light` math, and adapts the result through the calibrated
+camera. `shade_geometry` then applies up to two diffuse/specular lights and a
+bounded screen-space visibility pass. The result is composed into the same
+WebRTC frame as the webcam, depth, normals, and metrics.
 
-The depth branch's latest-frame design is available through
-`geometry.async_pipeline`. Unlike the original implementation, packets carry
-frame IDs and the worker never reprocesses an unchanged frame. The live session
-uses this bounded worker after the first synchronous anchor; diagnostics expose
-depth and geometry age so stale inference is visible rather than hidden.
+The complete colleague `feature/depth` tree is preserved under
+`integrations/colleague_depth/depth`. `geometry.ColleagueDepthProvider` loads
+its original `DepthModel` when `NRW_DEPTH_SOURCE=colleague` is set. The normal
+live profile uses our frame-ID-corrected `geometry.async_pipeline`, so packets
+never reprocess an unchanged frame; diagnostics expose depth and geometry age.
 
 The root command now satisfies the challenge launch contract:
 

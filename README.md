@@ -1,7 +1,8 @@
 # Computer-Vision-NRW
 
-The live integration combines the geometry subsystem with hand-control and
-lighting adapters from the companion Computer-Vision work. Phases 1–5 of the
+The live integration combines the geometry subsystem with the actual colleague
+hand/depth sources preserved under `integrations/` (with commit provenance),
+plus adapters that keep the shared live-state contracts. Phases 1–5 of the
 NRW AI & Vision Challenge geometry subsystem are implemented in `geometry/`. It provides a calibrated camera model, explicit
 resize/crop/letterbox transforms, vectorized depth-to-camera-space
 reconstruction, camera-facing surface normals, discontinuity-aware neighbor

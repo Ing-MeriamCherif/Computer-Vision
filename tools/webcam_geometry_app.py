@@ -26,7 +26,7 @@ LIVE_DISPLAY_HEIGHT = 480
 LIVE_GEOMETRY_PERIOD = 2
 
 from geometry import (
-    CameraModel, CameraPoseState, DepthAnythingProvider, DepthWorker, LatestDepthBuffer, LatestFrameBuffer, OpenCVFlowProvider,
+    CameraModel, CameraPoseState, ColleagueDepthProvider, DepthAnythingProvider, DepthWorker, LatestDepthBuffer, LatestFrameBuffer, OpenCVFlowProvider,
     GestureState, HandControlEngine, PersistentGeometryMapper, PoseEstimator, SurfelMap, TemporalConfig,
     TemporalGeometryEngine, TorchGeometryBackend, normals_to_rgb,
     light_from_palm, shade_geometry, torch_cuda_status, validate_renderer_geometry,
@@ -89,7 +89,10 @@ class WebcamGeometrySession:
         # remains full resolution in the browser.
         # Keep more spatial detail than the old 256x192/140px throughput preset
         # while remaining within the live frame budget on the CUDA path.
-        self.depth_provider = DepthAnythingProvider(model_path, input_size=192)
+        if os.getenv("NRW_DEPTH_SOURCE", "local").lower() == "colleague":
+            self.depth_provider = ColleagueDepthProvider(device="auto", input_size=192, fp16=True)
+        else:
+            self.depth_provider = DepthAnythingProvider(model_path, input_size=192)
         self.hand = HandControlEngine(max_hands=2, detect_every_n=3)
         self._async_frames = LatestFrameBuffer()
         self._async_depth = LatestDepthBuffer()

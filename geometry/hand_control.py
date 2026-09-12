@@ -70,6 +70,52 @@ class _NullBackend:
         return None
 
 
+class _ColleagueBackend:
+    """Adapter around the colleague repository's actual ``create_tracker``.
+
+    The upstream tracker returns one ``HandResult`` (with pixel landmarks).
+    Converting it here keeps the rest of our geometry state multi-hand ready
+    while ensuring the live path executes the colleague implementation.
+    """
+
+    def __init__(self, model_path: str | None, max_hands: int) -> None:
+        import os as _os
+        from integrations.colleague_hand import hand_tracker as upstream
+
+        if model_path and os.path.exists(model_path):
+            self._old_bundle = _os.environ.get("MP_HAND_BUNDLE")
+            _os.environ["MP_HAND_BUNDLE"] = model_path
+        else:
+            self._old_bundle = None
+        # The upstream config is read at import time; force its maintained
+        # Tasks backend for this adapter instead of its synthetic fallback.
+        upstream.config.HAND_BACKEND = "tasks"
+        self._tracker = upstream.create_tracker(max_hands=max_hands)
+        if self._tracker.backend_name == "mock":
+            self._tracker.close()
+            raise RuntimeError("colleague tracker fell back to synthetic MockTracker")
+        self._upstream = upstream
+        self.name = f"colleague-{self._tracker.backend_name}"
+
+    def process(self, rgb: np.ndarray) -> list[HandObservation]:
+        result = self._tracker.process(rgb)
+        if not result.found or result.palm_uv is None:
+            return []
+        return [HandObservation(
+            palm_uv=(float(result.palm_uv[0]), float(result.palm_uv[1])),
+            landmarks_uv=None if result.landmarks_uv is None else np.asarray(result.landmarks_uv, dtype=np.float64),
+            confidence=float(result.confidence),
+            palm_width_px=result.palm_px,
+        )]
+
+    def close(self) -> None:
+        self._tracker.close()
+        if self._old_bundle is not None:
+            os.environ["MP_HAND_BUNDLE"] = self._old_bundle
+        else:
+            os.environ.pop("MP_HAND_BUNDLE", None)
+
+
 class _TasksBackend:
     name = "mediapipe-tasks"
 
@@ -159,6 +205,12 @@ def create_hand_tracker(
 
     requested = backend.lower()
     path = model_path or os.getenv("MP_HAND_BUNDLE", "models/hand_landmarker.task")
+    if requested in ("auto", "colleague"):
+        try:
+            return _ColleagueBackend(path, max_hands)
+        except Exception:
+            if requested == "colleague":
+                return _NullBackend()
     if requested in ("auto", "tasks") and os.path.exists(path):
         try:
             return _TasksBackend(path, max_hands)
@@ -175,12 +227,22 @@ def create_hand_tracker(
 
 class _OneEuro:
     def __init__(self, min_cutoff: float = 1.0, beta: float = 0.3) -> None:
+        # Use the colleague's One-Euro implementation at runtime.  The
+        # fallback remains for environments where only the core package is
+        # copied without the integrations tree.
+        try:
+            from integrations.colleague_hand.filters import OneEuroFilter
+            self._filter = OneEuroFilter(mincutoff=min_cutoff, beta=beta)
+        except Exception:
+            self._filter = None
         self.min_cutoff, self.beta = float(min_cutoff), float(beta)
         self.x: float | None = None
         self.dx = 0.0
         self.t: float | None = None
 
     def __call__(self, value: float, timestamp: float) -> float:
+        if self._filter is not None:
+            return float(self._filter(float(value), float(timestamp)))
         if self.t is None or self.x is None:
             self.t, self.x = timestamp, float(value)
             return self.x
