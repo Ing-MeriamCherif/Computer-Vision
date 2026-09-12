@@ -10,6 +10,12 @@ from dataclasses import asdict
 
 import numpy as np
 
+
+# Keep the neural path bounded so a normal webcam can sustain a live cadence.
+# The browser preview remains at the camera's native resolution.
+LIVE_MAX_WIDTH = 256
+LIVE_MAX_HEIGHT = 192
+
 from geometry import (
     CameraModel, CameraPoseState, DepthAnythingProvider, OpenCVFlowProvider,
     PersistentGeometryMapper, PoseEstimator, SurfelMap, TemporalConfig,
@@ -33,7 +39,12 @@ class WebcamGeometrySession:
     def __init__(self, model_path: str = "models/depth-anything-v2-small") -> None:
         self.model_path = model_path
         self.lock = threading.Lock()
-        self.depth_provider = DepthAnythingProvider(model_path)
+        # The live path uses a bounded model input; the camera preview itself
+        # remains full resolution in the browser.
+        # Depth Anything's transformer input is the dominant per-frame cost.
+        # 140px keeps the live path responsive while preserving the full-size
+        # preview and renderer output upscaled by the Gradio image component.
+        self.depth_provider = DepthAnythingProvider(model_path, input_size=140)
         self.gpu_backend: TorchGeometryBackend | None = None
         self.reset()
 
@@ -85,6 +96,17 @@ class WebcamGeometrySession:
         self.previous_geometry = None
         self.frame_id = 0
 
+    @staticmethod
+    def _live_resolution(rgb: np.ndarray) -> np.ndarray:
+        """Bound processing resolution so effects can keep up with webcam input."""
+        import cv2
+        height, width = rgb.shape[:2]
+        scale = min(1.0, LIVE_MAX_WIDTH / max(width, 1), LIVE_MAX_HEIGHT / max(height, 1))
+        if scale >= 1.0:
+            return rgb
+        target = (max(2, int(round(width * scale))), max(2, int(round(height * scale))))
+        return cv2.resize(rgb, target, interpolation=cv2.INTER_AREA)
+
     def _motion(self, rgb: np.ndarray, timestamp: float):
         if self.previous_rgb is None:
             return None
@@ -106,25 +128,30 @@ class WebcamGeometrySession:
         image_points = np.stack((xx, yy), axis=-1).astype(np.float32) + motion.forward_flow[yy, xx]
         return self.pose_estimator.estimate(object_points, image_points)
 
-    def process(self, frame: np.ndarray | None, mode: str = "Phase 1-4 temporal", use_cuda_geometry: bool = True):
+    def process(self, frame: np.ndarray | None, mode: str = "CUDA current geometry", use_cuda_geometry: bool = True):
         if frame is None:
             return None, None, None, None, {"status": "waiting_for_camera"}
         with self.lock:
             started = time.perf_counter()
-            rgb = np.asarray(frame, dtype=np.uint8)[..., :3]
+            source_rgb = np.asarray(frame, dtype=np.uint8)[..., :3]
+            rgb = self._live_resolution(source_rgb)
             height, width = rgb.shape[:2]
             self._configure(width, height)
             timestamp = self.frame_id / 30.0
             depth_state = self.depth_provider.compute(rgb, self.frame_id, timestamp)
-            motion = self._motion(rgb, timestamp)
+            motion = None
             prior = self.previous_geometry
-            state = self.temporal.update(rgb, self.camera, self.frame_id, timestamp, depth_state, motion)
             cuda_state = None
-            if use_cuda_geometry:
+            state = None
+            if mode == "CUDA current geometry" and use_cuda_geometry:
                 if self.gpu_backend is None:
                     self.gpu_backend = TorchGeometryBackend("auto")
                 cuda_state = self.gpu_backend.process_depth(depth_state.depth, self.camera, frame_id=self.frame_id, timestamp=timestamp, input_confidence=depth_state.confidence)
-            display_state = cuda_state if mode == "CUDA current geometry" and cuda_state is not None else state
+                state = cuda_state
+            else:
+                motion = self._motion(rgb, timestamp)
+                state = self.temporal.update(rgb, self.camera, self.frame_id, timestamp, depth_state, motion)
+            display_state = state
             persistent = None
             pose = None
             if mode == "Phase 5 persistent":
@@ -147,6 +174,7 @@ class WebcamGeometrySession:
                 "frame_id": self.frame_id,
                 "mode": mode,
                 "resolution": [width, height],
+                "source_resolution": [int(source_rgb.shape[1]), int(source_rgb.shape[0])],
                 "cuda": torch_cuda_status(),
                 "depth": asdict(self.depth_provider.last_diagnostics),
                 "cuda_geometry": asdict(self.gpu_backend.last_diagnostics) if cuda_state is not None else None,
@@ -191,7 +219,7 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
             camera = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Live webcam input")
             upload = gr.Image(sources=["upload"], type="numpy", label="Offline/test image")
             with gr.Column():
-                mode = gr.Radio(["CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"], value="Phase 1-4 temporal", label="Pipeline mode")
+                mode = gr.Radio(["CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"], value="CUDA current geometry", label="Pipeline mode")
                 use_cuda = gr.Checkbox(value=True, label="CUDA geometry processing")
                 process_once = gr.Button("Process current frame", variant="primary")
                 reset = gr.Button("Reset temporal + world state")
@@ -215,7 +243,19 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
                 return (*outputs, "**Live metrics**  \nWaiting for the webcam stream…")
             return (*outputs[:4], outputs[4], _format_live_metrics(outputs[4]))
 
-        camera.stream(process_with_metrics, [camera, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics, live_metrics], stream_every=0.35, concurrency_limit=1, api_name="process_frame")
+        camera.stream(
+            process_with_metrics,
+            [camera, mode, use_cuda],
+            [depth, normals, confidence, persistent, diagnostics, live_metrics],
+            # Request frames at the camera cadence and discard stale events if
+            # inference briefly falls behind. This prevents a replay backlog
+            # from making the rendered effects appear at a fraction of a FPS.
+            stream_every=1 / 30,
+            trigger_mode="always_last",
+            concurrency_limit=1,
+            concurrency_id="geometry-live",
+            api_name="process_frame",
+        )
         process_once.click(process_with_metrics, [upload, mode, use_cuda], [depth, normals, confidence, persistent, diagnostics, live_metrics], concurrency_limit=1, api_name="process_once")
         reset.click(session.reset, outputs=reset_status)
     return demo

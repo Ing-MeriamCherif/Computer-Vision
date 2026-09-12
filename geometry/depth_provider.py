@@ -23,10 +23,18 @@ class DepthInferenceDiagnostics:
 class DepthAnythingProvider:
     """Lazy local-checkpoint monocular relative-depth inference."""
 
-    def __init__(self, model_path: str | Path = "models/depth-anything-v2-small", *, device: str = "auto", use_fp16: bool = False) -> None:
+    def __init__(self, model_path: str | Path = "models/depth-anything-v2-small", *, device: str = "auto", use_fp16: bool = False, input_size: int | tuple[int, int] | None = None) -> None:
         self.model_path = str(model_path)
         self.requested_device = device
         self.use_fp16 = bool(use_fp16)
+        if input_size is not None:
+            if isinstance(input_size, int):
+                input_size = (input_size, input_size)
+            if len(input_size) != 2 or min(input_size) < 14:
+                raise ValueError("input_size must be an integer or a (height, width) pair >= 14")
+            self.input_size = (int(input_size[0]), int(input_size[1]))
+        else:
+            self.input_size = None
         self.processor = None
         self.model = None
         self.device = None
@@ -49,6 +57,8 @@ class DepthAnythingProvider:
         if not path.exists():
             raise RuntimeError(f"depth model not found at {path}; run tools/setup_gpu_ui.sh")
         self.processor = AutoImageProcessor.from_pretrained(path, local_files_only=True)
+        if self.input_size is not None:
+            self.processor.size = {"height": self.input_size[0], "width": self.input_size[1]}
         self.model = AutoModelForDepthEstimation.from_pretrained(path, local_files_only=True).to(device).eval()
         if device.startswith("cuda") and self.use_fp16:
             self.model = self.model.half()

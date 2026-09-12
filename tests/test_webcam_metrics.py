@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+import numpy as np
 
 from tools.webcam_geometry_app import WebcamGeometrySession, _format_live_metrics
 
@@ -32,3 +33,11 @@ def test_live_metrics_formatter_contains_current_values() -> None:
     assert "3.20 FPS" in text
     assert "312.5 ms" in text
     assert "1,234 surfels" in text
+
+
+def test_live_resolution_bounds_processing_without_changing_preview_contract() -> None:
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+    bounded = WebcamGeometrySession._live_resolution(frame)
+
+    assert bounded.shape == (192, 256, 3)

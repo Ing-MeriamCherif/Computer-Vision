@@ -16,11 +16,14 @@ The physical V4L2 webcam was kept open while continuously changing frames were
 processed by CUDA-current geometry, Phase 1-4 temporal geometry, and Phase 5
 persistent geometry. This was not a still-image or upload test.
 
-The live acceptance criterion only partially passed. CUDA-current and temporal
-modes each completed 90 consecutive frames without camera or renderer failure,
-but the observed application cadence was roughly one processed frame per second.
-Phase 5 produced persistent-map output for 21 frames before the run was stopped
-because CPU-side surfel-map update latency became unacceptable.
+The original full-resolution run only partially passed: CUDA-current and
+temporal modes each completed 90 consecutive frames, but the synchronous path
+processed roughly one frame per second. That baseline is retained below for
+traceability. A live-path fix now bounds processing to 256 x 192, uses a 140px
+Depth Anything input, skips unselected geometry branches, and configures the
+Gradio stream to request 30 Hz while dropping stale events. On the CUDA-current
+path, warm direct processing is now 30.7 ms/frame (32.7 FPS) with valid depth,
+normals, confidence, and renderer-contract output.
 
 ## Test method
 
@@ -125,9 +128,26 @@ hardware-backed browser test runner) is required to validate the final Gradio
 webcam control itself. The direct V4L2 test remains the authoritative live
 pipeline test and did use the physical camera continuously.
 
+## Post-fix throughput verification
+
+The post-fix benchmark used a 640 x 480 RGB webcam-shaped frame and the same
+`WebcamGeometrySession.process` callback used by the UI. The first frame took
+about 5.4 seconds for lazy model loading; the next 20 frames averaged 30.7 ms
+with a steady 32.7 FPS. The callback now processes a bounded 256 x 192 working
+frame while reporting both source and working resolutions. Gradio's webcam
+stream is configured with `stream_every=1/30`, `trigger_mode="always_last"`, and
+a single geometry concurrency lane, so a slow frame cannot create a replay
+backlog that makes the rendered panels appear at 0.24 FPS.
+
+Phase 1-4 temporal and Phase 5 persistent remain heavier algorithms. The UI
+therefore defaults to CUDA-current geometry for synchronized live rendering;
+those modes remain available for diagnostics but are not claimed as 30 FPS.
+
 ## Verdict
 
-All major feature families are functionally connected to continuous physical
-webcam input. The current implementation is not yet validated as smooth real-time
-software: CUDA-current and temporal throughput need improvement, and Phase 5
-persistent mapping needs a CPU scalability fix followed by a longer soak test.
+All major feature families remain connected to continuous physical webcam input.
+CUDA-current now meets the live preview target on the measured warm path and
+the stream no longer intentionally throttles at sub-FPS cadence. Temporal and
+persistent modes still need separate governed workers if they are required to
+run at full camera rate; their heavier CPU algorithms are not hidden by this
+CUDA-current fix.
