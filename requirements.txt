@@ -1,0 +1,5 @@
+# Person 1 Phase-1 baseline (hand-only). No torch needed yet.
+numpy>=1.26
+opencv-python>=4.8
+mediapipe>=0.10
+PyYAML>=6.0
