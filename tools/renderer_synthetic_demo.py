@@ -94,7 +94,167 @@ def _move_light(glfw, window, light: Light, delta_s: float, speed_m_s: float) ->
         light.position_camera_m += direction * (speed_m_s * delta_s / magnitude)
 
 
-def run_demo(width: int, height: int, max_frames: int | None, light_speed: float) -> int:
+def _print_gl_info(context) -> None:
+    info = context.info
+    print("OpenGL information:")
+    for label, key in (
+        ("GPU vendor", "GL_VENDOR"),
+        ("GPU renderer", "GL_RENDERER"),
+        ("OpenGL version", "GL_VERSION"),
+    ):
+        print(f"  {label}: {info.get(key, 'unavailable')}")
+
+    glsl_version = info.get("GL_SHADING_LANGUAGE_VERSION")
+    if not glsl_version:
+        try:
+            import ctypes
+            if sys.platform == "win32":
+                opengl = ctypes.WinDLL("opengl32.dll")
+            elif sys.platform == "darwin":
+                opengl = ctypes.CDLL("/System/Library/Frameworks/OpenGL.framework/OpenGL")
+            else:
+                opengl = ctypes.CDLL("libGL.so.1")
+            gl_get_string = opengl.glGetString
+            gl_get_string.argtypes = [ctypes.c_uint]
+            gl_get_string.restype = ctypes.c_char_p
+            raw_version = gl_get_string(0x8B8C)  # GL_SHADING_LANGUAGE_VERSION
+            if raw_version:
+                glsl_version = raw_version.decode("ascii", "replace")
+        except Exception as exc:
+            glsl_version = f"unavailable ({type(exc).__name__}: {exc})"
+    print(f"  GLSL version: {glsl_version or 'unavailable'}")
+    try:
+        import glfw
+        monitor = glfw.get_primary_monitor()
+        mode = glfw.get_video_mode(monitor) if monitor else None
+        if mode is not None:
+            print(f"  Primary display refresh: {mode.refresh_rate} Hz")
+    except Exception:
+        pass
+
+
+def _run_benchmark(
+    glfw,
+    context,
+    renderer: Renderer,
+    window,
+    packet: RenderPacket,
+    *,
+    warmup_frames: int,
+    measured_frames: int,
+    light_speed: float,
+    data_prep_ms: float,
+    context_setup_ms: float,
+    renderer_setup_ms: float,
+    vsync_on: bool,
+) -> int:
+    """Run unlogged warmup frames, then collect per-stage CPU timings."""
+    total_frames = warmup_frames + measured_frames
+    warmup_ms = np.empty(warmup_frames, dtype=np.float64)
+    full_ms = np.empty(measured_frames, dtype=np.float64)
+    upload_ms = np.empty(measured_frames, dtype=np.float64)
+    render_submit_ms = np.empty(measured_frames, dtype=np.float64)
+    swap_ms = np.empty(measured_frames, dtype=np.float64)
+    previous_time = time.perf_counter()
+
+    gpu_query_count = min(12, measured_frames)
+    gpu_query_indices = set(np.linspace(0, measured_frames - 1, gpu_query_count, dtype=np.int64).tolist())
+    gpu_queries = {}
+    gpu_query_error = None
+    try:
+        # Allocate queries before measurement, and retrieve them only after the run.
+        gpu_queries = {index: context.query(time=True) for index in gpu_query_indices}
+    except Exception as exc:  # Some drivers may not expose timer queries.
+        gpu_queries = {}
+        gpu_query_error = f"{type(exc).__name__}: {exc}"
+
+    for frame_index in range(total_frames):
+        if glfw.window_should_close(window):
+            raise RuntimeError(f"Benchmark window closed after {frame_index} of {total_frames} frames")
+
+        frame_start_ns = time.perf_counter_ns()
+        glfw.poll_events()
+        now = time.perf_counter()
+        delta_s = min(now - previous_time, 0.1)
+        previous_time = now
+        _move_light(glfw, window, packet.lights.lights[0], delta_s, light_speed)
+
+        upload_start_ns = time.perf_counter_ns()
+        renderer.upload_packet(packet)
+        upload_end_ns = time.perf_counter_ns()
+
+        render_start_ns = time.perf_counter_ns()
+        measured_index = frame_index - warmup_frames
+        gpu_query = gpu_queries.get(measured_index)
+        if gpu_query is not None:
+            # Results are read only after the run, so query retrieval cannot stall measured frames.
+            with gpu_query:
+                renderer.render(packet, DebugMode.RGB, upload_inputs=False)
+        else:
+            renderer.render(packet, DebugMode.RGB, upload_inputs=False)
+        render_end_ns = time.perf_counter_ns()
+
+        swap_start_ns = time.perf_counter_ns()
+        glfw.swap_buffers(window)
+        frame_end_ns = time.perf_counter_ns()
+
+        frame_time_ms = (frame_end_ns - frame_start_ns) / 1_000_000.0
+        if frame_index < warmup_frames:
+            warmup_ms[frame_index] = frame_time_ms
+        else:
+            sample_index = frame_index - warmup_frames
+            full_ms[sample_index] = frame_time_ms
+            upload_ms[sample_index] = (upload_end_ns - upload_start_ns) / 1_000_000.0
+            render_submit_ms[sample_index] = (render_end_ns - render_start_ns) / 1_000_000.0
+            swap_ms[sample_index] = (frame_end_ns - swap_start_ns) / 1_000_000.0
+
+    average_frame_ms = float(np.mean(full_ms))
+    warmup_average_ms = float(np.mean(warmup_ms))
+    print(f"Benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
+    short_sample_count = min(45, warmup_frames)
+    short_sample_ms = float(np.mean(warmup_ms[:short_sample_count]))
+    print(f"First {short_sample_count} frames (short-run diagnostic, excluded): {1000.0 / short_sample_ms:.2f} FPS ({short_sample_ms:.3f} ms/frame)")
+    print(f"Synthetic data preparation: {data_prep_ms:.3f} ms (one-time)")
+    print(f"GLFW window/context initialization: {context_setup_ms:.3f} ms (one-time)")
+    print(f"Renderer initialization (shader compile, VAO, texture allocation/upload): {renderer_setup_ms:.3f} ms (one-time)")
+    print(f"Average FPS: {1000.0 / average_frame_ms:.2f}")
+    print(f"Average full frame time: {average_frame_ms:.3f} ms")
+    print(f"Median full frame time: {float(np.median(full_ms)):.3f} ms")
+    print(f"P95 full frame time: {float(np.percentile(full_ms, 95)):.3f} ms")
+    print(f"Max full frame time: {float(np.max(full_ms)):.3f} ms (min FPS {1000.0 / float(np.max(full_ms)):.2f})")
+    print(f"Average texture upload CPU-call time: {float(np.mean(upload_ms)):.3f} ms/frame")
+    print(f"Average render CPU-submit time: {float(np.mean(render_submit_ms)):.3f} ms/frame")
+    print(f"Average buffer-swap time: {float(np.mean(swap_ms)):.3f} ms/frame")
+    if gpu_queries:
+        try:
+            gpu_render_ms = np.array([query.elapsed / 1_000_000.0 for query in gpu_queries.values()], dtype=np.float64)
+            print(
+                "GPU render timer query (sampled draws): "
+                f"avg {float(np.mean(gpu_render_ms)):.3f} ms, "
+                f"median {float(np.median(gpu_render_ms)):.3f} ms, "
+                f"p95 {float(np.percentile(gpu_render_ms, 95)):.3f} ms, "
+                f"n={gpu_render_ms.size}; results read after run"
+            )
+        except Exception as exc:
+            print(f"GPU render timer query unavailable: {type(exc).__name__}: {exc}")
+    elif gpu_query_error:
+        print(f"GPU render timer query unavailable: {gpu_query_error}")
+    print("Render CPU-submit time does not force GPU completion; buffer swap is timed separately.")
+    return 0
+
+
+def run_demo(
+    width: int,
+    height: int,
+    max_frames: int | None,
+    light_speed: float,
+    *,
+    benchmark: bool,
+    benchmark_frames: int,
+    warmup_frames: int,
+    vsync_on: bool,
+) -> int:
     try:
         import glfw
         import moderngl
@@ -118,16 +278,25 @@ def run_demo(width: int, height: int, max_frames: int | None, light_speed: float
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
+        context_setup_start_ns = time.perf_counter_ns()
         window = glfw.create_window(width, height, "Person 4 Synthetic Renderer", None, None)
         if not window:
             print(f"GLFW window creation failed for {width}x{height} OpenGL 3.3.", file=sys.stderr)
             return 1
 
         glfw.make_context_current(window)
-        glfw.swap_interval(1)
+        glfw.swap_interval(1 if vsync_on else 0)
         context = moderngl.create_context(require=330)
+        context_setup_ms = (time.perf_counter_ns() - context_setup_start_ns) / 1_000_000.0
+
+        data_prep_start_ns = time.perf_counter_ns()
         packet = make_synthetic_packet(width=width, height=height)
+        data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
+
+        renderer_setup_start_ns = time.perf_counter_ns()
         renderer = Renderer(context, packet)
+        renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
+        _print_gl_info(context)
         state = {"mode": DebugMode.RGB}
 
         def on_key(callback_window, key, _scancode, action, _mods):
@@ -139,6 +308,22 @@ def run_demo(width: int, height: int, max_frames: int | None, light_speed: float
                 glfw.set_window_should_close(callback_window, True)
 
         glfw.set_key_callback(window, on_key)
+        if benchmark:
+            return _run_benchmark(
+                glfw,
+                context,
+                renderer,
+                window,
+                packet,
+                warmup_frames=warmup_frames,
+                measured_frames=benchmark_frames,
+                light_speed=light_speed,
+                data_prep_ms=data_prep_ms,
+                context_setup_ms=context_setup_ms,
+                renderer_setup_ms=renderer_setup_ms,
+                vsync_on=vsync_on,
+            )
+
         print("Controls: 1 RGB, 2 depth, 3 normals | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
@@ -198,13 +383,32 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--width", type=int, default=960)
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--frames", type=int, default=None, help="exit after this many frames (for smoke testing)")
+    parser.add_argument("--benchmark", action="store_true", help="run a warmup plus a measured benchmark")
+    parser.add_argument("--benchmark-frames", type=int, default=600, help="measured frames; benchmark requires at least 600")
+    parser.add_argument("--warmup-frames", type=int, default=60, help="ignored warmup frames; benchmark requires at least 60")
+    parser.add_argument("--vsync", choices=("on", "off"), default="on", help="buffer-swap VSync mode")
     parser.add_argument("--light-speed", type=float, default=0.75, help="light movement speed in meters/second")
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames <= 0:
         parser.error("--frames must be positive")
+    if args.benchmark and args.frames is not None:
+        parser.error("use --benchmark-frames instead of --frames with --benchmark")
+    if args.benchmark and args.benchmark_frames < 600:
+        parser.error("--benchmark-frames must be at least 600")
+    if args.benchmark and args.warmup_frames < 60:
+        parser.error("--warmup-frames must be at least 60")
     if args.width <= 0 or args.height <= 0 or args.light_speed < 0.0:
         parser.error("width/height must be positive and light-speed must be non-negative")
-    return run_demo(args.width, args.height, args.frames, args.light_speed)
+    return run_demo(
+        args.width,
+        args.height,
+        args.frames,
+        args.light_speed,
+        benchmark=args.benchmark,
+        benchmark_frames=args.benchmark_frames,
+        warmup_frames=args.warmup_frames,
+        vsync_on=args.vsync == "on",
+    )
 
 
 if __name__ == "__main__":

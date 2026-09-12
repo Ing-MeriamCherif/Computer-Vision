@@ -39,9 +39,20 @@ class Renderer:
         self.program["u_depth_min_m"].value = 0.5
         self.program["u_depth_max_m"].value = 3.5
 
-    def render(self, packet: RenderPacket, mode: DebugMode = DebugMode.RGB) -> None:
-        """Upload the latest packet into existing textures and draw the selected view."""
+    def upload_packet(self, packet: RenderPacket) -> None:
+        """Update the existing input textures, without reallocating them."""
         self.resources.upload(packet)
+
+    def render(
+        self,
+        packet: RenderPacket,
+        mode: DebugMode = DebugMode.RGB,
+        *,
+        upload_inputs: bool = True,
+    ) -> None:
+        """Draw the selected view; benchmarks may time uploads separately."""
+        if upload_inputs:
+            self.upload_packet(packet)
         self.context.screen.use()
         self.context.viewport = (0, 0, *self.context.screen.size)
         self.context.clear(0.04, 0.04, 0.05, 1.0)
