@@ -1,11 +1,13 @@
-"""Interactive P0/P1 renderer demo using generated RGB, depth, and normals."""
+"""Interactive P0/P1 renderer demo using synthetic or webcam RGB input."""
 
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from pathlib import Path
 import sys
 import time
+from typing import Callable
 
 import numpy as np
 
@@ -15,6 +17,97 @@ if str(REPO_ROOT) not in sys.path:
 
 from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
 from renderer.renderer import DebugMode, Renderer
+
+
+def letterbox_bgr_to_rgb(frame_bgr: np.ndarray, destination_rgb: np.ndarray, cv2) -> tuple[int, int, int, int]:
+    """Aspect-fit one BGR camera frame into a reusable RGB canvas."""
+    if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
+        raise ValueError(f"camera frame must be HxWx3, got {frame_bgr.shape}")
+    if destination_rgb.ndim != 3 or destination_rgb.shape[2] != 3 or destination_rgb.dtype != np.uint8:
+        raise ValueError("destination must be an HxWx3 uint8 RGB array")
+
+    source_h, source_w = frame_bgr.shape[:2]
+    target_h, target_w = destination_rgb.shape[:2]
+    scale = min(target_w / source_w, target_h / source_h)
+    scaled_w = max(1, min(target_w, int(round(source_w * scale))))
+    scaled_h = max(1, min(target_h, int(round(source_h * scale))))
+    x0 = (target_w - scaled_w) // 2
+    y0 = (target_h - scaled_h) // 2
+
+    resized_bgr = cv2.resize(frame_bgr, (scaled_w, scaled_h), interpolation=cv2.INTER_LINEAR)
+    destination_rgb.fill(0)
+    destination_rgb[y0:y0 + scaled_h, x0:x0 + scaled_w] = resized_bgr[:, :, ::-1]
+    return x0, y0, scaled_w, scaled_h
+
+
+@dataclass
+class WebcamSource:
+    capture: object
+    cv2: object
+    camera_index: int
+    reported_width: int
+    reported_height: int
+    reported_fps: float
+    received_width: int
+    received_height: int
+    first_frame: np.ndarray | None
+    frames_received: int = 0
+
+    @classmethod
+    def open(cls, camera_index: int) -> "WebcamSource":
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError("OpenCV is required for webcam input; install requirements.txt") from exc
+
+        capture = cv2.VideoCapture(camera_index)
+        if not capture.isOpened():
+            capture.release()
+            raise RuntimeError(f"could not open webcam at camera index {camera_index}")
+        reported_width = int(round(capture.get(cv2.CAP_PROP_FRAME_WIDTH)))
+        reported_height = int(round(capture.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+        reported_fps = float(capture.get(cv2.CAP_PROP_FPS))
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            capture.release()
+            raise RuntimeError(f"webcam index {camera_index} opened but did not return a frame")
+        received_height, received_width = frame.shape[:2]
+        return cls(
+            capture=capture,
+            cv2=cv2,
+            camera_index=camera_index,
+            reported_width=reported_width,
+            reported_height=reported_height,
+            reported_fps=reported_fps,
+            received_width=received_width,
+            received_height=received_height,
+            first_frame=frame,
+        )
+
+    def update_packet(self, packet: RenderPacket, frame_index: int) -> float:
+        start_ns = time.perf_counter_ns()
+        if self.first_frame is not None:
+            frame = self.first_frame
+            self.first_frame = None
+        else:
+            ok, frame = self.capture.read()
+            if not ok or frame is None:
+                raise RuntimeError(f"webcam index {self.camera_index} stopped returning frames")
+        actual_h, actual_w = frame.shape[:2]
+        self.received_width = actual_w
+        self.received_height = actual_h
+        letterbox_bgr_to_rgb(frame, packet.rgb, self.cv2)
+        now = time.perf_counter()
+        packet.frame_id = frame_index
+        packet.timestamp_s = now
+        packet.depth.timestamp_s = now
+        packet.normals.timestamp_s = now
+        packet.lights.timestamp_s = now
+        self.frames_received += 1
+        return (time.perf_counter_ns() - start_ns) / 1_000_000.0
+
+    def release(self) -> None:
+        self.capture.release()
 
 
 def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
@@ -123,6 +216,10 @@ def _print_gl_info(context) -> None:
         except Exception as exc:
             glsl_version = f"unavailable ({type(exc).__name__}: {exc})"
     print(f"  GLSL version: {glsl_version or 'unavailable'}")
+    renderer_name = str(info.get("GL_RENDERER", "unavailable"))
+    print(f"GPU: {renderer_name}")
+    if "NVIDIA GeForce RTX 4060" not in renderer_name:
+        print("Benchmark classification: INVALID FOR TARGET PERFORMANCE")
     try:
         import glfw
         monitor = glfw.get_primary_monitor()
@@ -147,6 +244,8 @@ def _run_benchmark(
     context_setup_ms: float,
     renderer_setup_ms: float,
     vsync_on: bool,
+    input_name: str,
+    prepare_frame: Callable[[RenderPacket, int], float] | None,
 ) -> int:
     """Run unlogged warmup frames, then collect per-stage CPU timings."""
     total_frames = warmup_frames + measured_frames
@@ -155,6 +254,7 @@ def _run_benchmark(
     upload_ms = np.empty(measured_frames, dtype=np.float64)
     render_submit_ms = np.empty(measured_frames, dtype=np.float64)
     swap_ms = np.empty(measured_frames, dtype=np.float64)
+    frame_prep_ms = np.empty(measured_frames, dtype=np.float64)
     previous_time = time.perf_counter()
 
     gpu_query_count = min(12, measured_frames)
@@ -178,6 +278,8 @@ def _run_benchmark(
         delta_s = min(now - previous_time, 0.1)
         previous_time = now
         _move_light(glfw, window, packet.lights.lights[0], delta_s, light_speed)
+
+        prep_ms = prepare_frame(packet, frame_index) if prepare_frame is not None else 0.0
 
         upload_start_ns = time.perf_counter_ns()
         renderer.upload_packet(packet)
@@ -207,15 +309,16 @@ def _run_benchmark(
             upload_ms[sample_index] = (upload_end_ns - upload_start_ns) / 1_000_000.0
             render_submit_ms[sample_index] = (render_end_ns - render_start_ns) / 1_000_000.0
             swap_ms[sample_index] = (frame_end_ns - swap_start_ns) / 1_000_000.0
+            frame_prep_ms[sample_index] = prep_ms
 
     average_frame_ms = float(np.mean(full_ms))
     warmup_average_ms = float(np.mean(warmup_ms))
-    print(f"Benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    print(f"{input_name.title()} benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
     print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
     short_sample_count = min(45, warmup_frames)
     short_sample_ms = float(np.mean(warmup_ms[:short_sample_count]))
     print(f"First {short_sample_count} frames (short-run diagnostic, excluded): {1000.0 / short_sample_ms:.2f} FPS ({short_sample_ms:.3f} ms/frame)")
-    print(f"Synthetic data preparation: {data_prep_ms:.3f} ms (one-time)")
+    print(f"Initial RGB/depth/normal packet preparation: {data_prep_ms:.3f} ms (one-time)")
     print(f"GLFW window/context initialization: {context_setup_ms:.3f} ms (one-time)")
     print(f"Renderer initialization (shader compile, VAO, texture allocation/upload): {renderer_setup_ms:.3f} ms (one-time)")
     print(f"Average FPS: {1000.0 / average_frame_ms:.2f}")
@@ -224,6 +327,8 @@ def _run_benchmark(
     print(f"P95 full frame time: {float(np.percentile(full_ms, 95)):.3f} ms")
     print(f"Max full frame time: {float(np.max(full_ms)):.3f} ms (min FPS {1000.0 / float(np.max(full_ms)):.2f})")
     print(f"Average texture upload CPU-call time: {float(np.mean(upload_ms)):.3f} ms/frame")
+    if prepare_frame is not None:
+        print(f"Average webcam capture/letterbox time: {float(np.mean(frame_prep_ms)):.3f} ms/frame")
     print(f"Average render CPU-submit time: {float(np.mean(render_submit_ms)):.3f} ms/frame")
     print(f"Average buffer-swap time: {float(np.mean(swap_ms)):.3f} ms/frame")
     if gpu_queries:
@@ -254,6 +359,8 @@ def run_demo(
     benchmark_frames: int,
     warmup_frames: int,
     vsync_on: bool,
+    input_name: str,
+    camera_index: int,
 ) -> int:
     try:
         import glfw
@@ -273,13 +380,14 @@ def run_demo(
     context = None
     renderer = None
     status_line_open = False
+    webcam = None
     try:
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 3)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 3)
         glfw.window_hint(glfw.OPENGL_PROFILE, glfw.OPENGL_CORE_PROFILE)
         glfw.window_hint(glfw.OPENGL_FORWARD_COMPAT, glfw.TRUE)
         context_setup_start_ns = time.perf_counter_ns()
-        window = glfw.create_window(width, height, "Person 4 Synthetic Renderer", None, None)
+        window = glfw.create_window(width, height, f"Person 4 Renderer ({input_name})", None, None)
         if not window:
             print(f"GLFW window creation failed for {width}x{height} OpenGL 3.3.", file=sys.stderr)
             return 1
@@ -292,6 +400,17 @@ def run_demo(
         data_prep_start_ns = time.perf_counter_ns()
         packet = make_synthetic_packet(width=width, height=height)
         data_prep_ms = (time.perf_counter_ns() - data_prep_start_ns) / 1_000_000.0
+        prepare_frame = None
+        if input_name == "webcam":
+            webcam = WebcamSource.open(camera_index)
+            webcam.update_packet(packet, 0)
+            prepare_frame = webcam.update_packet
+            reported_fps = f"{webcam.reported_fps:.2f}" if webcam.reported_fps > 0.0 else "unavailable"
+            print(f"Webcam index: {camera_index}")
+            print(f"Webcam reported resolution: {webcam.reported_width}x{webcam.reported_height}")
+            print(f"Webcam reported FPS: {reported_fps}")
+            print(f"Webcam received frame size: {webcam.received_width}x{webcam.received_height}")
+            print(f"Webcam display: aspect-preserving letterbox, BGR converted to RGB, no image/video saved")
 
         renderer_setup_start_ns = time.perf_counter_ns()
         renderer = Renderer(context, packet)
@@ -322,6 +441,8 @@ def run_demo(
                 context_setup_ms=context_setup_ms,
                 renderer_setup_ms=renderer_setup_ms,
                 vsync_on=vsync_on,
+                input_name=input_name,
+                prepare_frame=prepare_frame,
             )
 
         print("Controls: 1 RGB, 2 depth, 3 normals | A/D X, W/S Y, Q/E Z | Esc quit")
@@ -338,6 +459,9 @@ def run_demo(
             previous_time = now
             light = packet.lights.lights[0]
             _move_light(glfw, window, light, delta_s, light_speed)
+
+            if prepare_frame is not None:
+                prepare_frame(packet, frames + 1)
 
             renderer.render(packet, state["mode"])
             glfw.swap_buffers(window)
@@ -371,6 +495,9 @@ def run_demo(
     finally:
         if renderer is not None:
             renderer.release()
+        if webcam is not None:
+            webcam.release()
+            print(f"Webcam index {camera_index} released after {webcam.frames_received} received frames.")
         if context is not None:
             context.release()
         if window is not None:
@@ -388,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--warmup-frames", type=int, default=60, help="ignored warmup frames; benchmark requires at least 60")
     parser.add_argument("--vsync", choices=("on", "off"), default="on", help="buffer-swap VSync mode")
     parser.add_argument("--light-speed", type=float, default=0.75, help="light movement speed in meters/second")
+    parser.add_argument("--input", choices=("synthetic", "webcam"), default="synthetic", help="RGB input source")
+    parser.add_argument("--camera-index", type=int, default=0, help="webcam device index; default is 0")
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames <= 0:
         parser.error("--frames must be positive")
@@ -399,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--warmup-frames must be at least 60")
     if args.width <= 0 or args.height <= 0 or args.light_speed < 0.0:
         parser.error("width/height must be positive and light-speed must be non-negative")
+    if args.camera_index < 0:
+        parser.error("camera-index must be non-negative")
     return run_demo(
         args.width,
         args.height,
@@ -408,6 +539,8 @@ def main(argv: list[str] | None = None) -> int:
         benchmark_frames=args.benchmark_frames,
         warmup_frames=args.warmup_frames,
         vsync_on=args.vsync == "on",
+        input_name=args.input,
+        camera_index=args.camera_index,
     )
 
 
