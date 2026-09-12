@@ -40,7 +40,9 @@ class MotionState:
     fb_sigma: float = 1.5
 
     def __post_init__(self) -> None:
-        if self.fb_sigma <= 0:
+        if not np.isfinite(self.timestamp):
+            raise ValueError("timestamp must be finite")
+        if not np.isfinite(self.fb_sigma) or self.fb_sigma <= 0:
             raise ValueError("fb_sigma must be positive")
         self.forward_flow = np.asarray(self.forward_flow, dtype=np.float32)
         self.backward_flow = np.asarray(self.backward_flow, dtype=np.float32)
@@ -54,7 +56,7 @@ class MotionState:
         if self.valid_mask is None:
             self.valid_mask = finite_flow
         else:
-            self.valid_mask = np.asarray(self.valid_mask, dtype=bool)
+            self.valid_mask = np.array(self.valid_mask, dtype=bool, copy=True)
             if self.valid_mask.shape != (h, w):
                 raise ValueError("valid_mask must have shape (H, W)")
             self.valid_mask &= finite_flow
@@ -72,6 +74,8 @@ class MotionState:
         self.forward_backward_error = np.asarray(self.forward_backward_error, dtype=np.float32)
         if self.forward_backward_error.shape != (h, w):
             raise ValueError("forward_backward_error must have shape (H, W)")
+        finite_error = np.isfinite(self.forward_backward_error) & (self.forward_backward_error >= 0.0)
+        self.valid_mask &= finite_error
         self.forward_backward_error = np.where(
             self.valid_mask,
             np.nan_to_num(self.forward_backward_error, nan=np.inf, posinf=np.inf),
@@ -88,7 +92,11 @@ class MotionState:
             self.photometric_error = np.asarray(self.photometric_error, dtype=np.float32)
             if self.photometric_error.shape != (h, w):
                 raise ValueError("photometric_error must have shape (H, W)")
-            self.photometric_error = np.where(np.isnan(self.photometric_error), np.inf, self.photometric_error)
+            self.photometric_error = np.where(
+                np.isfinite(self.photometric_error) & (self.photometric_error >= 0.0),
+                self.photometric_error,
+                np.inf,
+            ).astype(np.float32)
 
         if self.occlusion_mask is not None:
             self.occlusion_mask = np.asarray(self.occlusion_mask, dtype=bool)
@@ -146,7 +154,7 @@ class OpenCVFlowProvider(OpticalFlowProvider):
     def __init__(self, method: str = "dis", fb_sigma: float = 1.5) -> None:
         if method not in {"dis", "farneback"}:
             raise ValueError("method must be 'dis' or 'farneback'")
-        if fb_sigma <= 0:
+        if not np.isfinite(fb_sigma) or fb_sigma <= 0:
             raise ValueError("fb_sigma must be positive")
         self.method = method
         self.fb_sigma = fb_sigma
@@ -177,7 +185,8 @@ class OpenCVFlowProvider(OpticalFlowProvider):
 
         # Handle float [0, 1] vs float [0, 255] vs uint8 correctly
         if np.issubdtype(array.dtype, np.floating):
-            max_val = float(np.nanmax(array)) if array.size else 0.0
+            array = np.nan_to_num(array, nan=0.0, posinf=255.0, neginf=0.0)
+            max_val = float(np.max(array)) if array.size else 0.0
             if max_val <= 1.05:
                 array = np.clip(array * 255.0, 0.0, 255.0).astype(np.uint8)
             else:

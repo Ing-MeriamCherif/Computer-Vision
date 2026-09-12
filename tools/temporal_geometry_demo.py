@@ -13,7 +13,15 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from geometry import CameraModel, DepthState, MotionState, TemporalConfig, TemporalGeometryEngine
+from geometry import (
+    CameraModel,
+    DepthState,
+    MotionState,
+    TemporalConfig,
+    TemporalGeometryEngine,
+    align_inverse_depth,
+    warp_depth_backward,
+)
 
 
 def main() -> int:
@@ -33,17 +41,27 @@ def main() -> int:
     raw_values: list[float] = []
     stable_values: list[float] = []
     update_ms: list[float] = []
+    warp_ms: list[float] = []
+    alignment_ms: list[float] = []
     history_acceptance: list[float] = []
     history_rejection: list[float] = []
     occlusion_rates: list[float] = []
     disocclusion_rates: list[float] = []
     temporal_ages: list[float] = []
     temporal_confs: list[float] = []
+    previous_depth: np.ndarray | None = None
     sample = (args.height // 2, args.width // 2)
     for frame_id in range(args.frames):
         depth = base + rng.normal(0.0, args.noise, base.shape).astype(np.float32)
         raw_values.append(float(depth[sample]))
         motion = None if frame_id == 0 else MotionState(frame_id - 1, frame_id, frame_id / 30.0, flow, flow)
+        if previous_depth is not None:
+            component_start = time.perf_counter()
+            warped, warped_valid, _ = warp_depth_backward(previous_depth, flow)
+            warp_ms.append((time.perf_counter() - component_start) * 1000.0)
+            component_start = time.perf_counter()
+            align_inverse_depth(depth, warped, warped_valid, min_samples=64)
+            alignment_ms.append((time.perf_counter() - component_start) * 1000.0)
         start = time.perf_counter()
         state = engine.update(None, camera, frame_id, frame_id / 30.0, DepthState(depth, frame_id / 30.0, frame_id, "relative"), motion)
         update_ms.append((time.perf_counter() - start) * 1000.0)
@@ -55,6 +73,7 @@ def main() -> int:
             disocclusion_rates.append(float(state.disocclusion_mask.mean() * 100.0) if state.disocclusion_mask is not None else 0.0)
             temporal_ages.append(float(state.temporal_age.mean()) if state.temporal_age is not None else 0.0)
             temporal_confs.append(float(state.confidence.mean()) if state.confidence is not None else 0.0)
+        previous_depth = depth
     raw = np.asarray(raw_values[1:])
     stable = np.asarray(stable_values[1:])
     raw_jitter = float(np.mean(np.abs(np.diff(raw)))) if len(raw) > 1 else 0.0
@@ -77,7 +96,14 @@ def main() -> int:
         "normalized_alignment_residual": float(last_align.normalized_fit_residual) if last_align is not None else 0.0,
         "mean_temporal_confidence": float(np.mean(temporal_confs)) if temporal_confs else 0.0,
         "update_ms_mean": float(np.mean(update_ms[1:])),
+        "update_ms_p50": float(np.percentile(update_ms[1:], 50)),
         "update_ms_p95": float(np.percentile(update_ms[1:], 95)),
+        "depth_aware_warp_ms_mean": float(np.mean(warp_ms)) if warp_ms else 0.0,
+        "depth_aware_warp_ms_p50": float(np.percentile(warp_ms, 50)) if warp_ms else 0.0,
+        "depth_aware_warp_ms_p95": float(np.percentile(warp_ms, 95)) if warp_ms else 0.0,
+        "alignment_ms_mean": float(np.mean(alignment_ms)) if alignment_ms else 0.0,
+        "alignment_ms_p50": float(np.percentile(alignment_ms, 50)) if alignment_ms else 0.0,
+        "alignment_ms_p95": float(np.percentile(alignment_ms, 95)) if alignment_ms else 0.0,
     }
     print(json.dumps(result, indent=2))
     return 0

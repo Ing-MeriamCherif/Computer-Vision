@@ -92,6 +92,15 @@ def test_motion_state_hardened_validation() -> None:
     with pytest.raises(ValueError, match="valid_mask must have shape"):
         flow_consistency(flow, flow, valid_mask=np.ones((4, 4), dtype=bool))
 
+    with pytest.raises(ValueError, match="timestamp"):
+        MotionState(1, 2, np.nan, flow, flow)
+
+    negative_error = np.zeros((6, 8), dtype=np.float32)
+    negative_error[1, 1] = -1.0
+    state = MotionState(1, 2, 0.1, flow, flow, forward_backward_error=negative_error, flow_confidence=np.ones((6, 8)))
+    assert not state.valid_mask[1, 1]
+    assert state.flow_confidence[1, 1] == 0.0
+
 
 def _synthetic_texture(width: int = 64, height: int = 48, shift_x: float = 0.0) -> np.ndarray:
     xx, yy = np.meshgrid(np.arange(width) - shift_x, np.arange(height))

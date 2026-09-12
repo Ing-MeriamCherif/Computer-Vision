@@ -35,6 +35,7 @@ Optical flow confidence is parameterized once at the provider/state level via `f
 - Forward-backward error and confidence are stored directly in `MotionState`.
 - `OpenCVFlowProvider(fb_sigma=...)` passes this parameter into `MotionState`.
 - `TemporalGeometryEngine` reuses the warped flow confidence directly, eliminating redundant double-exponential attenuation.
+- `TemporalConfig` does not expose a second flow-confidence sigma; its `flow_fb_threshold` is only the hard rejection gate.
 
 ## 4. Discontinuity-Aware Depth Warping (`warp_depth_backward`)
 
@@ -70,11 +71,15 @@ To prevent conflating distinct physical failure modes into a single ambiguous ma
 
 Measured on host CPU (Intel UHD / x86_64 Linux) using `tools/temporal_geometry_demo.py`:
 
-| Resolution | Frames | Update Mean (ms) | Update P95 (ms) | Jitter Reduction | History Acceptance | Model Used |
-|---|---|---|---|---|---|---|
-| $320 \times 180$ | 20 | 141.9 ms | 165.1 ms | 50.6% | 100.0% | scale_only |
-| $640 \times 360$ | 10 | 559.7 ms | 628.0 ms | 60.5% | 100.0% | scale_only |
-| $1280 \times 720$ | 5 | 2641.8 ms | 2857.2 ms | 51.9% | 99.95% | scale_only |
+| Resolution | Frames | Warp Mean/P50/P95 (ms) | Alignment Mean/P50/P95 (ms) | Update Mean/P50/P95 (ms) | Jitter Reduction | History Acceptance | Model Used |
+|---|---:|---:|---:|---:|---:|---:|---|
+| $320 \times 180$ | 20 | 14.2 / 14.0 / 16.4 | 20.4 / 19.9 / 23.2 | 143.4 / 143.8 / 152.3 | 50.6% | 100.0% | scale_only |
+| $640 \times 360$ | 3 | 71.2 / 71.2 / 79.6 | 95.4 / 95.4 / 105.2 | 604.2 / 604.2 / 610.0 | 28.0% | 100.0% | scale_only |
+| $1280 \times 720$ | 2 | 299.3 / 299.3 / 299.3 | 366.5 / 366.5 / 366.5 | 2468.6 / 2468.6 / 2468.6 | 100.0%* | 99.82% | scale_only |
+
+Values are deterministic NumPy/CPU measurements from the demo; p50 and p95 are
+identical for the one temporal interval in the 640/1280 bounded runs. `*` the
+1280 run used only two frames, so its jitter statistic is not representative.
 
 ## 8. Explicit Non-Goals & Deferred Items
 
