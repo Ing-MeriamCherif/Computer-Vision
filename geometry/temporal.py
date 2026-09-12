@@ -144,7 +144,7 @@ class TemporalGeometryEngine:
         scale_mode: DepthScaleMode | None,
     ) -> str | None:
         if self.previous_state is None:
-            return False
+            return None
         if not _camera_compatible(self.camera, camera):
             return "camera_changed"
         if isinstance(frame_id, int) and isinstance(self.previous_frame_id, int) and frame_id != self.previous_frame_id + 1:
