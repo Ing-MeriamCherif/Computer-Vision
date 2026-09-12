@@ -80,6 +80,7 @@ def main():
     ema_fps = None
     frame_count = 0
     mouse_x, mouse_y = -1, -1
+    MAX_DEPTH_AGE_MS = 200
 
     def on_mouse(event, x, y, flags, param):
         nonlocal mouse_x, mouse_y
@@ -96,6 +97,12 @@ def main():
             state = depth_buffer.get()
             frame = frame_buffer.get()
             if frame is None or state is None:
+                cv2.waitKey(1)
+                continue
+
+            # Reject stale depth
+            age_ms = (time.time() - state.timestamp) * 1000
+            if age_ms > MAX_DEPTH_AGE_MS:
                 cv2.waitKey(1)
                 continue
 
@@ -139,8 +146,11 @@ def main():
 
             # Stats overlay
             mode = "METRIC" if args.metric else "RELATIVE"
-            cv2.putText(view, f"{mode} {args.input_size}x{args.input_size}  {ema_ms:.1f}ms  {ema_fps:.1f}FPS",
-                        (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+            w_stats = worker.stats_dict()
+            line1 = f"{mode} {args.input_size}x{args.input_size}  {ema_ms:.1f}ms  {ema_fps:.1f}FPS"
+            line2 = f"depth_age={age_ms:.0f}ms  processed={w_stats['processed']}  worker={'alive' if w_stats['alive'] else 'DEAD'}"
+            cv2.putText(view, line1, (10, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            cv2.putText(view, line2, (10, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
             cv2.imshow(win, view)
             if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -151,7 +161,8 @@ def main():
         cam_thread.join(timeout=1.0)
         cap.release()
         cv2.destroyAllWindows()
-        print(f"\nDone. {frame_count} frames.")
+        w = worker.stats_dict()
+        print(f"\nDone. rendered={frame_count}  processed={w['processed']}  skipped={w['skipped']}")
 
 
 if __name__ == "__main__":

@@ -67,7 +67,18 @@ class TestLatestFrameBuffer:
         frame = _make_frame()
         buf.put(frame)
         result = buf.get()
-        assert result is frame
+        assert np.array_equal(result, frame)
+
+    def test_put_copies_frame(self):
+        """put() copies the frame so camera can't overwrite it."""
+        buf = LatestFrameBuffer()
+        frame = _make_frame()
+        buf.put(frame)
+        # Mutate original — buffer should be unaffected
+        frame[:] = 0
+        result = buf.get()
+        assert result is not None
+        assert result.mean() > 0  # still has the original data
 
     def test_overwrites_old(self):
         buf = LatestFrameBuffer()
@@ -75,7 +86,7 @@ class TestLatestFrameBuffer:
         f2 = _make_frame()
         buf.put(f1)
         buf.put(f2)
-        assert buf.get() is f2
+        assert np.array_equal(buf.get(), f2)
 
     def test_frame_count(self):
         buf = LatestFrameBuffer()
