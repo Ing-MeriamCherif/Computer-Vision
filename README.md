@@ -75,9 +75,31 @@ outruns tracker → filter lags. Fixes wired in: wide LK window (31px/4lvl),
 fast-motion mode (skip off above `FAST_PX_S`), OneEuro `BETA=0.3`, speed-exempt
 outlier gate. Hardware help: 60fps camera mode halves inter-frame displacement.
 
+## Continuous API (for renderer / teammates / phone)
+
+In-process or over HTTP — same packet, Person-4 field names
+(`position_camera_m`, `intensity`, `active`, `timestamp_s`):
+
+```python
+from pipeline import TorchPipeline
+pipe = TorchPipeline().start()          # background capture->hand->vector loop
+print(pipe.latest)                      # newest packet, never queued
+pipe.on_packet(lambda p: render(p))     # push
+for p in pipe.packets(): ...            # pull generator
+pipe.stop()
+```
+
+```powershell
+python api_server.py --port 8000        # live camera
+curl http://<PC_IP>:8000/health         # {"ok":true,"backend":"mediapipe-tasks"}
+curl http://<PC_IP>:8000/light          # latest packet JSON
+curl -N http://<PC_IP>:8000/stream      # SSE, one event per packet
+```
+
 ## Files
 
-`main.py` loop · `hand_tracker.py` backends · `light_vector.py` math (+Person-4
+`main.py` loop · `pipeline.py` continuous API · `api_server.py` HTTP/SSE ·
+`hand_tracker.py` backends · `light_vector.py` math (+Person-4
 `Light` contract: +X right/+Y down/+Z fwd, meters) · `filters.py` EMA/1€/gates ·
 `validation_render.py` glow+grid · `normals_stub.py` half-res Sobel placeholder ·
 `config.py` env config · `results/` profiles (`bench_*.json`).
