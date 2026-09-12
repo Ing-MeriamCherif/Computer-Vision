@@ -9,6 +9,24 @@ uniform sampler2D u_depth;
 uniform sampler2D u_depth_valid;
 uniform sampler2D u_volumetric;
 uniform int u_volumetric_enabled;
+uniform int u_light_count;
+uniform vec3 u_light_positions_camera_m[2];
+uniform vec3 u_light_colors_rgb[2];
+uniform float u_light_intensities[2];
+uniform int u_light_active[2];
+uniform int u_light_orb_enabled;
+uniform int u_light_orb_draw[2];
+uniform float u_light_orb_z_m[2];
+uniform float u_light_orb_radius_m;
+uniform float u_light_orb_intensity;
+uniform float u_light_orb_halo_strength;
+uniform float u_light_orb_occlusion_bias_m;
+uniform float u_fx;
+uniform float u_fy;
+uniform float u_cx;
+uniform float u_cy;
+uniform float u_image_width;
+uniform float u_image_height;
 uniform int u_shadow_softening_enabled_1;
 uniform int u_shadow_softening_enabled_2;
 uniform int u_shadow_soft_samples_1;
@@ -167,6 +185,50 @@ void main() {
             // highlights to white; when disabled the P11 expression is exact.
             vec3 headroom = max(vec3(1.0) - clamp(result_linear, 0.0, 1.0), vec3(0.0));
             result_linear += min(max(volume, vec3(0.0)), headroom * 0.8);
+        }
+    }
+
+    // Composite the visible light sources after surface lighting, shadows,
+    // and volumetrics. Radius is projected from meters, so it shrinks with Z.
+    if (u_light_orb_enabled != 0) {
+        vec2 pixel = v_uv * vec2(u_image_width, u_image_height) - vec2(0.5);
+        for (int light_index = 0; light_index < 2; ++light_index) {
+            if (light_index >= u_light_count || u_light_active[light_index] == 0
+                || u_light_orb_draw[light_index] == 0) {
+                continue;
+            }
+            float light_z = u_light_orb_z_m[light_index];
+            if (isnan(light_z) || isinf(light_z) || light_z <= 0.0) {
+                continue;
+            }
+            vec3 light_position = u_light_positions_camera_m[light_index];
+            vec2 center_px = vec2(
+                u_fx * light_position.x / light_z + u_cx,
+                u_fy * light_position.y / light_z + u_cy
+            );
+            vec2 radius_px = vec2(u_fx, u_fy) * (u_light_orb_radius_m / light_z);
+            if (any(isnan(radius_px)) || any(isinf(radius_px)) || any(lessThanEqual(radius_px, vec2(0.0)))) {
+                continue;
+            }
+            vec2 radial = (pixel - center_px) / radius_px;
+            float radius = length(radial);
+            if (isnan(radius) || isinf(radius) || radius > 2.35) {
+                continue;
+            }
+
+            // Test each affected fragment, not just the orb center, so the
+            // halo cannot bleed across a foreground depth boundary.
+            if (receiver_valid && receiver_z < light_z - u_light_orb_occlusion_bias_m) {
+                continue;
+            }
+            float core = 1.0 - smoothstep(0.35, 0.78, radius);
+            float halo = exp(-2.4 * radius) * (1.0 - smoothstep(0.70, 2.35, radius));
+            float brightness = u_light_orb_intensity * u_light_intensities[light_index]
+                * (core + u_light_orb_halo_strength * halo);
+            vec3 contribution = clamp(u_light_colors_rgb[light_index], 0.0, 1.0) * max(brightness, 0.0);
+            if (!any(isnan(contribution)) && !any(isinf(contribution))) {
+                result_linear = min(result_linear + contribution, vec3(1.0));
+            }
         }
     }
     frag_color = vec4(linear_to_srgb(result_linear), 1.0);

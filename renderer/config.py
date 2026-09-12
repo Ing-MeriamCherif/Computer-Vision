@@ -100,6 +100,30 @@ class VolumetricConfig:
 
 
 @dataclass(frozen=True)
+class LightOrbConfig:
+    """Controls the optional perspective-sized, depth-tested light orbs."""
+
+    light_orb_enabled: bool = False
+    light_orb_radius_m: float = 0.012
+    light_orb_intensity: float = 1.35
+    light_orb_halo_strength: float = 0.16
+    light_orb_occlusion_bias_m: float = 0.02
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.light_orb_enabled, bool):
+            raise TypeError("light_orb_enabled must be a bool")
+        if not math.isfinite(self.light_orb_radius_m) or self.light_orb_radius_m <= 0.0:
+            raise ValueError("light_orb_radius_m must be finite and > 0")
+        for name, value in (
+            ("light_orb_intensity", self.light_orb_intensity),
+            ("light_orb_halo_strength", self.light_orb_halo_strength),
+            ("light_orb_occlusion_bias_m", self.light_orb_occlusion_bias_m),
+        ):
+            if not math.isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be finite and >= 0")
+
+
+@dataclass(frozen=True)
 class ShadowConfig:
     """Controls for fixed-step screen-space shadows and edge-aware filtering."""
 

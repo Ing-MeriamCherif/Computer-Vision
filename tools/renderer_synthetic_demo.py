@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from contracts.render_types import MAX_LIGHTS, DepthFrame, Light, LightState, NormalFrame, RenderPacket
 from renderer.capture import CapturedRGBFrame, WebcamCaptureWorker
 from renderer.config import (
+    LightOrbConfig,
     LightingConfig,
     SecondaryShadowMode,
     ShadowConfig,
@@ -184,9 +185,10 @@ def make_synthetic_packet(
 
     # The two lights sit on opposite sides to make their independent colored
     # contributions and shadow masks obvious in the deterministic test scene.
-    # Both remain in front of the 1.5 m and 3.0 m surfaces so -Z normals light.
+    # Both project inside the synthetic camera's view and remain in front of
+    # the 1.5 m and 3.0 m surfaces so -Z normals light.
     lights = [Light(
-        position_camera_m=np.array([-0.45, 0.0, 0.75], dtype=np.float32),
+        position_camera_m=np.array([-0.45, 0.0, 1.20], dtype=np.float32),
         color_rgb=np.array([1.0, 0.70, 0.45], dtype=np.float32),
         intensity=1.0,
         radius_m=0.08,
@@ -195,7 +197,7 @@ def make_synthetic_packet(
     )]
     if light_count == MAX_LIGHTS:
         lights.append(Light(
-            position_camera_m=np.array([0.45, 0.0, 0.75], dtype=np.float32),
+            position_camera_m=np.array([0.45, 0.0, 1.20], dtype=np.float32),
             color_rgb=np.array([0.45, 0.70, 1.0], dtype=np.float32),
             intensity=1.0,
             radius_m=0.08,
@@ -247,6 +249,21 @@ def _light_status(packet: RenderPacket, selected_light: int) -> str:
         marker = "*" if index == selected_light else ""
         parts.append(f"L{index + 1}{marker} {active} ({p[0]:+.2f},{p[1]:+.2f},{p[2]:+.2f})m")
     return " | ".join(parts)
+
+
+def _light_orb_status(renderer: Renderer) -> str:
+    """Format optional projected-depth diagnostics for the GLFW title bar."""
+    parts = []
+    for index, projection in enumerate(renderer.last_orb_projections, start=1):
+        if projection.u_px is None or projection.v_px is None:
+            parts.append(f"orb{index} {projection.reason}")
+            continue
+        scene = "unknown" if projection.scene_z_m is None else f"{projection.scene_z_m:.2f}m"
+        parts.append(
+            f"orb{index} uv=({projection.u_px:.1f},{projection.v_px:.1f}) "
+            f"z={projection.light_z_m:.2f}m scene={scene} {projection.reason}"
+        )
+    return " | ".join(parts) if parts else "orb projection pending"
 
 
 def _print_light_setup(packet: RenderPacket) -> None:
@@ -315,6 +332,7 @@ _MODE_NAMES = {
     "shadow-mask-2": DebugMode.SHADOW_MASK_2,
     "volumetric": DebugMode.VOLUMETRIC,
     "depth-edges": DebugMode.DEPTH_EDGES,
+    "orb-debug": DebugMode.ORB_DEBUG,
 }
 
 
@@ -352,7 +370,7 @@ def _run_benchmark(
 
     gpu_query_count = min(12, measured_frames)
     gpu_query_indices = set(np.linspace(0, measured_frames - 1, gpu_query_count, dtype=np.int64).tolist())
-    if benchmark_mode == DebugMode.SHADOW_FINAL:
+    if benchmark_mode in (DebugMode.SHADOW_FINAL, DebugMode.ORB_DEBUG):
         gpu_stages = ["lighting", "composition"]
         for index, light in enumerate(packet.lights.lights):
             if light.active and renderer.shadow_configs[index].shadow_enabled:
@@ -437,8 +455,15 @@ def _run_benchmark(
     warmup_average_ms = float(np.mean(warmup_ms))
     print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | profile {quality_profile.value} | scene {scene_name} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
     print(f"Active light count: {light_count} | secondary shadow mode: {secondary_shadow_mode.value}")
+    print(
+        f"Light orbs: enabled {renderer.light_orb_enabled} | "
+        f"visible-light cap {renderer.light_orb_count} | radius {renderer.light_orb_config.light_orb_radius_m:.3f} m | "
+        f"intensity {renderer.light_orb_config.light_orb_intensity:.3f} | "
+        f"halo {renderer.light_orb_config.light_orb_halo_strength:.3f} | "
+        f"occlusion bias {renderer.light_orb_config.light_orb_occlusion_bias_m:.3f} m"
+    )
     _print_light_setup(packet)
-    if benchmark_mode in (DebugMode.SHADOW_MASK, DebugMode.SHADOW_FINAL, DebugMode.VOLUMETRIC):
+    if benchmark_mode in (DebugMode.SHADOW_MASK, DebugMode.SHADOW_FINAL, DebugMode.VOLUMETRIC, DebugMode.ORB_DEBUG):
         for index, shadow in enumerate(renderer.shadow_configs[:light_count]):
             print(
                 f"Light {index + 1} shadow: {renderer.resources.shadow_size[0]}x{renderer.resources.shadow_size[1]} | "
@@ -446,7 +471,7 @@ def _run_benchmark(
                 f"softening {shadow.shadow_softening_enabled} ({shadow.shadow_soft_samples} offsets, "
                 f"radius {shadow.shadow_soft_radius:.2f}) | depth-aware {shadow.shadow_edge_aware_upsampling}"
             )
-    if benchmark_mode in (DebugMode.SHADOW_FINAL, DebugMode.VOLUMETRIC):
+    if benchmark_mode in (DebugMode.SHADOW_FINAL, DebugMode.VOLUMETRIC, DebugMode.ORB_DEBUG):
         volume = renderer.volumetric_config
         print(
             f"Volumetrics: enabled {renderer.volumetric_enabled} | "
@@ -515,7 +540,7 @@ def _run_webcam_live(
     state: dict,
 ) -> int:
     """Render latest webcam RGB while a worker continuously drains the camera."""
-    print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view | F6 toggle volume | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
+    print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view, B orb diagnostics | F6 volume, F7 orbs | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
 
     gpu_queries = []
     gpu_query_error = None
@@ -622,6 +647,8 @@ def _run_webcam_live(
                 f"| latest age {latest_age_ms:5.1f} ms | {state['mode'].name} | "
                 f"{_light_status(packet, selected)} | volume {'on' if renderer.volumetric_enabled else 'off'} | {gpu_name}"
             )
+            if state["mode"] == DebugMode.ORB_DEBUG:
+                label += " | " + _light_orb_status(renderer)
             glfw.set_window_title(window, label)
             sys.stdout.write("\r" + label + "   ")
             sys.stdout.flush()
@@ -711,6 +738,8 @@ def run_demo(
     lighting_config: LightingConfig,
     shadow_config: ShadowConfig,
     volumetric_config: VolumetricConfig,
+    light_orb_config: LightOrbConfig,
+    light_orb_count: int,
     benchmark_mode: DebugMode,
     foreground_bounds: tuple[float, float, float, float] | None,
     quality_profile: ShadowQualityProfile,
@@ -787,6 +816,8 @@ def run_demo(
             shadow_config=shadow_config,
             secondary_shadow_mode=secondary_shadow_mode,
             volumetric_config=volumetric_config,
+            light_orb_config=light_orb_config,
+            light_orb_count=light_orb_count,
         )
         renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
         gpu_name = _print_gl_info(context)
@@ -809,8 +840,12 @@ def run_demo(
                 light.active = not light.active
             elif key == glfw.KEY_V and action == glfw.PRESS:
                 state["mode"] = DebugMode.VOLUMETRIC
+            elif key == glfw.KEY_B and action == glfw.PRESS:
+                state["mode"] = DebugMode.ORB_DEBUG
             elif key == glfw.KEY_F6 and action == glfw.PRESS:
                 renderer.set_volumetric_enabled(not renderer.volumetric_enabled)
+            elif key == glfw.KEY_F7 and action == glfw.PRESS:
+                renderer.set_light_orb_enabled(not renderer.light_orb_enabled)
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
                 glfw.set_window_should_close(callback_window, True)
 
@@ -854,7 +889,7 @@ def run_demo(
                 state=state,
             )
 
-        print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view | F6 toggle volume | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1-9 existing modes, 0 Light 2 mask, V volume view, B orb diagnostics | F6 volume, F7 orbs | Tab/Space select/toggle light | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
@@ -884,6 +919,8 @@ def run_demo(
                 fps_start = now
                 position = light.position_camera_m
                 label = f"FPS {fps:5.1f} | {state['mode'].name} | GPU {gpu_name} | {_light_status(packet, selected)} | volume {'on' if renderer.volumetric_enabled else 'off'}"
+                if state["mode"] == DebugMode.ORB_DEBUG:
+                    label += " | " + _light_orb_status(renderer)
                 glfw.set_window_title(window, label)
                 sys.stdout.write("\r" + label + "   ")
                 sys.stdout.flush()
@@ -956,12 +993,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--volumetric-density", type=float, default=None)
     parser.add_argument("--volumetric-intensity", type=float, default=None)
     parser.add_argument("--volumetric-decay", type=float, default=None)
+    parser.add_argument(
+        "--light-orb",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable depth-occluded 3D light orbs (toggle at runtime with F7)",
+    )
+    parser.add_argument("--light-orb-count", type=int, choices=(1, 2), default=2, help="maximum displayed orb count")
+    parser.add_argument("--light-orb-radius-m", type=float, default=0.012)
+    parser.add_argument("--light-orb-intensity", type=float, default=1.35)
+    parser.add_argument("--light-orb-halo-strength", type=float, default=0.16)
+    parser.add_argument("--light-orb-occlusion-bias-m", type=float, default=0.02)
     parser.add_argument("--input", choices=("synthetic", "webcam"), default="synthetic", help="RGB input source")
     parser.add_argument("--camera-index", type=int, default=0, help="webcam device index; default is 0")
     parser.add_argument("--mode", choices=tuple(_MODE_NAMES), default="rgb", help="initial interactive visualization")
     parser.add_argument(
         "--benchmark-mode",
-        choices=("rgb", "lambertian", "specular", "final", "shadow-mask", "shadow-mask-2", "shadow-final", "volumetric"),
+        choices=("rgb", "lambertian", "specular", "final", "shadow-mask", "shadow-mask-2", "shadow-final", "volumetric", "orb-debug"),
         default="rgb",
         help="visualization measured by --benchmark",
     )
@@ -1050,6 +1098,13 @@ def main(argv: list[str] | None = None) -> int:
             volume_profile_config,
             **{name: value for name, value in volume_overrides.items() if value is not None},
         )
+        light_orb_config = LightOrbConfig(
+            light_orb_enabled=args.light_orb,
+            light_orb_radius_m=args.light_orb_radius_m,
+            light_orb_intensity=args.light_orb_intensity,
+            light_orb_halo_strength=args.light_orb_halo_strength,
+            light_orb_occlusion_bias_m=args.light_orb_occlusion_bias_m,
+        )
     except (TypeError, ValueError) as exc:
         parser.error(str(exc))
     foreground_bounds = None if args.no_occluder else tuple(args.foreground_bounds)
@@ -1073,6 +1128,8 @@ def main(argv: list[str] | None = None) -> int:
         lighting_config=lighting_config,
         shadow_config=shadow_config,
         volumetric_config=volumetric_config,
+        light_orb_config=light_orb_config,
+        light_orb_count=args.light_orb_count,
         benchmark_mode=_MODE_NAMES[args.benchmark_mode],
         foreground_bounds=foreground_bounds,
         quality_profile=quality_profile,

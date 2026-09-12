@@ -10,7 +10,8 @@ from pathlib import Path
 import numpy as np
 
 from contracts.render_types import MAX_LIGHTS, Light, RenderPacket
-from .config import LightingConfig, SecondaryShadowMode, ShadowConfig, VolumetricConfig
+from .config import LightOrbConfig, LightingConfig, SecondaryShadowMode, ShadowConfig, VolumetricConfig
+from .orb_math import LightOrbProjection, evaluate_light_orb
 from .resources import RendererResources
 
 
@@ -26,6 +27,7 @@ class DebugMode(IntEnum):
     DEPTH_EDGES = 9
     SHADOW_MASK_2 = 10
     VOLUMETRIC = 11
+    ORB_DEBUG = 12
 
 
 def secondary_shadow_configs(
@@ -69,6 +71,8 @@ class Renderer:
         shadow_config: ShadowConfig | None = None,
         secondary_shadow_mode: SecondaryShadowMode | str = SecondaryShadowMode.BALANCED,
         volumetric_config: VolumetricConfig | None = None,
+        light_orb_config: LightOrbConfig | None = None,
+        light_orb_count: int = MAX_LIGHTS,
     ) -> None:
         try:
             import moderngl
@@ -88,6 +92,12 @@ class Renderer:
         self.shadow_configs = secondary_shadow_configs(self.shadow_config, self.secondary_shadow_mode)
         self.volumetric_config = volumetric_config or VolumetricConfig()
         self.volumetric_enabled = self.volumetric_config.volumetric_enabled
+        self.light_orb_config = light_orb_config or LightOrbConfig()
+        self.light_orb_enabled = self.light_orb_config.light_orb_enabled
+        if isinstance(light_orb_count, bool) or not isinstance(light_orb_count, int) or not 0 <= light_orb_count <= MAX_LIGHTS:
+            raise ValueError(f"light_orb_count must be an integer in 0..{MAX_LIGHTS}")
+        self.light_orb_count = light_orb_count
+        self.last_orb_projections: tuple[LightOrbProjection, ...] = ()
         vertex_shader = (shader_dir / "fullscreen.vert").read_text(encoding="utf-8")
         self.debug_program = context.program(
             vertex_shader=vertex_shader,
@@ -145,6 +155,11 @@ class Renderer:
         ):
             self.composite_program[name].value = unit
         self.composite_program["u_volumetric_enabled"].value = 0
+        self.composite_program["u_light_orb_enabled"].value = 0
+        self.composite_program["u_light_orb_radius_m"].value = self.light_orb_config.light_orb_radius_m
+        self.composite_program["u_light_orb_intensity"].value = self.light_orb_config.light_orb_intensity
+        self.composite_program["u_light_orb_halo_strength"].value = self.light_orb_config.light_orb_halo_strength
+        self.composite_program["u_light_orb_occlusion_bias_m"].value = self.light_orb_config.light_orb_occlusion_bias_m
 
         self.volumetric_program["u_depth"].value = 1
         self.volumetric_program["u_depth_valid"].value = 3
@@ -190,6 +205,12 @@ class Renderer:
         if not isinstance(enabled, bool):
             raise TypeError("enabled must be a bool")
         self.volumetric_enabled = enabled
+
+    def set_light_orb_enabled(self, enabled: bool) -> None:
+        """Enable/disable light orbs immediately without reallocating resources."""
+        if not isinstance(enabled, bool):
+            raise TypeError("enabled must be a bool")
+        self.light_orb_enabled = enabled
 
     @staticmethod
     def _draw(vertex_array, moderngl, query=None) -> None:
@@ -321,7 +342,45 @@ class Renderer:
         self._set_lighting_light_uniforms(packet)
         self._draw(self.lighting_vertex_array, self._moderngl, query)
 
-    def _render_composite(self, query=None) -> None:
+    def _set_light_orb_uniforms(self, packet: RenderPacket) -> None:
+        self._set_camera_uniforms(self.composite_program, packet)
+        self._set_lighting_light_uniforms(packet, self.composite_program)
+        light_z = np.zeros(MAX_LIGHTS, dtype=np.float32)
+        draw = np.zeros(MAX_LIGHTS, dtype=np.int32)
+        projections: list[LightOrbProjection] = []
+        for index, light in enumerate(packet.lights.lights[:MAX_LIGHTS]):
+            position, _color, intensity, active = self._safe_light(light)
+            projection = evaluate_light_orb(
+                position,
+                packet.depth.depth_m,
+                packet.depth.valid_mask,
+                fx=packet.depth.fx,
+                fy=packet.depth.fy,
+                cx=packet.depth.cx,
+                cy=packet.depth.cy,
+                occlusion_bias_m=self.light_orb_config.light_orb_occlusion_bias_m,
+                active=active and intensity > 0.0,
+            )
+            projections.append(projection)
+            if projection.light_z_m is not None and projection.light_z_m > 0.0:
+                light_z[index] = projection.light_z_m
+            # Center visibility is reported for debugging. The fragment shader
+            # performs the actual depth test per affected pixel so halo edges
+            # also respect foreground geometry.
+            draw[index] = int(
+                self.light_orb_enabled
+                and index < self.light_orb_count
+                and active
+                and intensity > 0.0
+                and projection.in_frame
+            )
+
+        self.last_orb_projections = tuple(projections)
+        self.composite_program["u_light_orb_enabled"].value = int(self.light_orb_enabled)
+        self.composite_program["u_light_orb_draw"].value = tuple(int(value) for value in draw)
+        self.composite_program["u_light_orb_z_m"].value = tuple(float(value) for value in light_z)
+
+    def _render_composite(self, packet: RenderPacket, query=None) -> None:
         self.context.screen.use()
         self.context.viewport = (0, 0, *self.context.screen.size)
         self.context.clear(0.04, 0.04, 0.05, 1.0)
@@ -334,6 +393,7 @@ class Renderer:
         self.resources.shadow_textures[1].use(location=6)
         self.resources.volumetric_texture.use(location=7)
         self.composite_program["u_volumetric_enabled"].value = int(self.volumetric_enabled)
+        self._set_light_orb_uniforms(packet)
         self._draw(self.composite_vertex_array, self._moderngl, query)
 
     def _clear_volumetric(self) -> None:
@@ -410,12 +470,12 @@ class Renderer:
         if mode == DebugMode.VOLUMETRIC:
             self._render_volumetric_debug(packet, queries)
             return
-        if mode == DebugMode.SHADOW_FINAL:
+        if mode in (DebugMode.SHADOW_FINAL, DebugMode.ORB_DEBUG):
             self._render_shadow_pass(packet, 0, queries.get("shadow_1", queries.get("shadow")))
             self._render_shadow_pass(packet, 1, queries.get("shadow_2"))
             self._render_lighting(packet, mode, layered=True, query=queries.get("lighting"))
             self._render_volumetric(packet, queries.get("volumetric"))
-            self._render_composite(queries.get("composition"))
+            self._render_composite(packet, queries.get("composition"))
             return
 
         if mode in (DebugMode.RGB, DebugMode.DEPTH, DebugMode.NORMALS, DebugMode.DEPTH_EDGES):
