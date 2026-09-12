@@ -22,13 +22,16 @@ def validate_renderer_geometry(
     normal_config: NormalConfig | None = None,
     max_history_age: int | None = None,
     tolerance: float = 1e-4,
+    validate_projection: bool = False,
+    projection_tolerance: float = 1e-3,
     raise_on_error: bool = False,
 ) -> GeometryValidationReport:
     """Validate invariants required by a renderer without repairing state."""
     errors: list[str] = []
-    normal_config = normal_config or NormalConfig()
     h, w = state.depth.shape
     valid = state.valid_mask
+    if valid.shape != (h, w):
+        errors.append("valid_mask must match depth shape")
     if state.camera.height != h or state.camera.width != w:
         errors.append("camera resolution does not match depth")
     if state.positions_3d.shape != (h, w, 3):
@@ -50,8 +53,8 @@ def validate_renderer_geometry(
         if np.any(normal_valid & valid & (np.sum(state.normals * state.positions_3d, axis=-1) > tolerance)):
             errors.append("valid normals must face the camera")
         if state.selected_radius is not None:
-            allowed = set(normal_config.radii) | {0}
-            if np.any(~np.isin(state.selected_radius, tuple(allowed))):
+            allowed = ({0} | set(normal_config.radii)) if normal_config is not None else None
+            if allowed is not None and np.any(~np.isin(state.selected_radius, tuple(allowed))):
                 errors.append("selected_radius contains a value outside the configured radii")
             if np.any(normal_valid & (state.selected_radius == 0)) or np.any(~normal_valid & (state.selected_radius != 0)):
                 errors.append("selected_radius is inconsistent with normal_valid_mask")
@@ -62,12 +65,34 @@ def validate_renderer_geometry(
         errors.append("valid depth must be positive")
     if np.any(valid & (np.abs(state.positions_3d[..., 2] - state.depth) > tolerance * np.maximum(state.depth, 1.0))):
         errors.append("P_z must agree with depth")
-    if state.confidence is not None:
-        confidence = np.asarray(state.confidence)
+    confidence_fields = ("confidence", "normal_confidence", "spatial_confidence", "history_confidence", "temporal_confidence")
+    for field_name in confidence_fields:
+        confidence = getattr(state, field_name)
+        if confidence is None:
+            continue
+        confidence = np.asarray(confidence)
+        if confidence.shape != (h, w):
+            errors.append(f"{field_name} must match depth shape")
+            continue
         if np.any(~np.isfinite(confidence)) or np.any((confidence < 0) | (confidence > 1)):
-            errors.append("confidence must be finite and in [0, 1]")
+            errors.append(f"{field_name} must be finite and in [0, 1]")
         if np.any(~valid & (confidence > tolerance)):
-            errors.append("invalid geometry must not have high confidence")
+            errors.append(f"invalid geometry must not have positive {field_name}")
+        if field_name == "normal_confidence" and state.normal_valid_mask is not None:
+            if np.any(~state.normal_valid_mask & (confidence > tolerance)):
+                errors.append("invalid normals must not have positive normal_confidence")
+    for mask_name in ("history_valid", "occlusion_mask", "history_rejection_mask", "disocclusion_mask", "normal_valid_mask"):
+        mask = getattr(state, mask_name)
+        if mask is not None and np.asarray(mask).shape != (h, w):
+            errors.append(f"{mask_name} must match depth shape")
+    if validate_projection:
+        valid_projection = valid & np.isfinite(state.positions_3d).all(axis=-1) & (state.positions_3d[..., 2] > 0)
+        if valid_projection.any():
+            yy, xx = np.indices((h, w), dtype=np.float64)
+            projected = state.camera.project(state.positions_3d)
+            pixel_error = np.linalg.norm(projected - np.stack((xx, yy), axis=-1), axis=-1)
+            if np.any(valid_projection & (pixel_error > projection_tolerance)):
+                errors.append("project(positions_3d) does not recover source pixels")
     if state.temporal_age is not None and max_history_age is not None:
         if np.any(state.temporal_age > max_history_age):
             errors.append("temporal_age exceeds max_history_age")

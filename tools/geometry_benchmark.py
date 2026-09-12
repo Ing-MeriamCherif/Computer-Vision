@@ -20,6 +20,7 @@ from geometry import (  # noqa: E402
     NormalMode,
     OpenCVFlowProvider,
     TemporalGeometryEngine,
+    TemporalConfig,
     align_inverse_depth,
     backproject_depth,
     estimate_normals,
@@ -29,7 +30,7 @@ from geometry import (  # noqa: E402
 )
 
 
-def _run(fn, warmups: int, iterations: int) -> dict[str, float | int]:
+def _run(fn, warmups: int, iterations: int) -> dict[str, float | int | str]:
     for _ in range(warmups):
         fn()
     samples = []
@@ -37,7 +38,14 @@ def _run(fn, warmups: int, iterations: int) -> dict[str, float | int]:
         start = time.perf_counter()
         fn()
         samples.append((time.perf_counter() - start) * 1000.0)
-    return {**summarize_timings(samples), "iterations": iterations, "warmups": warmups}
+    result = {**summarize_timings(samples), "iterations": iterations, "warmups": warmups}
+    if iterations < 5:
+        result["percentile_confidence"] = "limited (<5 measured samples)"
+    elif iterations < 10:
+        result["percentile_confidence"] = "moderate (<10 measured samples)"
+    else:
+        result["percentile_confidence"] = "usable"
+    return result
 
 
 def benchmark(width: int, height: int, warmups: int, iterations: int) -> dict:
@@ -55,20 +63,28 @@ def benchmark(width: int, height: int, warmups: int, iterations: int) -> dict:
         "generic_warp": lambda: warp_field_backward(depth, flow),
         "depth_aware_warp": lambda: warp_depth_backward(depth, flow),
         "alignment_affine": lambda: align_inverse_depth(varied, varied * 1.1, valid, min_samples=64),
+        "alignment_affine_sampled": lambda: align_inverse_depth(varied, varied * 1.1, valid, min_samples=64, max_samples=5000),
         "alignment_scale_only": lambda: align_inverse_depth(np.full_like(depth, 2.2), depth, valid, min_samples=64),
     }
     texture_prev = (127.0 + 60.0 * np.sin(np.arange(width)[None, :] * 0.4) * np.cos(np.arange(height)[:, None] * 0.35)).clip(0, 255).astype(np.uint8)
     texture_cur = np.roll(texture_prev, 1, axis=1)
+    optional = {}
     for method in ("dis", "farneback"):
         try:
             provider = OpenCVFlowProvider(method=method)
+            # Capability is only proven by executing a small probe; constructor alone is insufficient.
+            provider.compute(texture_prev, texture_cur, 0, 1, 1 / 30)
             stages[f"opencv_{method}"] = lambda provider=provider: provider.compute(texture_prev, texture_cur, 0, 1, 1 / 30)
-        except RuntimeError:
-            pass
+            optional[f"opencv_{method}"] = {"status": "available"}
+        except RuntimeError as exc:
+            optional[f"opencv_{method}"] = {"status": "skipped", "reason": str(exc)}
     results = {name: _run(fn, warmups, iterations) for name, fn in stages.items()}
+    for name, info in optional.items():
+        if info["status"] == "skipped":
+            results[name] = {**info, "iterations": 0, "warmups": 0}
     motion = MotionState(0, 1, 1 / 30, flow, flow)
     fresh_engine = TemporalGeometryEngine(camera)
-    history_engine = TemporalGeometryEngine(camera)
+    history_engine = TemporalGeometryEngine(camera, config=TemporalConfig(max_history_age=warmups + iterations + 4))
     fresh_engine.update(None, camera, 0, 0.0, DepthState(depth, 0.0, 0, "relative"))
     history_engine.update(None, camera, 0, 0.0, DepthState(depth, 0.0, 0, "relative"))
     fresh_frame = 0
@@ -80,9 +96,32 @@ def benchmark(width: int, height: int, warmups: int, iterations: int) -> dict:
     frame = 1
     def history_only():
         nonlocal frame
-        frame += 1
         history_engine.update(None, camera, frame, frame / 30.0, None, MotionState(frame - 1, frame, frame / 30.0, flow, flow))
+        frame += 1
     results["temporal_update_history_only"] = _run(history_only, warmups, iterations)
+    normal_quality = estimate_normals(points, valid, depth, NormalMode.EDGE_AWARE)
+    results["normals_edge_aware"]["quality"] = {"valid_normal_percent": float(normal_quality.normal_valid_mask.mean() * 100.0)}
+    for stage_name, cap in (("alignment_affine", None), ("alignment_affine_sampled", 5000), ("alignment_scale_only", None)):
+        fit = align_inverse_depth(varied, varied * 1.1, valid, min_samples=64, max_samples=cap)
+        results[stage_name]["quality"] = {
+            "alignment_model": fit.model_used,
+            "alignment_residual": fit.fit_residual,
+            "alignment_sample_count": fit.sample_count,
+            "alignment_input_sample_count": fit.input_sample_count,
+        }
+    history_quality = history_engine.current_state
+    fresh_quality = fresh_engine.current_state
+    if history_quality is not None:
+        results["temporal_update_history_only"]["quality"] = {
+            "geometry_valid_percent": float(history_quality.valid_mask.mean() * 100.0),
+            "history_acceptance_percent": float(history_quality.history_valid.mean() * 100.0) if history_quality.history_valid is not None else None,
+            "mean_temporal_age": float(history_quality.temporal_age[history_quality.valid_mask].mean()) if history_quality.valid_mask.any() and history_quality.temporal_age is not None else None,
+        }
+    if fresh_quality is not None:
+        results["temporal_update_fresh_depth"]["quality"] = {
+            "geometry_valid_percent": float(fresh_quality.valid_mask.mean() * 100.0),
+            "mean_temporal_age": float(fresh_quality.temporal_age[fresh_quality.valid_mask].mean()) if fresh_quality.valid_mask.any() and fresh_quality.temporal_age is not None else None,
+        }
     return {"resolution": [width, height], "stages": results}
 
 

@@ -281,6 +281,57 @@ def _select_multiscale(
     )
 
 
+def _select_multiscale_streaming(
+    points: np.ndarray,
+    valid: np.ndarray,
+    depth: np.ndarray,
+    config: NormalConfig,
+) -> NormalResult:
+    """Memory-bounded equivalent of :func:`_select_multiscale`.
+
+    One radius is materialized at a time; selection order and tie-breaking match
+    the candidate-list reference implementation exactly.
+    """
+    shape = valid.shape
+    selected_normals = np.full((*shape, 3), np.nan, dtype=np.float32)
+    selected_valid = np.zeros(shape, dtype=bool)
+    selected_confidence = np.zeros(shape, dtype=np.float32)
+    selected_discontinuity = np.zeros(shape, dtype=np.float32)
+    selected_radius = np.zeros(shape, dtype=np.int16)
+    selected_support = np.zeros(shape, dtype=np.float32)
+    accepted = np.zeros(shape, dtype=bool)
+    best_confidence = np.full(shape, -1.0, dtype=np.float32)
+    best_has = np.zeros(shape, dtype=bool)
+    for radius in config.radii:
+        candidate = _estimate_at_radius(points, valid, depth, radius, True, config)
+        eligible = (~accepted) & candidate.normal_valid_mask
+        better = eligible & ((~best_has) | (candidate.confidence > best_confidence))
+        best_confidence[better] = candidate.confidence[better]
+        best_has[better] = True
+        # Keep fallback fields in the output buffers until acceptance is known.
+        fallback_normals = candidate.normals
+        fallback_discontinuity = candidate.discontinuity_strength
+        fallback_radius = candidate.selected_radius
+        fallback_support = candidate.neighbor_support
+        fallback_confidence = candidate.confidence
+        # Store the best candidate in temporary output slots; accepted pixels are overwritten below.
+        selected_normals[better] = fallback_normals[better]
+        selected_confidence[better] = fallback_confidence[better]
+        selected_discontinuity[better] = fallback_discontinuity[better]
+        selected_radius[better] = fallback_radius[better]
+        selected_support[better] = fallback_support[better]
+        take = (~accepted) & candidate.normal_valid_mask & (candidate.confidence >= config.multi_scale_acceptance)
+        selected_normals[take] = candidate.normals[take]
+        selected_confidence[take] = candidate.confidence[take]
+        selected_discontinuity[take] = candidate.discontinuity_strength[take]
+        selected_radius[take] = candidate.selected_radius[take]
+        selected_support[take] = candidate.neighbor_support[take]
+        selected_valid[take] = True
+        accepted[take] = True
+    selected_valid[~accepted & best_has] = True
+    return NormalResult(selected_normals, selected_valid, selected_confidence, selected_discontinuity, selected_radius, selected_support)
+
+
 def estimate_normals(
     positions: np.ndarray,
     valid_mask: np.ndarray | None = None,
@@ -303,8 +354,7 @@ def estimate_normals(
     elif mode is NormalMode.EDGE_AWARE:
         result = _estimate_at_radius(points, valid, depth_arr, 1, True, config)
     else:
-        candidates = [_estimate_at_radius(points, valid, depth_arr, radius, True, config) for radius in config.radii]
-        result = _select_multiscale(candidates, config.multi_scale_acceptance)
+        result = _select_multiscale_streaming(points, valid, depth_arr, config)
     if input_confidence is not None:
         supplied = np.asarray(input_confidence, dtype=np.float32)
         if supplied.shape != valid.shape:

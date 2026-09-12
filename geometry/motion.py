@@ -151,13 +151,16 @@ class OpticalFlowProvider:
 class OpenCVFlowProvider(OpticalFlowProvider):
     """OpenCV DIS baseline with Farneback fallback."""
 
-    def __init__(self, method: str = "dis", fb_sigma: float = 1.5) -> None:
+    def __init__(self, method: str = "dis", fb_sigma: float = 1.5, flow_scale: float = 1.0) -> None:
         if method not in {"dis", "farneback"}:
             raise ValueError("method must be 'dis' or 'farneback'")
         if not np.isfinite(fb_sigma) or fb_sigma <= 0:
             raise ValueError("fb_sigma must be positive")
+        if not np.isfinite(flow_scale) or not 0 < flow_scale <= 1:
+            raise ValueError("flow_scale must be in (0, 1]")
         self.method = method
         self.fb_sigma = fb_sigma
+        self.flow_scale = float(flow_scale)
 
     @staticmethod
     def _cv2():
@@ -214,8 +217,26 @@ class OpenCVFlowProvider(OpticalFlowProvider):
         current = self._gray(current_frame)
         if previous.shape != current.shape:
             raise ValueError("previous and current frames must have the same resolution")
-        forward = self._compute_one(previous, current)
-        backward = self._compute_one(current, previous)
+        if self.flow_scale < 1.0:
+            cv2 = self._cv2()
+            height, width = previous.shape
+            scaled_width = max(2, int(round(width * self.flow_scale)))
+            scaled_height = max(2, int(round(height * self.flow_scale)))
+            previous_small = cv2.resize(previous, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            current_small = cv2.resize(current, (scaled_width, scaled_height), interpolation=cv2.INTER_AREA)
+            scale_x, scale_y = width / scaled_width, height / scaled_height
+
+            def restore(flow_small: np.ndarray) -> np.ndarray:
+                restored = cv2.resize(flow_small, (width, height), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+                restored[..., 0] *= scale_x
+                restored[..., 1] *= scale_y
+                return restored
+
+            forward = restore(self._compute_one(previous_small, current_small))
+            backward = restore(self._compute_one(current_small, previous_small))
+        else:
+            forward = self._compute_one(previous, current)
+            backward = self._compute_one(current, previous)
         return MotionState(
             source_frame_id,
             target_frame_id,

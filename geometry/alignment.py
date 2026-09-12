@@ -33,6 +33,7 @@ def align_inverse_depth(
     residual_threshold: float = 0.04,
     epsilon: float = 1e-6,
     iterations: int = 4,
+    max_samples: int | None = None,
 ) -> DepthAlignmentResult:
     """Fit ``1/current_z = scale * 1/history_z + shift`` robustly.
 
@@ -45,17 +46,19 @@ def align_inverse_depth(
     variation), a robust scale-only fallback (``shift = 0``) is used.
     """
 
-    current = np.asarray(current_depth, dtype=np.float64)
-    history = np.asarray(history_depth, dtype=np.float64)
+    current = np.asarray(current_depth, dtype=np.float32)
+    history = np.asarray(history_depth, dtype=np.float32)
     mask = np.asarray(correspondence_mask, dtype=bool)
     if current.shape != history.shape or current.shape != mask.shape or current.ndim != 2:
         raise ValueError("depth arrays and correspondence_mask must have matching shape (H, W)")
     if min_samples < 2 or residual_threshold <= 0 or epsilon <= 0 or iterations < 1:
         raise ValueError("alignment parameters are invalid")
+    if max_samples is not None and max_samples < min_samples:
+        raise ValueError("max_samples must be >= min_samples")
     if weights is None:
-        supplied_weights = np.ones(current.shape, dtype=np.float64)
+        supplied_weights = np.ones(current.shape, dtype=np.float32)
     else:
-        supplied_weights = np.asarray(weights, dtype=np.float64)
+        supplied_weights = np.asarray(weights, dtype=np.float32)
         if supplied_weights.shape != current.shape:
             raise ValueError("weights must have shape (H, W)")
     valid = (
@@ -67,17 +70,33 @@ def align_inverse_depth(
         & np.isfinite(supplied_weights)
         & (supplied_weights > 0)
     )
-    sample_count = int(valid.sum())
-    if sample_count < min_samples:
+    input_sample_count = int(valid.sum())
+    sample_count = input_sample_count
+    if max_samples is not None and sample_count > max_samples:
+        h, w = valid.shape
+        flat = np.flatnonzero(valid)
+        rows, cols = np.divmod(flat, w)
+        grid_h = max(1, int(np.sqrt(max_samples * h / max(w, 1))))
+        grid_w = max(1, int(np.ceil(max_samples / grid_h)))
+        cells = (rows * grid_h // h) * grid_w + (cols * grid_w // w)
+        order = np.lexsort((cols, rows, cells))
+        keep = np.linspace(0, len(order) - 1, max_samples, dtype=np.int64)
+        valid_flat = flat[order[keep]]
+        sampled = np.zeros(valid.size, dtype=bool)
+        sampled[valid_flat] = True
+        valid = sampled.reshape(valid.shape)
+        sample_count = int(valid.sum())
+    if input_sample_count < min_samples:
         return DepthAlignmentResult(
-            1.0, 0.0, sample_count, float("inf"), False,
+            1.0, 0.0, input_sample_count, float("inf"), False,
             model_used="none", normalized_fit_residual=float("inf"), inlier_count=0,
-            input_sample_count=sample_count, conditioning=0.0
+            input_sample_count=input_sample_count, conditioning=0.0
         )
 
-    x = (1.0 / history[valid]).ravel()
-    y = (1.0 / current[valid]).ravel()
-    base_weights = supplied_weights[valid].ravel()
+    # Convert only compact selected correspondences to float64 for fitting.
+    x = (1.0 / history[valid]).astype(np.float64, copy=False).ravel()
+    y = (1.0 / current[valid]).astype(np.float64, copy=False).ravel()
+    base_weights = supplied_weights[valid].astype(np.float64, copy=False).ravel()
 
     # Characteristic inverse-depth scale for dimensionless normalization
     s_q = max(float(np.median(np.abs(y))), epsilon)
@@ -145,7 +164,7 @@ def align_inverse_depth(
                     model_used="affine",
                     normalized_fit_residual=norm_res,
                     inlier_count=inlier_count,
-                    input_sample_count=sample_count,
+                    input_sample_count=input_sample_count,
                     conditioning=conditioning,
                 )
 
@@ -190,7 +209,7 @@ def align_inverse_depth(
                 model_used="scale_only",
                 normalized_fit_residual=norm_res,
                 inlier_count=inlier_count,
-                input_sample_count=sample_count,
+                    input_sample_count=input_sample_count,
                 conditioning=conditioning,
             )
 
@@ -205,7 +224,7 @@ def align_inverse_depth(
         model_used="none",
         normalized_fit_residual=raw_norm_res,
         inlier_count=inlier_count,
-        input_sample_count=sample_count,
+        input_sample_count=input_sample_count,
         conditioning=conditioning,
     )
 

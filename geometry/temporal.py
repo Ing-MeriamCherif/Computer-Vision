@@ -7,12 +7,14 @@ camera pose, persistent world coordinates, or a renderer temporal accumulator.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 
 import numpy as np
 
 from .alignment import DepthAlignmentResult, align_history_depth, align_inverse_depth
 from .backproject import DepthScaleMode, backproject_depth
 from .camera import CameraModel
+from .diagnostics import GeometryDiagnostics
 from .motion import MotionState, OpticalFlowProvider
 from .normals import NormalConfig, NormalMode, estimate_normals
 from .state import DepthState, GeometryState
@@ -30,10 +32,12 @@ class TemporalConfig:
     max_history_age: int = 8
     history_min_confidence: float = 0.05
     alignment_min_samples: int = 64
+    alignment_max_samples: int | None = 10000
     alignment_residual_threshold: float = 0.04
     alignment_epsilon: float = 1e-6
     timestamp_gap_reset: float = 0.5
     depth_timestamp_tolerance: float = 0.1
+    diagnostics_level: str = "none"  # none, basic, timing
     normal_mode: NormalMode | str = NormalMode.EDGE_AWARE
 
     def __post_init__(self) -> None:
@@ -47,12 +51,14 @@ class TemporalConfig:
             raise ValueError("history weights/decay must be in valid ranges")
         if self.max_history_age < 1 or not 0 <= self.history_min_confidence <= 1:
             raise ValueError("history age/confidence settings are invalid")
-        if self.alignment_min_samples < 2 or self.alignment_residual_threshold <= 0 or self.alignment_epsilon <= 0:
+        if self.alignment_min_samples < 2 or (self.alignment_max_samples is not None and self.alignment_max_samples < self.alignment_min_samples) or self.alignment_residual_threshold <= 0 or self.alignment_epsilon <= 0:
             raise ValueError("alignment settings are invalid")
         if self.timestamp_gap_reset <= 0:
             raise ValueError("timestamp_gap_reset must be positive")
         if self.depth_timestamp_tolerance < 0:
             raise ValueError("depth_timestamp_tolerance must be non-negative")
+        if self.diagnostics_level not in {"none", "basic", "timing"}:
+            raise ValueError("diagnostics_level must be 'none', 'basic', or 'timing'")
         object.__setattr__(self, "normal_mode", NormalMode(self.normal_mode))
 
 
@@ -113,18 +119,22 @@ class TemporalGeometryEngine:
         self.previous_frame_id: int | str | None = None
         self.motion_state: MotionState | None = None
         self.last_alignment: DepthAlignmentResult | None = None
+        self.last_diagnostics: GeometryDiagnostics | None = None
+        self._pending_reset_reason: str | None = None
+        self.flow_failures: int = 0
 
     @property
     def current_state(self) -> GeometryState | None:
         return self.previous_state
 
-    def reset(self) -> None:
+    def reset(self, reason: str = "manual") -> None:
         self.previous_state = None
         self.previous_rgb = None
         self.previous_timestamp = None
         self.previous_frame_id = None
         self.motion_state = None
         self.last_alignment = None
+        self._pending_reset_reason = reason
 
     def _needs_reset(
         self,
@@ -132,18 +142,20 @@ class TemporalGeometryEngine:
         frame_id: int | str,
         timestamp: float,
         scale_mode: DepthScaleMode | None,
-    ) -> bool:
+    ) -> str | None:
         if self.previous_state is None:
             return False
         if not _camera_compatible(self.camera, camera):
-            return True
+            return "camera_changed"
         if isinstance(frame_id, int) and isinstance(self.previous_frame_id, int) and frame_id != self.previous_frame_id + 1:
-            return True
+            return "frame_discontinuity"
         if self.previous_timestamp is not None and (
             timestamp <= self.previous_timestamp or timestamp - self.previous_timestamp > self.config.timestamp_gap_reset
         ):
-            return True
-        return scale_mode is not None and scale_mode is not self.previous_state.scale_mode
+            return "timestamp_reversal" if timestamp <= self.previous_timestamp else "timestamp_gap"
+        if scale_mode is not None and scale_mode != self.previous_state.scale_mode:
+            return "scale_mode_changed"
+        return None
 
     def _empty_state(
         self,
@@ -197,8 +209,9 @@ class TemporalGeometryEngine:
             return None
         try:
             return self.flow_provider.compute(self.previous_rgb, rgb_frame, self.previous_frame_id, frame_id, timestamp)
-        except (RuntimeError, ValueError):
+        except RuntimeError:
             # Catastrophic provider failure safely rejects history for this update.
+            self.flow_failures += 1
             return None
 
     def _history_inputs(
@@ -277,7 +290,9 @@ class TemporalGeometryEngine:
         motion_state: MotionState | None = None,
     ) -> GeometryState:
         """Process one camera frame; ``depth_state=None`` propagates valid history."""
-
+        timing_enabled = self.config.diagnostics_level == "timing"
+        total_start = time.perf_counter() if timing_enabled else 0.0
+        stage_ms: dict[str, float] = {}
         if not np.isfinite(timestamp):
             raise ValueError("timestamp must be finite")
         if depth_state is not None:
@@ -292,8 +307,11 @@ class TemporalGeometryEngine:
         current_mode = None if depth_state is None else DepthScaleMode(depth_state.scale_mode)
         had_previous = self.previous_state is not None
         previous_mode = None if self.previous_state is None else self.previous_state.scale_mode
-        if self._needs_reset(camera, frame_id, timestamp, current_mode):
-            self.reset()
+        reset_reason = self._needs_reset(camera, frame_id, timestamp, current_mode)
+        if reset_reason is not None:
+            self.reset(reset_reason)
+        elif self.previous_state is None:
+            reset_reason = self._pending_reset_reason or "first_frame"
         self.camera = camera
         if depth_state is None and self.previous_state is None:
             if not had_previous:
@@ -303,10 +321,24 @@ class TemporalGeometryEngine:
             self.previous_rgb = None if rgb_frame is None else np.asarray(rgb_frame).copy()
             self.previous_timestamp = timestamp
             self.previous_frame_id = frame_id
+            self.last_diagnostics = GeometryDiagnostics(
+                total_ms=(time.perf_counter() - total_start) * 1000.0 if timing_enabled else None,
+                valid_geometry_percent=0.0,
+                valid_normal_percent=0.0,
+                mean_temporal_age=0.0,
+                mean_confidence=0.0,
+                reset_reason=reset_reason,
+                depth_source_frame_delta=None,
+            )
+            self._pending_reset_reason = None
             return state
 
+        motion_start = time.perf_counter() if timing_enabled else 0.0
         motion = self._get_motion(rgb_frame, frame_id, timestamp, motion_state)
+        if timing_enabled:
+            stage_ms["flow_ms"] = (time.perf_counter() - motion_start) * 1000.0
         self.motion_state = motion
+        backprojection_start = time.perf_counter() if timing_enabled else 0.0
         if depth_state is not None:
             mode = DepthScaleMode(depth_state.scale_mode)
             raw_positions, current_valid = backproject_depth(depth_state.depth, camera, mode, depth_state.valid_mask)
@@ -320,6 +352,8 @@ class TemporalGeometryEngine:
             current_valid = np.zeros((camera.height, camera.width), dtype=bool)
             spatial = None
             current_depth = np.full(current_valid.shape, np.nan, dtype=np.float32)
+        if timing_enabled:
+            stage_ms["backprojection_ms"] = (time.perf_counter() - backprojection_start) * 1000.0
 
         has_reprojected_history = self.previous_state is not None and motion is not None
 
@@ -330,7 +364,10 @@ class TemporalGeometryEngine:
             age = np.zeros(current_valid.shape, dtype=np.uint16)
             flow_valid = np.zeros(current_valid.shape, dtype=bool)
         else:
+            warp_start = time.perf_counter() if timing_enabled else 0.0
             history_depth, history_valid, history_confidence, age, flow_valid = self._history_inputs(motion, rgb_frame)
+            if timing_enabled:
+                stage_ms["warp_ms"] = (time.perf_counter() - warp_start) * 1000.0
 
         alignment = DepthAlignmentResult(1.0, 0.0, 0, float("inf"), False, model_used="none", normalized_fit_residual=float("inf"))
         aligned_history = history_depth
@@ -339,6 +376,7 @@ class TemporalGeometryEngine:
         disagreement = np.zeros(current_valid.shape, dtype=np.float32)
 
         if depth_state is not None and history_valid.any():
+            alignment_start = time.perf_counter() if timing_enabled else 0.0
             if mode is DepthScaleMode.RELATIVE:
                 alignment = align_inverse_depth(
                     current_depth,
@@ -346,6 +384,7 @@ class TemporalGeometryEngine:
                     current_valid & history_valid,
                     weights=history_confidence,
                     min_samples=self.config.alignment_min_samples,
+                    max_samples=self.config.alignment_max_samples,
                     residual_threshold=self.config.alignment_residual_threshold,
                     epsilon=self.config.alignment_epsilon,
                 )
@@ -355,6 +394,8 @@ class TemporalGeometryEngine:
             else:
                 aligned_valid = np.isfinite(history_depth) & (history_depth > self.config.alignment_epsilon)
             aligned_valid &= history_valid
+            if timing_enabled:
+                stage_ms["alignment_ms"] = (time.perf_counter() - alignment_start) * 1000.0
 
             # Dimensionless relative depth difference
             denominator = np.maximum(np.minimum(np.abs(current_depth), np.abs(aligned_history)), self.config.alignment_epsilon)
@@ -373,6 +414,7 @@ class TemporalGeometryEngine:
         history_rejection = np.zeros(current_valid.shape, dtype=bool)
 
         if depth_state is not None:
+            fusion_start = time.perf_counter() if timing_enabled else 0.0
             both_tested = current_valid & aligned_valid
             # Geometric occlusion: new foreground surface moved in front
             occlusion = both_tested & (rel_diff < -self.config.depth_disagreement_threshold)
@@ -402,6 +444,8 @@ class TemporalGeometryEngine:
             # Temporal age: 0 when fresh depth observation is accepted; increment only for history-only fill
             age = np.where(current_valid, 0, np.where(history_valid, age, 0)).astype(np.uint16)
             spatial_confidence = current_confidence
+            if timing_enabled:
+                stage_ms["fusion_ms"] = (time.perf_counter() - fusion_start) * 1000.0
         else:
             history_rejection = has_reprojected_history & ~history_valid
             fused_depth = np.where(history_valid, aligned_history, np.nan).astype(np.float32)
@@ -412,10 +456,17 @@ class TemporalGeometryEngine:
             age = np.where(final_valid, age, 0).astype(np.uint16)
             spatial_confidence = np.zeros_like(temporal_confidence)
 
+        post_start = time.perf_counter() if timing_enabled else 0.0
         positions, _ = backproject_depth(fused_depth, camera, mode, final_valid)
+        if timing_enabled:
+            stage_ms["backprojection_ms"] = stage_ms.get("backprojection_ms", 0.0) + (time.perf_counter() - post_start) * 1000.0
+        normal_start = time.perf_counter() if timing_enabled else 0.0
         normal_result = estimate_normals(positions, final_valid, fused_depth, self.config.normal_mode, self.normal_config)
+        if timing_enabled:
+            stage_ms["normals_ms"] = (time.perf_counter() - normal_start) * 1000.0
         history_confidence = np.where(history_valid, history_confidence, 0.0).astype(np.float32)
         final_confidence = np.clip(np.nan_to_num(temporal_confidence), 0.0, 1.0).astype(np.float32)
+        final_confidence = np.where(final_valid, final_confidence, 0.0).astype(np.float32)
         alignment_map = np.full(final_valid.shape, alignment.fit_residual, dtype=np.float32)
 
         return_state = GeometryState(
@@ -446,4 +497,24 @@ class TemporalGeometryEngine:
         self.previous_timestamp = timestamp
         self.previous_frame_id = frame_id
         self.last_alignment = alignment
+        if self.config.diagnostics_level != "none":
+            total = float(final_valid.size)
+            history_tested = float(has_reprojected_history and motion is not None)
+            accepted = float(history_valid.mean() * 100.0) if history_tested else None
+            rejected = float(history_rejection.mean() * 100.0) if history_tested else None
+            self.last_diagnostics = GeometryDiagnostics(
+                total_ms=(time.perf_counter() - total_start) * 1000.0 if timing_enabled else None,
+                flow_ms=stage_ms.get("flow_ms"), warp_ms=stage_ms.get("warp_ms"), alignment_ms=stage_ms.get("alignment_ms"),
+                fusion_ms=stage_ms.get("fusion_ms"), backprojection_ms=stage_ms.get("backprojection_ms"), normals_ms=stage_ms.get("normals_ms"),
+                valid_geometry_percent=float(final_valid.mean() * 100.0),
+                valid_normal_percent=float(normal_result.normal_valid_mask.mean() * 100.0),
+                history_acceptance_percent=accepted, history_rejection_percent=rejected,
+                occlusion_percent=float(occlusion.mean() * 100.0), disocclusion_percent=float(disocclusion.mean() * 100.0),
+                mean_temporal_age=float(age[final_valid].mean()) if final_valid.any() else 0.0,
+                mean_confidence=float(final_confidence[final_valid].mean()) if final_valid.any() else 0.0,
+                alignment_success=alignment.fit_success, alignment_model=alignment.model_used,
+                alignment_residual=alignment.fit_residual, reset_reason=reset_reason or self._pending_reset_reason or "none",
+                depth_source_frame_delta=(int(frame_id - depth_state.source_frame_id) if depth_state is not None and isinstance(frame_id, int) and isinstance(depth_state.source_frame_id, int) else None),
+            )
+        self._pending_reset_reason = None
         return return_state
