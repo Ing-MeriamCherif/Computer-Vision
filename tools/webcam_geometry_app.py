@@ -188,7 +188,7 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
     with gr.Blocks(title="NRW Geometry Lab") as demo:
         gr.Markdown("# NRW Geometry Lab\nLive CUDA depth, stable Phase 1–4 geometry, and optional Phase 5 world-memory diagnostics. Effects are streamed directly from each webcam frame.")
         with gr.Row():
-            camera = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Live webcam")
+            camera = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Live webcam input")
             upload = gr.Image(sources=["upload"], type="numpy", label="Offline/test image")
             with gr.Column():
                 mode = gr.Radio(["CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"], value="Phase 1-4 temporal", label="Pipeline mode")
@@ -196,6 +196,11 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
                 process_once = gr.Button("Process current frame", variant="primary")
                 reset = gr.Button("Reset temporal + world state")
                 reset_status = gr.Markdown()
+        gr.Markdown(
+            "**Live mode:** click the webcam, then click **Enregistrer** to start the in-memory stream. "
+            "This does not save a recording; it sends each camera frame to the processors below. "
+            "The Live metrics card changes from *Waiting* when processing is active."
+        )
         with gr.Row():
             depth = gr.Image(label="Relative depth", streaming=True)
             normals = gr.Image(label="Camera-facing normals", streaming=True)
