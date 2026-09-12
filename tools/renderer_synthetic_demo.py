@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from contracts.render_types import DepthFrame, Light, LightState, NormalFrame, RenderPacket
+from renderer.config import LightingConfig
 from renderer.renderer import DebugMode, Renderer
 
 
@@ -111,7 +112,12 @@ class WebcamSource:
 
 
 def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
-    """Build one RGB-aligned test frame; no CPU pixel-by-pixel rendering is used."""
+    """Build deterministic RGB/depth/normals with documented pinhole intrinsics.
+
+    Synthetic calibration assumes a roughly 58-degree horizontal field of view
+    and square pixels: fx = fy = 0.9 * width. At 960x540 this gives 864 px,
+    with the principal point at (479.5, 269.5).
+    """
     if width <= 0 or height <= 0:
         raise ValueError("width and height must be positive")
 
@@ -143,7 +149,8 @@ def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
     now = time.perf_counter()
 
     light = Light(
-        position_camera_m=np.array([0.0, 0.0, 2.2], dtype=np.float32),
+        # In front of the 1.5 m and 3.0 m surfaces so -Z-facing normals light.
+        position_camera_m=np.array([0.0, 0.0, 0.75], dtype=np.float32),
         color_rgb=np.array([1.0, 0.92, 0.78], dtype=np.float32),
         intensity=1.0,
         radius_m=0.08,
@@ -156,7 +163,7 @@ def make_synthetic_packet(width: int = 960, height: int = 540) -> RenderPacket:
             depth_m=depth_m,
             valid_mask=valid_mask,
             fx=float(width) * 0.9,
-            fy=float(height) * 0.9,
+            fy=float(width) * 0.9,
             cx=(width - 1) * 0.5,
             cy=(height - 1) * 0.5,
             timestamp_s=now,
@@ -187,7 +194,7 @@ def _move_light(glfw, window, light: Light, delta_s: float, speed_m_s: float) ->
         light.position_camera_m += direction * (speed_m_s * delta_s / magnitude)
 
 
-def _print_gl_info(context) -> None:
+def _print_gl_info(context) -> str:
     info = context.info
     print("OpenGL information:")
     for label, key in (
@@ -219,7 +226,7 @@ def _print_gl_info(context) -> None:
     renderer_name = str(info.get("GL_RENDERER", "unavailable"))
     print(f"GPU: {renderer_name}")
     if "NVIDIA GeForce RTX 4060" not in renderer_name:
-        print("Benchmark classification: INVALID FOR TARGET PERFORMANCE")
+        print("WARNING: OpenGL is not using the target RTX 4060; benchmark is INVALID FOR TARGET PERFORMANCE.")
     try:
         import glfw
         monitor = glfw.get_primary_monitor()
@@ -228,6 +235,17 @@ def _print_gl_info(context) -> None:
             print(f"  Primary display refresh: {mode.refresh_rate} Hz")
     except Exception:
         pass
+    return renderer_name
+
+
+_MODE_NAMES = {
+    "rgb": DebugMode.RGB,
+    "depth": DebugMode.DEPTH,
+    "normals": DebugMode.NORMALS,
+    "lambertian": DebugMode.LAMBERTIAN,
+    "specular": DebugMode.SPECULAR,
+    "final": DebugMode.FINAL,
+}
 
 
 def _run_benchmark(
@@ -246,6 +264,7 @@ def _run_benchmark(
     vsync_on: bool,
     input_name: str,
     prepare_frame: Callable[[RenderPacket, int], float] | None,
+    benchmark_mode: DebugMode,
 ) -> int:
     """Run unlogged warmup frames, then collect per-stage CPU timings."""
     total_frames = warmup_frames + measured_frames
@@ -291,9 +310,9 @@ def _run_benchmark(
         if gpu_query is not None:
             # Results are read only after the run, so query retrieval cannot stall measured frames.
             with gpu_query:
-                renderer.render(packet, DebugMode.RGB, upload_inputs=False)
+                renderer.render(packet, benchmark_mode, upload_inputs=False)
         else:
-            renderer.render(packet, DebugMode.RGB, upload_inputs=False)
+            renderer.render(packet, benchmark_mode, upload_inputs=False)
         render_end_ns = time.perf_counter_ns()
 
         swap_start_ns = time.perf_counter_ns()
@@ -313,7 +332,7 @@ def _run_benchmark(
 
     average_frame_ms = float(np.mean(full_ms))
     warmup_average_ms = float(np.mean(warmup_ms))
-    print(f"{input_name.title()} benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
+    print(f"{input_name.title()} {benchmark_mode.name} benchmark: VSync {'ON' if vsync_on else 'OFF'} | {warmup_frames} warmup frames ignored | {measured_frames} measured frames | {packet.rgb.shape[1]}x{packet.rgb.shape[0]}")
     print(f"Warmup throughput (diagnostic only, excluded from results): {1000.0 / warmup_average_ms:.2f} FPS ({warmup_average_ms:.3f} ms/frame)")
     short_sample_count = min(45, warmup_frames)
     short_sample_ms = float(np.mean(warmup_ms[:short_sample_count]))
@@ -361,6 +380,9 @@ def run_demo(
     vsync_on: bool,
     input_name: str,
     camera_index: int,
+    initial_mode: DebugMode,
+    lighting_config: LightingConfig,
+    benchmark_mode: DebugMode,
 ) -> int:
     try:
         import glfw
@@ -410,18 +432,19 @@ def run_demo(
             print(f"Webcam reported resolution: {webcam.reported_width}x{webcam.reported_height}")
             print(f"Webcam reported FPS: {reported_fps}")
             print(f"Webcam received frame size: {webcam.received_width}x{webcam.received_height}")
-            print(f"Webcam display: aspect-preserving letterbox, BGR converted to RGB, no image/video saved")
+            print("WEBCAM RGB + MOCK GEOMETRY: real webcam RGB with synthetic depth/normals; geometry does not describe the camera scene.")
+            print("Webcam display: aspect-preserving letterbox, BGR converted to RGB, no image/video saved")
 
         renderer_setup_start_ns = time.perf_counter_ns()
-        renderer = Renderer(context, packet)
+        renderer = Renderer(context, packet, config=lighting_config)
         renderer_setup_ms = (time.perf_counter_ns() - renderer_setup_start_ns) / 1_000_000.0
-        _print_gl_info(context)
-        state = {"mode": DebugMode.RGB}
+        gpu_name = _print_gl_info(context)
+        state = {"mode": initial_mode}
 
         def on_key(callback_window, key, _scancode, action, _mods):
             if action not in (glfw.PRESS, glfw.REPEAT):
                 return
-            if key in (glfw.KEY_1, glfw.KEY_2, glfw.KEY_3):
+            if key in (glfw.KEY_1, glfw.KEY_2, glfw.KEY_3, glfw.KEY_4, glfw.KEY_5, glfw.KEY_6):
                 state["mode"] = DebugMode(key - glfw.KEY_0)
             elif key == glfw.KEY_ESCAPE and action == glfw.PRESS:
                 glfw.set_window_should_close(callback_window, True)
@@ -443,9 +466,10 @@ def run_demo(
                 vsync_on=vsync_on,
                 input_name=input_name,
                 prepare_frame=prepare_frame,
+                benchmark_mode=benchmark_mode,
             )
 
-        print("Controls: 1 RGB, 2 depth, 3 normals | A/D X, W/S Y, Q/E Z | Esc quit")
+        print("Controls: 1 RGB, 2 depth, 3 normals, 4 Lambertian, 5 specular, 6 final | A/D X, W/S Y, Q/E Z | Esc quit")
         previous_time = time.perf_counter()
         fps_start = previous_time
         fps_frames = 0
@@ -473,7 +497,7 @@ def run_demo(
                 fps_frames = 0
                 fps_start = now
                 position = light.position_camera_m
-                label = f"FPS {fps:5.1f} | Mode {state['mode'].name} | Light X {position[0]:+.2f} Y {position[1]:+.2f} Z {position[2]:+.2f} m"
+                label = f"FPS {fps:5.1f} | {state['mode'].name} | GPU {gpu_name} | Light {position[0]:+.2f},{position[1]:+.2f},{position[2]:+.2f} m"
                 glfw.set_window_title(window, label)
                 sys.stdout.write("\r" + label + "   ")
                 sys.stdout.flush()
@@ -517,6 +541,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--light-speed", type=float, default=0.75, help="light movement speed in meters/second")
     parser.add_argument("--input", choices=("synthetic", "webcam"), default="synthetic", help="RGB input source")
     parser.add_argument("--camera-index", type=int, default=0, help="webcam device index; default is 0")
+    parser.add_argument("--mode", choices=tuple(_MODE_NAMES), default="rgb", help="initial interactive visualization")
+    parser.add_argument(
+        "--benchmark-mode",
+        choices=("rgb", "lambertian", "specular", "final"),
+        default="rgb",
+        help="visualization measured by --benchmark",
+    )
+    parser.add_argument("--ambient-strength", type=float, default=0.15)
+    parser.add_argument("--specular-strength", type=float, default=0.20)
+    parser.add_argument("--shininess", type=float, default=48.0)
+    parser.add_argument("--attenuation-k", type=float, default=0.6)
     args = parser.parse_args(argv)
     if args.frames is not None and args.frames <= 0:
         parser.error("--frames must be positive")
@@ -530,6 +565,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("width/height must be positive and light-speed must be non-negative")
     if args.camera_index < 0:
         parser.error("camera-index must be non-negative")
+    try:
+        lighting_config = LightingConfig(
+            ambient_strength=args.ambient_strength,
+            specular_strength=args.specular_strength,
+            shininess=args.shininess,
+            attenuation_k=args.attenuation_k,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     return run_demo(
         args.width,
         args.height,
@@ -541,6 +585,9 @@ def main(argv: list[str] | None = None) -> int:
         vsync_on=args.vsync == "on",
         input_name=args.input,
         camera_index=args.camera_index,
+        initial_mode=_MODE_NAMES[args.mode],
+        lighting_config=lighting_config,
+        benchmark_mode=_MODE_NAMES[args.benchmark_mode],
     )
 
 
