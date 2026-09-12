@@ -216,7 +216,22 @@ def build_demo(model_path: str = "models/depth-anything-v2-small"):
     with gr.Blocks(title="NRW Geometry Lab") as demo:
         gr.Markdown("# NRW Geometry Lab\nLive CUDA depth, stable Phase 1–4 geometry, and optional Phase 5 world-memory diagnostics. Effects are streamed directly from each webcam frame.")
         with gr.Row():
-            camera = gr.Image(sources=["webcam"], type="numpy", streaming=True, label="Live webcam input")
+            # Constrain capture at the browser before frames cross the network.
+            # Without this, remote clients upload native 720p/960p frames and
+            # network/serialization latency dominates the live cadence.
+            camera = gr.Image(
+                sources=["webcam"],
+                type="numpy",
+                streaming=True,
+                webcam_options=gr.WebcamOptions(
+                    constraints={
+                        "width": {"ideal": LIVE_MAX_WIDTH, "max": LIVE_MAX_WIDTH},
+                        "height": {"ideal": LIVE_MAX_HEIGHT, "max": LIVE_MAX_HEIGHT},
+                        "frameRate": {"ideal": 30, "max": 30},
+                    }
+                ),
+                label="Live webcam input",
+            )
             upload = gr.Image(sources=["upload"], type="numpy", label="Offline/test image")
             with gr.Column():
                 mode = gr.Radio(["CUDA current geometry", "Phase 1-4 temporal", "Phase 5 persistent"], value="CUDA current geometry", label="Pipeline mode")

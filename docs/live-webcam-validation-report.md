@@ -139,6 +139,10 @@ stream is configured with `stream_every=1/30`, `trigger_mode="always_last"`, and
 a single geometry concurrency lane, so a slow frame cannot create a replay
 backlog that makes the rendered panels appear at 0.24 FPS.
 
+The webcam component also requests a browser capture maximum of 256 x 192 at
+30 FPS. This keeps remote uploads from carrying native 720p/960p frames across
+the internet before the server-side resize can run.
+
 Phase 1-4 temporal and Phase 5 persistent remain heavier algorithms. The UI
 therefore defaults to CUDA-current geometry for synchronized live rendering;
 those modes remain available for diagnostics but are not claimed as 30 FPS.
