@@ -9,4 +9,5 @@ ultralytics>=8.0
 # Phase 2: depth backends (depth/ package) + D2NT normals
 torch>=1.8
 transformers>=4.40
+# Phase 2: D2NT depth->normals (normal_translator.py, tools/bench_normals.py)
 d2nt>=0.1.0
