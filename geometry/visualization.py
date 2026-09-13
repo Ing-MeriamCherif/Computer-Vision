@@ -26,8 +26,19 @@ def _robust_bounds(values: np.ndarray, valid: np.ndarray) -> tuple[float, float]
     return float(lo), float(hi)
 
 
-def depth_to_rgb(depth: np.ndarray, valid: np.ndarray | None = None, *, bounds: tuple[float, float] | None = None) -> np.ndarray:
-    """Map canonical depth to RGB: near is warm, far is cool, invalid black."""
+def depth_to_rgb(
+    depth: np.ndarray,
+    valid: np.ndarray | None = None,
+    *,
+    bounds: tuple[float, float] | None = None,
+    detail_strength: float = 0.18,
+) -> np.ndarray:
+    """Map depth to a detailed, perceptual near-warm/far-cool visualization.
+
+    The Turbo palette is reversed so near surfaces are bright warm tones and
+    farther surfaces are cool tones.  Subtle gradient/contour accents improve
+    depth readability without changing the underlying geometry state.
+    """
     arr = np.asarray(depth, dtype=np.float32)
     mask = np.isfinite(arr) & (arr > 1e-6)
     if valid is not None:
@@ -35,17 +46,25 @@ def depth_to_rgb(depth: np.ndarray, valid: np.ndarray | None = None, *, bounds: 
     lo, hi = _robust_bounds(arr, mask) if bounds is None else (float(bounds[0]), float(bounds[1]))
     if hi <= lo:
         hi = lo + 1e-6
-    # Larger forward-Z is farther; the first warm stop therefore represents
-    # the near surface and the final cool stop the far surface.
     t = np.clip((arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
-    # Display-only denoising keeps the live diagnostic readable without
-    # altering the geometry state consumed by downstream stages.
-    t = cv2.GaussianBlur(np.nan_to_num(t, nan=0.0).astype(np.float32), (3, 3), 0.6)
-    x = t * (_DEPTH_STOPS.shape[0] - 1)
-    i0 = np.floor(x).astype(np.int32).clip(0, _DEPTH_STOPS.shape[0] - 1)
-    i1 = np.ceil(x).astype(np.int32).clip(0, _DEPTH_STOPS.shape[0] - 1)
-    frac = (x - i0)[..., None]
-    rgb = _DEPTH_STOPS[i0] * (1.0 - frac) + _DEPTH_STOPS[i1] * frac
+    normalized = (np.clip(np.nan_to_num(t, nan=0.0), 0.0, 1.0) * 255.0).astype(np.uint8)
+    # OpenCV returns BGR. Reversing the map makes near (low Z) warm and far
+    # (high Z) cool while retaining many smoothly varying perceptual levels.
+    palette = cv2.applyColorMap(255 - normalized, cv2.COLORMAP_TURBO)
+    rgb = cv2.cvtColor(palette, cv2.COLOR_BGR2RGB).astype(np.float32)
+
+    safe_detail = float(np.clip(detail_strength, 0.0, 1.0))
+    if safe_detail > 0.0 and arr.shape[0] > 2 and arr.shape[1] > 2:
+        gx = cv2.Sobel(t.astype(np.float32), cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(t.astype(np.float32), cv2.CV_32F, 0, 1, ksize=3)
+        edge = np.clip(cv2.magnitude(gx, gy) * 2.5, 0.0, 1.0)
+        # Darken only the palette detail accent; no blur or geometry mutation.
+        rgb *= (1.0 - safe_detail * edge[..., None])
+        levels = np.floor(t * 24.0).astype(np.int16)
+        contour = np.zeros_like(t, dtype=np.float32)
+        contour[1:] = np.maximum(contour[1:], (levels[1:] != levels[:-1]).astype(np.float32))
+        contour[:, 1:] = np.maximum(contour[:, 1:], (levels[:, 1:] != levels[:, :-1]).astype(np.float32))
+        rgb *= (1.0 - safe_detail * 0.28 * contour[..., None])
     return np.where(mask[..., None], np.clip(rgb, 0, 255), 0).astype(np.uint8)
 
 

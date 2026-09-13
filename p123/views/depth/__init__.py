@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import cv2
 import numpy as np
 
 from geometry.visualization import _robust_bounds, depth_to_rgb
@@ -48,5 +49,16 @@ def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
     if state is None or state.depth is None:
         dimmed = (snapshot.rgb_frame // 4).astype(np.uint8)
         return dimmed, "MODE 2 — DEPTH", "waiting for depth worker"
-    bounds = _DISPLAY_RANGE.update(state.depth, state.valid_mask)
-    return depth_to_rgb(state.depth, state.valid_mask, bounds=bounds), "MODE 2 — DEPTH", None
+    depth = np.asarray(state.depth, dtype=np.float32)
+    valid = None if state.valid_mask is None else np.asarray(state.valid_mask, dtype=bool)
+    target_shape = tuple(np.asarray(snapshot.rgb_frame).shape[:2])
+    if depth.shape != target_shape:
+        # Some teammate providers publish a lower-resolution map. Upsample
+        # only the display copy to the native camera canvas; GeometryState is
+        # left untouched for downstream geometry correctness.
+        target_w, target_h = target_shape[1], target_shape[0]
+        depth = cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_CUBIC)
+        if valid is not None:
+            valid = cv2.resize(valid.astype(np.uint8), (target_w, target_h), interpolation=cv2.INTER_NEAREST).astype(bool)
+    bounds = _DISPLAY_RANGE.update(depth, valid)
+    return depth_to_rgb(depth, valid, bounds=bounds), "MODE 2 — DEPTH", None
