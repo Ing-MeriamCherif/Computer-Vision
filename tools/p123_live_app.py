@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from collections import deque
 
@@ -56,6 +57,17 @@ def _camera_key(value: str | int) -> tuple[str, int | str]:
     return "name", text.casefold()
 
 
+def _camera_device(value: str | int) -> int | str:
+    """Normalize camera selectors for both V4L2/Linux and Windows OpenCV."""
+    text = str(value).strip()
+    if text.isdigit():
+        return int(text)
+    if text.startswith("/dev/video") and text[10:].isdigit():
+        # Windows exposes virtual webcams as integer DirectShow indices.
+        return int(text[10:]) if os.name == "nt" else text
+    return value
+
+
 def _source_profile(args: argparse.Namespace, source: str, *, legacy_camera_is_phone: bool) -> tuple[str, int, int]:
     if source == "phone":
         return str(args.phone_camera), 1920, 1080
@@ -67,7 +79,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app (Material 3 UI)")
     parser.add_argument("--camera", default=None, help="Legacy initial camera selector; use --webcam-camera/--phone-camera to configure both sources")
     parser.add_argument("--webcam-camera", default="/dev/video0", help="Webcam device used by the in-app source toggle")
-    parser.add_argument("--phone-camera", default="/dev/video2", help="Phone device used by the in-app source toggle")
+    phone_default = "2" if os.name == "nt" else "/dev/video2"
+    parser.add_argument("--phone-camera", default=phone_default, help="Phone device/index used by the in-app source toggle")
     parser.add_argument("--webcam-calibration", default=None, help="CameraModel JSON for the webcam source")
     parser.add_argument("--phone-calibration", default=None, help="CameraModel JSON for the phone source")
     parser.add_argument("--width", type=int, default=640)
@@ -100,13 +113,7 @@ def main() -> int:
         camera_name, source_width, source_height = _source_profile(
             args, source, legacy_camera_is_phone=legacy_camera_is_phone
         )
-        cam_str = camera_name.strip()
-        if cam_str.isdigit():
-            camera_device = int(cam_str)
-        elif cam_str.startswith("/dev/video") and cam_str[10:].isdigit():
-            camera_device = int(cam_str[10:])
-        else:
-            camera_device = camera_name
+        camera_device = _camera_device(camera_name)
         source_depth_size = _parse_depth_size(args.depth_size, (source_height, source_width))
         calibration_path = args.phone_calibration if source == "phone" else args.webcam_calibration
         calibration = None
