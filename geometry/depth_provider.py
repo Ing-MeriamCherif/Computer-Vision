@@ -24,6 +24,8 @@ class DepthInferenceDiagnostics:
 class DepthAnythingProvider:
     """Lazy local-checkpoint monocular relative-depth inference."""
 
+    backend_name: str = "depth-anything-v2-small"
+
     def __init__(self, model_path: str | Path = "models/depth-anything-v2-small", *, device: str = "auto", use_fp16: bool = False, input_size: int | tuple[int, int] | None = None) -> None:
         self.model_path = str(model_path)
         self.requested_device = device
