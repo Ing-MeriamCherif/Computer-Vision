@@ -116,7 +116,7 @@ def main() -> int:
                 view = _panel(snapshot, mode)
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
-                key = cv2.waitKey(1) & 0xFF
+                key = cv2.waitKey(10) & 0xFF
                 if key == ord("q") or key == 27:
                     break
                 if ord("1") <= key <= ord("6"):

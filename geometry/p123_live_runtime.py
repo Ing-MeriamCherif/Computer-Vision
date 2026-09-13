@@ -127,6 +127,13 @@ class P123LiveRuntime:
     def start(self) -> None:
         if self._running:
             return
+        # Keep the diagnostic UI responsive while OpenCV/MediaPipe workers run
+        # concurrently on the same workstation.
+        try:
+            import cv2
+            cv2.setNumThreads(1)
+        except Exception:
+            pass
         self.depth_provider.load()
         if self.hand_engine.backend_name in {"unavailable", "mock"}:
             raise RuntimeError(f"hand backend unavailable: {self.hand_engine.backend_name}")
