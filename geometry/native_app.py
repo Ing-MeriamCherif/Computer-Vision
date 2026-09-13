@@ -27,7 +27,7 @@ from .cuda_backend import TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DepthAnythingProvider
 from .colleague_depth import ColleagueDepthProvider
 from .hand_control import GestureState, HandControlEngine, TrackedHand, create_hand_tracker
-from .lighting import LightState, render_volumetric_scattering, sample_depth, shade_geometry
+from .lighting import LightState, render_volumetric_scattering, shade_geometry
 from .motion import OpenCVFlowProvider
 from .native_window import NativeOpenGLWindow
 from .normals import normals_to_rgb

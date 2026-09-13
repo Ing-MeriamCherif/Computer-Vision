@@ -54,7 +54,7 @@ from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_c
 from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
 from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv
 from .colleague_depth import ColleagueDepthProvider
-from .lighting import LightState, light_from_palm, render_volumetric_scattering, sample_depth, shade_geometry
+from .lighting import LightState, light_from_palm, render_volumetric_scattering, shade_geometry
 from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestFrameBuffer
 from .camera_worker import CameraCaptureWorker, LatestFrameSlot
 from .persistent_worker import PersistentMapWorker
@@ -135,7 +135,6 @@ __all__ = [
     "ColleagueDepthProvider",
     "LightState",
     "light_from_palm",
-    "sample_depth",
     "shade_geometry",
     "render_volumetric_scattering",
     "FramePacket",
