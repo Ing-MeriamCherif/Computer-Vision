@@ -106,9 +106,13 @@ class TorchGeometryBackend:
 
         normals1, valid1 = estimate(1)
         normals2, valid2 = estimate(2)
-        # Multi-scale edge-aware selection: use radius 2 only where the
-        # immediate neighborhood is incomplete, retaining radius 1 at edges.
-        use2 = (~valid1) & valid2
+        # Multi-scale edge-aware selection: use the larger footprint on smooth
+        # regions to suppress monocular-depth speckle, retaining radius 1 at
+        # genuine depth edges and radius 2 where the immediate footprint is
+        # incomplete.
+        neighbor = (torch.roll(z, 1, 0) + torch.roll(z, -1, 0) + torch.roll(z, 1, 1) + torch.roll(z, -1, 1)) * 0.25
+        edge_strength = torch.abs(z - neighbor) / torch.clamp(torch.abs(z), min=1e-6)
+        use2 = valid2 & ((~valid1) | (edge_strength < 0.08))
         normals = torch.where(use2[..., None], normals2, normals1)
         normal_valid = valid1 | valid2
         flip = torch.sum(normals * points, dim=-1) > 0

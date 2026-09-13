@@ -36,6 +36,9 @@ def depth_to_rgb(depth: np.ndarray, valid: np.ndarray | None = None) -> np.ndarr
     # Larger forward-Z is farther; the first warm stop therefore represents
     # the near surface and the final cool stop the far surface.
     t = np.clip((arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+    # Display-only denoising keeps the live diagnostic readable without
+    # altering the geometry state consumed by downstream stages.
+    t = cv2.GaussianBlur(np.nan_to_num(t, nan=0.0).astype(np.float32), (3, 3), 0.6)
     x = t * (_DEPTH_STOPS.shape[0] - 1)
     i0 = np.floor(x).astype(np.int32).clip(0, _DEPTH_STOPS.shape[0] - 1)
     i1 = np.ceil(x).astype(np.int32).clip(0, _DEPTH_STOPS.shape[0] - 1)
@@ -52,7 +55,10 @@ def normals_to_rgb_diagnostic(normals: np.ndarray, valid: np.ndarray | None = No
     mask = np.isfinite(arr).all(axis=-1)
     if valid is not None:
         mask &= np.asarray(valid, dtype=bool)
-    rgb = np.clip((arr * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
+    encoded = np.clip((np.nan_to_num(arr, nan=0.0) * 0.5 + 0.5) * 255.0, 0, 255).astype(np.uint8)
+    # A tiny display-only median filter suppresses isolated CUDA invalid-edge
+    # speckles while preserving the documented channel convention.
+    rgb = np.stack([cv2.medianBlur(encoded[..., i], 3) for i in range(3)], axis=-1)
     return np.where(mask[..., None], rgb, 0)
 
 

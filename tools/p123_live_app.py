@@ -108,14 +108,15 @@ def _panel(
         image = rgb.copy()
         title = "MODE 6 — XYZ CONTRACT"
         # Keep the camera coordinate convention in a fixed, readable corner.
-        origin = (38, 42)
-        cv2.rectangle(image, (8, 8), (190, 112), (12, 18, 22), -1)
+        legend_y = max(120, image.shape[0] - 132)
+        origin = (38, legend_y + 34)
+        cv2.rectangle(image, (8, legend_y), (205, min(image.shape[0] - 38, legend_y + 104)), (12, 18, 22), -1)
         cv2.circle(image, origin, 3, (240, 240, 240), -1)
         cv2.arrowedLine(image, origin, (108, origin[1]), (255, 70, 70), 2, cv2.LINE_AA, tipLength=0.18)
-        cv2.arrowedLine(image, origin, (origin[0], 98), (70, 255, 70), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.arrowedLine(image, origin, (origin[0], origin[1] + 54), (70, 255, 70), 2, cv2.LINE_AA, tipLength=0.18)
         cv2.putText(image, "+X right", (112, origin[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 90, 90), 1, cv2.LINE_AA)
-        cv2.putText(image, "+Y down", (origin[0] + 5, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 255, 90), 1, cv2.LINE_AA)
-        cv2.putText(image, "+Z forward", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 150, 255), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Y down", (origin[0] + 5, origin[1] + 72), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 255, 90), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Z forward", (12, legend_y + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 150, 255), 1, cv2.LINE_AA)
         xyz_by_id = {item.hand_id: item for item in snapshot.xyz}
         visible_hands = () if snapshot.hand_state is None else snapshot.hand_state.hands
         if not visible_hands:
@@ -146,11 +147,11 @@ def _panel(
         image = _fit(image, display_size)
     metrics = snapshot.metrics
     xyz_age = max((item.age_ms for item in snapshot.xyz), default=None)
-    xyz_state = "fresh" if snapshot.xyz and (xyz_age or 9999) <= 220 else "degraded"
+    xyz_state = "fresh" if snapshot.xyz and (xyz_age or 9999) <= 220 else "degraded" if snapshot.xyz else "none"
     lines = [
         f"capture {snapshot.rgb_capture_id} | CAM {metrics.capture_hz or 0:.1f} Hz | overwritten {metrics.overwritten_before_consumption}",
         f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz/{metrics.normal_age_p95_ms or 0:.0f}ms | temp {metrics.temporal_hz or 0:.1f} Hz",
-        f"hands {metrics.hand_hz or 0:.1f} Hz/{0 if snapshot.hand_state is None else len(snapshot.hand_state.hands)} | XYZ {xyz_state} {xyz_age or 0:.0f}ms",
+        f"hands {metrics.hand_hz or 0:.1f} Hz/{0 if snapshot.hand_state is None else len(snapshot.hand_state.hands)} | XYZ {xyz_state}{'' if xyz_age is None else f' {xyz_age:.0f}ms'}",
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")

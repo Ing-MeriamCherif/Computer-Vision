@@ -145,9 +145,9 @@ class _TasksBackend:
         options = mp_vision.HandLandmarkerOptions(
             base_options=base,
             num_hands=max(1, int(max_hands)),
-            min_hand_detection_confidence=0.3,
-            min_hand_presence_confidence=0.3,
-            min_tracking_confidence=0.3,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
         self._mp = mp
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
@@ -168,6 +168,8 @@ class _TasksBackend:
             except Exception:
                 pass
             palm = points[9]
+            if confidence < 0.45:
+                continue
             observations.append(TrackedHand(
                 hand_id=index,
                 landmarks_uv=points,
@@ -388,7 +390,7 @@ class HandControlEngine:
                     obs.landmarks_uv = obs.landmarks_uv * np.array([scale_x, scale_y])
                 if obs.palm_width_px is not None:
                     obs.palm_width_px *= (scale_x + scale_y) * 0.5
-            observations = self._assign_stable_ids(raw_observations)
+            observations = self._assign_stable_ids([obs for obs in raw_observations if obs.confidence >= 0.45])
         else:
             # Detector-skip frames still update coordinates using LK optical
             # flow. Reusing the previous UV was a false 30 Hz claim and made
