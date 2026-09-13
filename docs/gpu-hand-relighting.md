@@ -23,9 +23,9 @@ temporal stabilization, and projected 3D emitter orbs. Each orb and its
 lighting/shadow/volume rays use the same camera-space `LightState` position.
 The working emitter range is
 `0.30 m`; physical shadow source radius is `0.018 m`; visible orb radius is
-`0.035 m`. These values are separate. This is not hardware RTX ray tracing or
-full path tracing, and it does not reconstruct hidden geometry beyond the
-monocular depth surface.
+`0.035 m`. RTX mode uses OptiX RT cores when available; GTX/non-NVIDIA systems
+use the explicitly labeled raster or CPU fallback. Hidden geometry beyond the
+monocular depth surface is not reconstructed.
 
 ## Install and Run
 
@@ -41,10 +41,7 @@ CUDA-enabled PyTorch wheel must match the installed driver/runtime used by the
 P123 depth provider.
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements-gpu-ui.txt
+./tools/setup_gpu_ui.sh
 python -m tools.p123_live_app --webcam-camera /dev/video0 --phone-camera /dev/video2 --depth-backend local --depth-size 336x448 --mode 7 --lighting-quality balanced
 ```
 
