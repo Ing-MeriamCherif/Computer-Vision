@@ -115,7 +115,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--depth-model", default="models/depth-anything-v2-small")
-    parser.add_argument("--depth-size", type=int, default=256)
+    parser.add_argument("--depth-backend", choices=["local", "colleague"], default="local")
+    parser.add_argument(
+        "--fp16", action="store_true",
+        help="Use FP16 depth inference (benchmark first; FP32 is faster on some GPUs such as GTX 1650 Ti)",
+    )
+    parser.add_argument(
+        "--depth-size", default="native",
+        help="Model input size in pixels, or 'native' for the camera's HxW (default: native)",
+    )
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration", type=float, default=None)
@@ -126,9 +134,11 @@ def main() -> int:
     args = parse_args()
     try:
         camera = int(args.camera) if str(args.camera).isdigit() else args.camera
+        depth_size = (args.height, args.width) if str(args.depth_size).lower() == "native" else int(args.depth_size)
         runtime = P123LiveRuntime(
             camera_device=camera, width=args.width, height=args.height, fps=args.fps,
-            depth_model=args.depth_model, depth_size=args.depth_size, hand_backend=args.hand_backend,
+            depth_model=args.depth_model, depth_size=depth_size, depth_backend=args.depth_backend,
+            use_fp16=args.fp16, hand_backend=args.hand_backend,
         )
         runtime.start()
     except Exception as exc:
@@ -136,6 +146,7 @@ def main() -> int:
         return 1
     print("P123 ASYNCHRONOUS LIVE RUNTIME")
     print(f"physical camera={args.camera} resolution={args.width}x{args.height} requested_fps={args.fps}")
+    print(f"depth backend={args.depth_backend} input={args.depth_size} precision={'fp16' if args.fp16 else 'fp32'}")
     print("keys: 1 RGB  2 depth  3 normals  4 temporal/confidence  5 hands  6 XYZ  q quit")
     mode = 1
     ui_state = {"mode": mode}

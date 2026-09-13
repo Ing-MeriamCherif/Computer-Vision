@@ -81,8 +81,12 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 ```
 
 Use keys `1`–`6` for RGB, depth, normals, temporal confidence, hands, and XYZ
-contract diagnostics; press `q` to exit. Add `--headless --duration 10` for a
-bounded runtime smoke measurement.
+contract diagnostics; press `q` to exit. The default is native camera-sized
+depth input with FP32 inference (faster on the local GTX 1650 Ti); add
+`--fp16` only after benchmarking it on another GPU. Use
+`--depth-backend colleague --depth-size 420` to run Mariem's preserved
+Depth-Anything V2 pipeline, or `--headless --duration 10` for a bounded
+physical-camera smoke measurement.
 
 ---
 

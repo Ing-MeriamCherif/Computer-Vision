@@ -81,14 +81,34 @@ class P123LiveRuntime:
         fps: int = 30,
         depth_provider: Any | None = None,
         depth_model: str = "models/depth-anything-v2-small",
-        depth_size: int | tuple[int, int] | None = (192, 256),
+        depth_size: int | tuple[int, int] | None = None,
+        depth_backend: str = "local",
+        use_fp16: bool = False,
         hand_backend: str = "auto",
         calibration: CameraModel | None = None,
         max_state_age_ms: float = 120.0,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
-        self.depth_provider = depth_provider or DepthAnythingProvider(depth_model, device="auto", use_fp16=True, input_size=depth_size)
+        if depth_provider is not None:
+            self.depth_provider = depth_provider
+        elif depth_backend == "colleague":
+            from .colleague_depth import ColleagueDepthProvider
+            if depth_size is None:
+                colleague_size = max(height, width)
+            elif isinstance(depth_size, tuple):
+                colleague_size = max(int(v) for v in depth_size)
+            else:
+                colleague_size = int(depth_size)
+            self.depth_provider = ColleagueDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16)
+        elif depth_backend == "local":
+            # Native camera dimensions preserve fine spatial detail; the
+            # latest-only worker keeps capture/UI cadence independent of the
+            # heavier inference cost.
+            native_size = (height, width) if depth_size is None else depth_size
+            self.depth_provider = DepthAnythingProvider(depth_model, device="auto", use_fp16=use_fp16, input_size=native_size)
+        else:
+            raise ValueError(f"unknown depth backend: {depth_backend}")
         self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=2, max_coast_frames=8)
         self.temporal = TemporalGeometryEngine(
             self.camera,
@@ -135,6 +155,9 @@ class P123LiveRuntime:
         except Exception:
             pass
         self.depth_provider.load()
+        warmup = getattr(self.depth_provider, "warmup", None)
+        if callable(warmup):
+            warmup(iterations=1)
         if self.hand_engine.backend_name in {"unavailable", "mock"}:
             raise RuntimeError(f"hand backend unavailable: {self.hand_engine.backend_name}")
         self.camera_worker.start()

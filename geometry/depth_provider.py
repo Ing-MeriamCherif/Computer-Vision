@@ -68,6 +68,27 @@ class DepthAnythingProvider:
             self.model = self.model.half()
         self.device = torch.device(device)
 
+    def warmup(self, iterations: int = 1) -> None:
+        """Prime the processor/model path before the camera loop begins."""
+        self.load()
+        import torch
+        from PIL import Image
+
+        if self.input_size is None:
+            height, width = 518, 518
+        else:
+            height, width = self.input_size
+        dummy = Image.fromarray(np.zeros((height, width, 3), dtype=np.uint8))
+        for _ in range(max(0, int(iterations))):
+            inputs = self.processor(images=dummy, return_tensors="pt")
+            inputs = {key: value.to(self.device) for key, value in inputs.items()}
+            if self.device.type == "cuda" and self.use_fp16:
+                inputs = {key: value.half() if value.is_floating_point() else value for key, value in inputs.items()}
+            with torch.inference_mode():
+                self.model(**inputs)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
         self.load()
         import torch

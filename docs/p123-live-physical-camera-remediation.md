@@ -7,6 +7,21 @@ Ending commit (code): `5b882a9`; report finalization follows in the report-only 
 Branch: `bug-fixes/live-p123-physical-camera-remediation`
 
 ============================================================
+NATIVE-RESOLUTION PERFORMANCE UPDATE (2026-09-13)
+============================================================
+
+The P123 live path now defaults to the physical camera's native 640x480 input
+for depth and all geometry/hand stages. Depth inference is asynchronous and
+latest-only; FP32 is the default on this GTX 1650 Ti because its measured
+native latency is lower than FP16. Mariem's preserved provider is selectable
+with `--depth-backend colleague --depth-size 420`.
+
+Physical webcam smoke (`--depth-size native`, FP32, 10 seconds): capture
+31.18 Hz, depth 9.24 Hz, geometry 1.76 Hz, hands 30.14 Hz. The camera/display
+cadence is independent from the slower depth/geometry workers; each worker
+publishes only its newest completed state.
+
+============================================================
 SCOPE GUARD
 ============================================================
 

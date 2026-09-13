@@ -46,6 +46,9 @@ class ColleagueDepthProvider:
         """
         return None
 
+    def warmup(self, iterations: int = 1) -> None:
+        self._model.warmup(iterations=max(0, int(iterations)))
+
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
         import cv2
 
