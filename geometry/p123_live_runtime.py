@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
+import os
 import threading
 import time
 from typing import Any
@@ -165,6 +166,8 @@ class P123LiveRuntime:
         calibration: CameraModel | None = None,
         max_state_age_ms: float = 200.0,
         full_temporal: bool = False,
+        normal_every_n: int = 2,
+        metric_depth: bool = False,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
         self._explicit_calibration = calibration is not None
@@ -174,12 +177,12 @@ class P123LiveRuntime:
         elif depth_backend == "mariem":
             from .colleague_depth import MariemDepthProvider
             if depth_size is None:
-                colleague_size = max(height, width)
+                colleague_size = (height, width)
             elif isinstance(depth_size, tuple):
-                colleague_size = max(int(v) for v in depth_size)
+                colleague_size = tuple(int(v) for v in depth_size)
             else:
                 colleague_size = int(depth_size)
-            self.depth_provider = MariemDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16)
+            self.depth_provider = MariemDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16, metric=metric_depth)
         else:
             raise ValueError("P123 live runtime uses Mariem's depth module only; pass depth_backend='mariem'")
         self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=2, max_coast_frames=8)
@@ -190,6 +193,7 @@ class P123LiveRuntime:
         )
         self.max_state_age_ms = float(max_state_age_ms)
         self.full_temporal = bool(full_temporal)
+        self.normal_every_n = max(1, int(normal_every_n))
         self._depth_frames = LatestFrameBuffer()
         self._hand_frames = LatestFrameBuffer()
         self._depth_states = LatestDepthBuffer()
@@ -222,6 +226,7 @@ class P123LiveRuntime:
         self._depth_ages = metric(); self._geometry_ages = metric(); self._hand_ages = metric(); self._xyz_ages = metric(); self._normal_ages = metric()
         self._xyz: tuple[HandXYZ, ...] = ()
         self._xyz_smooth: dict[int, np.ndarray] = {}
+        self._rectify_maps = None
 
     def start(self) -> None:
         if self._running:
@@ -230,7 +235,17 @@ class P123LiveRuntime:
         # concurrently on the same workstation.
         try:
             import cv2
-            cv2.setNumThreads(1)
+            cv2.setNumThreads(max(1, min(4, (os.cpu_count() or 4) // 2)))
+        except Exception:
+            pass
+        try:
+            import torch
+            torch.set_num_threads(max(1, min(8, (os.cpu_count() or 8) // 2)))
+            torch.set_float32_matmul_precision("high")
+            if torch.cuda.is_available():
+                torch.backends.cudnn.benchmark = True
+                torch.backends.cuda.matmul.allow_tf32 = True
+                torch.backends.cudnn.allow_tf32 = True
         except Exception:
             pass
         self.depth_provider.load()
@@ -252,6 +267,22 @@ class P123LiveRuntime:
                 f"explicit calibration {self.camera.width}x{self.camera.height} mismatches negotiated camera "
                 f"{self.camera_worker.actual_width}x{self.camera_worker.actual_height}"
             )
+        if self.camera.calibrated and self.camera.distortion:
+            import cv2
+            self._rectify_maps = cv2.initUndistortRectifyMap(
+                self.camera.camera_matrix,
+                np.asarray(self.camera.distortion, dtype=np.float64),
+                None,
+                self.camera.camera_matrix,
+                (self.camera.width, self.camera.height),
+                cv2.CV_32FC1,
+            )
+            self.camera = CameraModel(
+                self.camera.width, self.camera.height, self.camera.fx, self.camera.fy,
+                self.camera.cx, self.camera.cy, calibrated=True,
+                calibration_width=self.camera.calibration_width,
+                calibration_height=self.camera.calibration_height,
+            )
         self._running = True
         targets = [self._dispatch_loop, self._depth_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
         if self.full_temporal:
@@ -266,6 +297,9 @@ class P123LiveRuntime:
             if packet is None:
                 continue
             frame, capture_id, timestamp = packet
+            if self._rectify_maps is not None:
+                import cv2
+                frame = cv2.remap(frame, self._rectify_maps[0], self._rectify_maps[1], cv2.INTER_LINEAR)
             self._last_dispatched_id = capture_id
             self._capture_times.append(time.monotonic())
             with self._rgb_lock:
@@ -332,34 +366,47 @@ class P123LiveRuntime:
             return
         last_depth_id: int | str | None = None
         version = 0
+        update_index = 0
         previous_depth: np.ndarray | None = None
         smoothed_depth: np.ndarray | None = None
         while self._running:
             state, version = self._depth_states.wait_for_new(version, timeout=0.2)
             if state is None:
                 continue
+            update_index += 1
+            if update_index % self.normal_every_n:
+                continue
             try:
-                smoothed_depth = _smooth_depth(smoothed_depth, state.depth, state.valid_mask)
+                use_device_depth = state.device_depth is not None
+                if use_device_depth:
+                    normal_depth = state.device_depth
+                    normal_valid = state.device_valid_mask
+                    normal_confidence = state.device_confidence
+                else:
+                    smoothed_depth = _smooth_depth(smoothed_depth, state.depth, state.valid_mask)
+                    normal_depth = smoothed_depth
+                    normal_valid = state.valid_mask
+                    normal_confidence = state.confidence
                 fast = self._normal_backend.process_depth(
-                    smoothed_depth,
+                    normal_depth,
                     self.camera,
                     frame_id=state.source_frame_id,
                     timestamp=state.timestamp,
                     scale_mode=state.scale_mode,
-                    valid_mask=state.valid_mask,
-                    input_confidence=state.confidence,
+                    valid_mask=normal_valid,
+                    input_confidence=normal_confidence,
                 )
                 fast.processing_frame_id = state.source_frame_id
                 fast.completed_timestamp = time.monotonic()
                 fast.temporal_confidence = _fast_temporal_confidence(
-                    previous_depth, smoothed_depth, state.valid_mask, state.confidence
+                    previous_depth, fast.depth, state.valid_mask, state.confidence
                 )
                 with self._state_lock:
                     self._fast_geometry = fast
                 self._normal_times.append(time.monotonic())
                 self._normal_ages.append(max(0.0, (time.monotonic() - state.timestamp) * 1000.0))
                 self._fast_temporal_times.append(time.monotonic())
-                previous_depth = smoothed_depth.copy()
+                previous_depth = fast.depth.copy()
                 last_depth_id = state.source_frame_id
             except Exception:
                 # Keep the temporal worker/UI alive if CUDA geometry rejects a frame.

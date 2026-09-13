@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import math
 import time
 
 import numpy as np
@@ -79,6 +81,101 @@ def sample_depth(depth: np.ndarray, valid: np.ndarray | None, u: float, v: float
     if values.size == 0:
         return 0.0, 0.0
     return float(np.median(values)), float(min(1.0, values.size / ((2 * radius + 1) ** 2)))
+
+
+def project_light_orb(
+    camera: CameraModel,
+    light: LightState,
+    *,
+    source_radius_m: float = 0.010,
+) -> tuple[float, float, float] | None:
+    """Return the pinhole projection and screen radius for a rendered light."""
+    position = light.position_camera
+    if not light.enabled or position is None or not np.isfinite(position).all() or position[2] <= 0:
+        return None
+    uv = camera.project(position)
+    if not np.isfinite(uv).all():
+        return None
+    radius_px = float(np.clip(camera.fx * source_radius_m / float(position[2]), 3.5, 14.0))
+    return float(uv[0]), float(uv[1]), radius_px
+
+
+@lru_cache(maxsize=24)
+def _light_orb_masks(radius_px: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Build reusable, small radial masks for the halo, inner glow, and core."""
+    extent = max(5, int(math.ceil(radius_px * 3.0)))
+    yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1].astype(np.float32)
+    distance = np.sqrt(xx * xx + yy * yy)
+    broad_glow = np.exp(-0.5 * (distance / max(radius_px * 1.35, 1.0)) ** 2)
+    inner = np.exp(-0.5 * (distance / max(radius_px * 0.58, 1.0)) ** 2)
+    core = np.exp(-0.5 * (distance / max(radius_px * 0.23, 1.0)) ** 2)
+    halo = np.maximum(broad_glow - inner, 0.0)
+    return halo, inner, core
+
+
+def render_light_orbs(
+    rgb: np.ndarray,
+    camera: CameraModel,
+    lights: list[LightState] | tuple[LightState, ...],
+    *,
+    depth: np.ndarray | None = None,
+    valid: np.ndarray | None = None,
+    depth_aware: bool = True,
+) -> np.ndarray:
+    """Composite visible emitters projected from the exact lighting states.
+
+    Work is limited to each orb's small bounding box; reusable radial masks keep
+    the per-frame overlay inexpensive. The white-hot core remains visible when
+    depth indicates that the halo is behind a nearer surface.
+    """
+    image = np.asarray(rgb)
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError("rgb must have shape (height, width, 3+)")
+    height, width = image.shape[:2]
+    result: np.ndarray | None = None
+
+    for light in lights:
+        projected = project_light_orb(camera, light)
+        if projected is None or light.confidence <= 0 or light.intensity <= 0:
+            continue
+        u, v, radius = projected
+        cx, cy = int(round(u)), int(round(v))
+        radius_i = max(4, int(round(radius)))
+        halo, inner, core = _light_orb_masks(radius_i)
+        extent = halo.shape[0] // 2
+        left, top = cx - extent, cy - extent
+        right, bottom = cx + extent + 1, cy + extent + 1
+        x0, y0 = max(0, left), max(0, top)
+        x1, y1 = min(width, right), min(height, bottom)
+        if x0 >= x1 or y0 >= y1:
+            continue
+
+        mask_x0, mask_y0 = x0 - left, y0 - top
+        mask_x1, mask_y1 = mask_x0 + (x1 - x0), mask_y0 + (y1 - y0)
+        halo_roi = halo[mask_y0:mask_y1, mask_x0:mask_x1]
+        inner_roi = inner[mask_y0:mask_y1, mask_x0:mask_x1]
+        core_roi = core[mask_y0:mask_y1, mask_x0:mask_x1]
+
+        halo_visibility = 1.0
+        if depth_aware and depth is not None and depth.shape == (height, width):
+            scene_z, reliability = sample_depth(depth, valid, u, v)
+            if reliability > 0 and scene_z + max(0.025, 0.04 * float(light.position_camera[2])) < float(light.position_camera[2]):
+                halo_visibility = 0.28
+
+        if result is None:
+            result = image[..., :3].copy()
+        roi = result[y0:y1, x0:x1].astype(np.float32)
+        color = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
+        power = float(np.clip(light.intensity * light.confidence, 0.0, 2.0))
+        glow = (halo_roi * 0.12 * halo_visibility + inner_roi * 0.28) * power
+        roi += glow[..., None] * color[None, None, :] * 100.0
+
+        core_alpha = np.clip(core_roi * min(0.62, 0.38 + power * 0.05), 0.0, 0.62)[..., None]
+        hot_color = color * 0.35 + np.array([1.0, 0.98, 0.92], dtype=np.float32) * 0.65
+        roi = roi * (1.0 - core_alpha) + hot_color[None, None, :] * (255.0 * core_alpha)
+        result[y0:y1, x0:x1] = np.clip(roi, 0.0, 255.0).astype(np.uint8)
+
+    return image if result is None else result
 
 
 def light_from_palm(

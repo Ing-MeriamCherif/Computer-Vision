@@ -9,9 +9,18 @@ from __future__ import annotations
 import threading
 import time
 import subprocess
+import sys
 from typing import Any
 
 import numpy as np
+
+
+def _default_camera_backend(cv2: Any) -> int:
+    if sys.platform == "win32":
+        return getattr(cv2, "CAP_MSMF", getattr(cv2, "CAP_DSHOW", getattr(cv2, "CAP_ANY", 0)))
+    if sys.platform.startswith("linux"):
+        return getattr(cv2, "CAP_V4L2", getattr(cv2, "CAP_ANY", 0))
+    return getattr(cv2, "CAP_ANY", 0)
 
 
 class LatestFrameSlot:
@@ -102,6 +111,7 @@ class CameraCaptureWorker:
         fps: int = 30,
         backend: int | None = None,
         fourcc: str = "auto",
+        exposure: float | None = None,
     ) -> None:
         self.device = device
         self.requested_width = width
@@ -109,6 +119,7 @@ class CameraCaptureWorker:
         self.requested_fps = fps
         self.backend = backend
         self.requested_fourcc = str(fourcc).upper()
+        self.requested_exposure = exposure
 
         self.slot = LatestFrameSlot()
         self._thread: threading.Thread | None = None
@@ -130,12 +141,11 @@ class CameraCaptureWorker:
         """Open camera and start the continuous capture thread."""
         import cv2
 
+        cap_backend = self.backend if self.backend is not None else _default_camera_backend(cv2)
         if str(self.device).isdigit():
             dev_idx = int(self.device)
-            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
             self._cap = cv2.VideoCapture(dev_idx, cap_backend)
         elif str(self.device).startswith("/dev/"):
-            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
             self._cap = cv2.VideoCapture(str(self.device), cap_backend)
         else:
             self._cap = cv2.VideoCapture(self.device)
@@ -148,7 +158,9 @@ class CameraCaptureWorker:
         # the requested 30 FPS on cameras that expose both MJPG and YUYV.
         if self.requested_fourcc in {"AUTO", "MJPG", "YUYV"}:
             chosen = self.requested_fourcc
-            if chosen == "AUTO" and str(self.device).startswith("/dev/"):
+            if chosen == "AUTO":
+                chosen = ""
+            if self.requested_fourcc == "AUTO" and str(self.device).startswith("/dev/"):
                 try:
                     probe = subprocess.run(
                         ["v4l2-ctl", "--device", str(self.device), "--list-formats-ext"],
@@ -157,7 +169,7 @@ class CameraCaptureWorker:
                     chosen = "MJPG" if "'MJPG'" in probe else "YUYV" if "'YUYV'" in probe else ""
                 except (OSError, subprocess.SubprocessError):
                     chosen = ""
-            if chosen:
+            if chosen in {"MJPG", "YUYV"}:
                 code = cv2.VideoWriter_fourcc(*chosen)
                 self._cap.set(cv2.CAP_PROP_FOURCC, code)
 
@@ -166,6 +178,9 @@ class CameraCaptureWorker:
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height)
         self._cap.set(cv2.CAP_PROP_FPS, self.requested_fps)
         self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if self.requested_exposure is not None:
+            self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+            self._cap.set(cv2.CAP_PROP_EXPOSURE, float(self.requested_exposure))
 
         # Query actual negotiated properties
         act_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))

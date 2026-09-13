@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from collections import deque
 
 import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
+from geometry.camera import CameraModel
 from p123.views import render as _panel
 from p123.views.common import hit_test_navigation
 
@@ -51,12 +53,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--depth-backend", choices=["mariem"], default="mariem", help="Use Mariem's CUDA depth module (the sole P123 depth backend)")
-    parser.add_argument("--fp16", action="store_true", help="Use FP16 depth inference (benchmark first; FP32 is faster on GTX 1650 Ti)")
-    parser.add_argument("--depth-size", default="336", help="Mariem model input side in pixels (default: 336; use 420 for higher quality)")
+    parser.add_argument("--fp16", action=argparse.BooleanOptionalAction, default=True, help="Use FP16 depth inference (default on RTX GPUs; pass --no-fp16 for FP32)")
+    parser.add_argument("--depth-size", default="252x336", help="Depth input HxW (default: 252x336; use 336x448 for higher quality)")
+    parser.add_argument("--normal-every-n", type=int, default=2, help="Generate CUDA normals every N depth frames (default: 2)")
+    parser.add_argument("--metric-depth", action="store_true", help="Use the metric Depth Anything checkpoint for true meter-valued depth")
+    parser.add_argument("--calibration", help="Camera calibration JSON from tools.calibrate_camera")
+    parser.add_argument("--max-performance", action=argparse.BooleanOptionalAction, default=True, help="Enable high-priority process and CUDA runtime tuning")
     parser.add_argument("--display-size", default="1920x1080", help="UI display resolution (default: 1920x1080 FHD; or 'native', 'auto', WxH)")
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
+    parser.add_argument("--mode", type=int, choices=range(1, 8), default=1, help="Starting view: 1 RGB through 7 hand relight")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
+    parser.add_argument("--camera-backend", choices=["auto", "msmf", "dshow"], default="auto")
+    parser.add_argument("--exposure", type=float, help="Disable webcam auto-exposure and request this backend-specific exposure value")
+    parser.add_argument("--display-fps", type=float, default=60.0, help="Maximum UI redraw rate")
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration", type=float, default=None)
@@ -66,6 +76,14 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        if args.max_performance:
+            try:
+                import psutil
+                process = psutil.Process()
+                priority = psutil.HIGH_PRIORITY_CLASS if os.name == "nt" else -10
+                process.nice(priority)
+            except (ImportError, OSError, PermissionError):
+                pass
         cam_str = str(args.camera).strip()
         if cam_str.isdigit():
             camera = int(cam_str)
@@ -75,6 +93,11 @@ def main() -> int:
             camera = args.camera
         depth_size = _parse_depth_size(args.depth_size, (args.height, args.width))
         display_size = _parse_display_size(args.display_size, (args.width, args.height))
+        calibration = None
+        if args.calibration:
+            calibration = CameraModel.load_json(args.calibration)
+            if (calibration.width, calibration.height) != (args.width, args.height):
+                calibration = calibration.scaled_intrinsics(args.width, args.height)
 
         runtime = P123LiveRuntime(
             camera_device=camera,
@@ -86,8 +109,14 @@ def main() -> int:
             use_fp16=args.fp16,
             hand_backend=args.hand_backend,
             full_temporal=args.full_temporal,
+            calibration=calibration,
+            normal_every_n=args.normal_every_n,
+            metric_depth=args.metric_depth,
         )
+        if args.camera_backend != "auto":
+            runtime.camera_worker.backend = cv2.CAP_MSMF if args.camera_backend == "msmf" else cv2.CAP_DSHOW
         runtime.camera_worker.requested_fourcc = args.fourcc.upper()
+        runtime.camera_worker.requested_exposure = args.exposure
         runtime.start()
     except Exception as exc:  # noqa: BLE001
         print(f"P123 STARTUP FAILED: {type(exc).__name__}: {exc}")
@@ -103,15 +132,16 @@ def main() -> int:
     normal_backend = getattr(runtime, "_normal_backend", None)
     normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"
     print(f"  CUDA Devices:      depth={depth_device or 'unknown'} | normals={normal_device}")
-    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ")
+    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ  [7] Relight")
     print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
     print("============================================================")
 
-    mode = 1
+    mode = args.mode
     ui_state = {"mode": mode, "show_debug": False}
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics (Material 3)"
     frame_times: deque[float] = deque(maxlen=30)
+    display_interval = 1.0 / max(args.display_fps, 1.0)
     is_fullscreen = bool(args.fullscreen)
 
     try:
@@ -130,6 +160,7 @@ def main() -> int:
             cv2.setMouseCallback(window, on_mouse, ui_state)
 
         while args.duration is None or time.monotonic() - started < args.duration:
+            loop_started = time.monotonic()
             now = time.monotonic()
             frame_times.append(now)
             display_fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else None
@@ -150,7 +181,7 @@ def main() -> int:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):
                     break
-                if ord("1") <= key <= ord("6"):
+                if ord("1") <= key <= ord("7"):
                     ui_state["mode"] = key - ord("0")
                 elif key in (ord("d"), ord("D")):
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
@@ -160,6 +191,9 @@ def main() -> int:
                     cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, prop)
                     if not is_fullscreen:
                         cv2.resizeWindow(window, display_size[0], display_size[1])
+                remaining = display_interval - (time.monotonic() - loop_started)
+                if remaining > 0:
+                    time.sleep(remaining)
             else:
                 time.sleep(0.02)
     finally:

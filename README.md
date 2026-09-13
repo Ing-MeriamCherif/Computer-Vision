@@ -25,6 +25,27 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 python main.py --help
 ```
 
+On an RTX GPU, the P123 launcher defaults to FP16, an aspect-preserving
+`252x336` depth input, CUDA-resident depth handoff, and CUDA normals on every
+second depth frame. The equivalent Windows command is:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.p123_live_app --camera 0
+```
+
+Launch directly into the hand-held relight view with a latency-focused profile:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.p123_live_app --camera 0 --mode 7 --display-fps 30 --depth-size 168x224 --normal-every-n 2
+```
+
+Use `--depth-size 336x448 --normal-every-n 1` for maximum spatial/normal
+quality, or `--depth-size 210x280 --normal-every-n 3` when latency matters
+most. Generate checkerboard calibration with `tools.calibrate_camera` and load
+it with `--calibration camera.json`; calibrated frames are rectified before
+inference. `--metric-depth` selects the metric Depth Anything checkpoint, and
+`--exposure` plus `--camera-backend` expose camera cadence controls.
+
 ---
 
 ## Display Modes (keys 1–9)
@@ -94,8 +115,9 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 │ [4] Temporal │               CENTRAL VIEWPORT (Letterboxed / Aspect-Fit)    │
 │ [5] Hands    │                                                              │
 │ [6] XYZ      │                                                              │
+│ [7] Relight* │                                                              │
 │              │                                                              │
-│ [1-6] Mode   │                                                              │
+│ [1-7] Mode   │                                                              │
 │ [D] HUD      │                                                              │
 │ [F] Fullscr  │  Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue)│
 └──────────────┴──────────────────────────────────────────────────────────────┘
@@ -110,6 +132,7 @@ Organized under [`p123/views/`](p123/views):
 4. **Temporal Confidence** (`p123/views/temporal/`): Scale-invariant temporal stability consistency map.
 5. **Hand Tracking** (`p123/views/hands/`): Talel MediaPipe 21-point skeletal joints, palm tracking, confidence pills, and coasting state.
 6. **XYZ Contract** (`p123/views/xyz/`): Camera-space metric 3D coordinates (m), 3D coordinate legend card, and freshness pill.
+7. **Hand Relight** (`p123/views/relight/`): Cached low-resolution preview with a shared 3D light source and visible hand-held orb.
 
 ### Controls & Navigation
 

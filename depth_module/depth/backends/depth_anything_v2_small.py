@@ -25,15 +25,19 @@ class DepthAnythingV2Small:
     def __init__(
         self,
         device: str = "cuda",
-        input_size: int = 518,
+        input_size: int | tuple[int, int] = 518,
         fp16: bool = True,
         metric: bool = False,
     ):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
-        self.input_size = input_size
+        if isinstance(input_size, int):
+            input_size = (input_size, input_size)
+        self.input_size = (int(input_size[0]), int(input_size[1]))
         self.fp16 = fp16 and self.device.type == "cuda"
         self.metric = metric
         self._pipe = None
+        self.last_device_depth = None
+        self.last_device_valid_mask = None
 
         # Override scale_mode based on metric flag
         if metric:
@@ -49,12 +53,19 @@ class DepthAnythingV2Small:
             task="depth-estimation",
             model=model_id,
             device=0 if self.device.type == "cuda" else -1,
-            torch_dtype=torch.float16 if self.fp16 else torch.float32,
+            dtype=torch.float16 if self.fp16 else torch.float32,
         )
+        # The pipeline processor otherwise resizes every frame to its model
+        # default (518px), silently overriding the configured input_size.
+        if getattr(self._pipe, "image_processor", None) is not None:
+            self._pipe.image_processor.size = {
+                "height": self.input_size[0],
+                "width": self.input_size[1],
+            }
 
     def warmup(self, iterations: int = 3) -> None:
         self._load()
-        dummy = np.zeros((self.input_size, self.input_size, 3), dtype=np.uint8)
+        dummy = np.zeros((*self.input_size, 3), dtype=np.uint8)
         for _ in range(iterations):
             self.predict(dummy)
         if torch.cuda.is_available():
@@ -76,38 +87,35 @@ class DepthAnythingV2Small:
 
         h_orig, w_orig = frame.shape[:2]
 
-        # HuggingFace pipeline expects PIL RGB image; input frame is BGR.
+        # Preserve the camera aspect ratio. The configured dimensions should
+        # use the same ratio as the camera (for example 252x336 for 480x640).
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        resized = cv2.resize(
-            rgb,
-            (self.input_size, self.input_size),
-            interpolation=cv2.INTER_AREA,
-        )
+        resized = cv2.resize(rgb, (self.input_size[1], self.input_size[0]), interpolation=cv2.INTER_AREA)
         pil_img = self._to_pil(resized)
 
         with torch.inference_mode():
             result = self._pipe(pil_img)
-        depth_tensor = result["depth"]  # PIL Image
+            # `depth` is only an 8-bit visualization. Keep the accompanying
+            # floating-point tensor for geometry and accuracy.
+            predicted = result["predicted_depth"]
+            if predicted.ndim == 3:
+                predicted = predicted[0]
+            cpu_native_depth = predicted.float() if self.metric else predicted.float().clamp_min(1e-6).reciprocal()
+            native_depth = cpu_native_depth.to(self.device, non_blocking=True)
+            device_depth = torch.nn.functional.interpolate(
+                native_depth[None, None], size=(h_orig, w_orig), mode="bicubic", align_corners=False,
+            )[0, 0]
+            device_valid = torch.isfinite(device_depth) & (device_depth > 1e-6)
 
-        # Convert back to numpy
-        depth_np = np.array(depth_tensor).astype(np.float32)
-
-        # Resize to original resolution if pipeline changed it
+        self.last_device_depth = device_depth
+        self.last_device_valid_mask = device_valid
+        # Transfer the smaller native model result and let OpenCV perform the
+        # renderer-size resize. The full CUDA result remains resident for
+        # geometry, avoiding a large blocking device-to-host copy here.
+        depth_np = cpu_native_depth.detach().cpu().numpy().astype(np.float32, copy=False)
         if depth_np.shape != (h_orig, w_orig):
-            depth_np = cv2.resize(depth_np, (w_orig, h_orig), interpolation=cv2.INTER_LINEAR)
-
-        if not self.metric:
-            # Relative mode: normalize to [0, 1], invert so closer = 1.0 (bright)
-            d_min, d_max = depth_np.min(), depth_np.max()
-            if d_max - d_min > 1e-6:
-                depth_np = 1.0 - (depth_np - d_min) / (d_max - d_min)
-            else:
-                depth_np = np.zeros_like(depth_np)
-        # else: metric mode — keep raw meter values (no normalization)
-
-        # Valid mask: all pixels valid for monocular depth
-        valid_mask = np.ones((h_orig, w_orig), dtype=bool)
+            depth_np = cv2.resize(depth_np, (w_orig, h_orig), interpolation=cv2.INTER_CUBIC)
+        valid_mask = np.isfinite(depth_np) & (depth_np > 1e-6)
 
         return depth_np, valid_mask
 

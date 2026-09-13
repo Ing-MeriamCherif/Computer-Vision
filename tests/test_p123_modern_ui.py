@@ -95,7 +95,7 @@ def test_layout_computation_across_resolutions():
             assert 140 <= layout["sidebar_w"] <= 220
         assert layout["vw"] > 0
         assert layout["vh"] > 0
-        assert len(layout["buttons_rects"]) == 6
+        assert len(layout["buttons_rects"]) == 7
 
 
 def test_sidebar_hit_testing():
@@ -111,9 +111,9 @@ def test_sidebar_hit_testing():
     assert common.hit_test_navigation(50, 10, size) is None
 
 
-def test_all_six_views_render_valid_rgb_canvas():
+def test_all_seven_views_render_valid_rgb_canvas():
     snap = make_test_snapshot(has_frame=True, has_hands=True)
-    for mode in range(1, 7):
+    for mode in range(1, 8):
         canvas = views.render(snap, mode, (960, 600), display_fps=30.0)
         assert canvas is not None
         assert canvas.shape == (600, 960, 3)

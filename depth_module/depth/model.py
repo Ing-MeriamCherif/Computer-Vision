@@ -15,6 +15,8 @@ class DepthState:
     valid_mask: np.ndarray | None = None  # (H, W) bool, False = unreliable pixels
     backend_name: str = ""
     inference_ms: float = 0.0
+    device_depth: object | None = None
+    device_valid_mask: object | None = None
 
 
 class DepthModel:
@@ -29,7 +31,7 @@ class DepthModel:
         self,
         backend: str = "depth_anything_v2_small",
         device: str = "cuda",
-        input_size: int = 518,
+        input_size: int | tuple[int, int] = 518,
         fp16: bool = True,
         metric: bool = False,
     ):
@@ -63,4 +65,6 @@ class DepthModel:
             valid_mask=valid_mask,
             backend_name=self._backend_name,
             inference_ms=elapsed_ms,
+            device_depth=getattr(self._backend, "last_device_depth", None),
+            device_valid_mask=getattr(self._backend, "last_device_valid_mask", None),
         )

@@ -45,6 +45,7 @@ NAV_ITEMS: tuple[tuple[int, str, str], ...] = (
     (4, "Temporal Conf", "Frame Stability"),
     (5, "Hand Tracking", "Talel Landmarks"),
     (6, "XYZ Contract", "Metric 3D (m)"),
+    (7, "Hand Relight", "Live 3D Light"),
 )
 
 
@@ -402,7 +403,7 @@ def draw_sidebar(
     card_w = sidebar_w - (20 if is_fhd else 16)
     draw_rounded_rect(canvas, card_x, card_y, card_w, card_h, 8 if is_fhd else 6, fill_color=COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
     hint_font = 0.34 if is_fhd else 0.30
-    cv2.putText(canvas, "[1-6] Mode   [D] HUD", (card_x + 8, card_y + (18 if is_fhd else 15)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "[1-7] Mode   [D] HUD", (card_x + 8, card_y + (18 if is_fhd else 15)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
     cv2.putText(canvas, "[F] Fullscr  [Q] Exit", (card_x + 8, card_y + (36 if is_fhd else 29)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
 
 
@@ -564,6 +565,10 @@ def draw_viewport_hud(
     elif mode == 6:
         desc = "P123 XYZ Contract: Camera-relative metric coordinates (X right, Y down, Z forward in meters)"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
+    elif mode == 7:
+        count = len(snapshot.hand_state.hands) if (snapshot and snapshot.hand_state) else 0
+        desc = f"Hand-held 3D light: {count} tracked | screen-space ray shadows + volumetric scattering"
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 
 def draw_debug_overlay(
