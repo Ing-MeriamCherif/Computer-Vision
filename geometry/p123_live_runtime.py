@@ -330,7 +330,10 @@ class P123LiveRuntime:
         last_key: tuple[int | str | None, int | str | None] = (None, None)
         while self._running:
             with self._state_lock:
-                geometry, hands = self._geometry, self._hands
+                # Prefer the fast native CUDA geometry state. The full CPU
+                # temporal state is retained for the contract but is too old
+                # for interactive XYZ on this hardware.
+                geometry, hands = self._fast_geometry or self._geometry, self._hands
             if geometry is None or hands is None:
                 time.sleep(0.005)
                 continue

@@ -89,6 +89,8 @@ Depth-Anything V2 pipeline, or `--headless --duration 10` for a bounded
 physical-camera smoke measurement. Native normals use the CUDA geometry stream
 independently of the slower temporal CPU diagnostics; mode 4 uses a lightweight
 native temporal-consistency map at the same live cadence.
+XYZ mode samples the same fresh CUDA geometry state and reports “Waiting for a
+detected hand...” when MediaPipe has no hand in view.
 
 ---
 

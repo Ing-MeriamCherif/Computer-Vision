@@ -24,6 +24,8 @@ geometry remained 1.37 Hz. The live normals and mode-4 panels consume the
 independent fast stream; full temporal diagnostics remain available for the
 P4 contract without blocking them. The camera/display cadence is independent
 from all slower workers; each worker publishes only its newest completed state.
+XYZ now samples that same fast geometry stream instead of stale full-temporal
+geometry; it remains empty by design when no physical hand is detected.
 
 ============================================================
 SCOPE GUARD

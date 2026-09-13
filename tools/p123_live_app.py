@@ -91,6 +91,8 @@ def _panel(
     else:
         image = rgb.copy()
         title = "MODE 6 — XYZ CONTRACT"
+        if not snapshot.xyz:
+            cv2.putText(image, "Waiting for a detected hand...", (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 120), 1, cv2.LINE_AA)
         y = 30
         for hand in snapshot.xyz:
             text = f"H{hand.hand_id} UV=({hand.palm_uv[0]:.0f},{hand.palm_uv[1]:.0f}) XYZ={hand.xyz_camera} conf={hand.confidence:.2f} age={hand.age_ms:.0f}ms"
