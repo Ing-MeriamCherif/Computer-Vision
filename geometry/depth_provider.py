@@ -184,7 +184,17 @@ class DepthAnythingProvider:
             torch.cuda.synchronize(self.device)
 
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
-        state, _device_state = self.compute_device(rgb_frame, source_frame_id, timestamp)
+        state, device_state = self.compute_device(rgb_frame, source_frame_id, timestamp)
+        # Keep the post-processing tensors paired with the CPU snapshot.  The
+        # native live path can therefore send depth/validity/confidence from
+        # the provider's device directly into TorchGeometryBackend without a
+        # redundant GPU -> CPU -> GPU round-trip.
+        state.device_depth = device_state.depth
+        state.device_valid_mask = device_state.valid_mask
+        state.device_confidence = device_state.confidence
+        completed = time.monotonic()
+        device_state.completed_timestamp = completed
+        state.completed_timestamp = completed
         return state
 
     def compute_device(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> tuple[DepthState, DeviceDepthState]:

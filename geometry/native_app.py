@@ -20,7 +20,7 @@ import cv2
 import numpy as np
 
 from .async_pipeline import DepthWorker, LatestDepthBuffer, LatestFrameBuffer
-from .backproject import DepthScaleMode
+from .backproject import DepthScaleMode, backproject_depth
 from .camera import CameraModel
 from .camera_worker import CameraCaptureWorker, LatestFrameSlot
 from .cuda_backend import TorchGeometryBackend, torch_cuda_status
@@ -37,7 +37,7 @@ from .lighting import (
 )
 from .motion import OpenCVFlowProvider
 from .native_window import NativeOpenGLWindow
-from .normals import normals_to_rgb
+from .normals import estimate_normals, normals_to_rgb
 from .persistent import PersistentGeometryConfig, PersistentGeometryMapper, PersistentGeometryState, SurfelMap
 from .persistent_worker import PersistentMapWorker
 from .pose import CameraPoseState, PoseEstimator
@@ -100,6 +100,21 @@ PROFILE_CONFIGS: dict[QualityProfile, QualityProfileConfig] = {
         persistent_hz=8.0,
     ),
 }
+
+
+def choose_production_depth_size(width: int, height: int) -> tuple[int, int]:
+    """Return the fixed FP32 neural-depth shape for the capture aspect ratio.
+
+    Rendering quality profiles intentionally do not change this shape.  The
+    16:9 and 4:3 sizes are the production L1 contract and preserve the full
+    camera aspect ratio before the model's own preprocessing.
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("capture dimensions must be positive")
+    aspect = float(width) / float(height)
+    if aspect >= 1.5:
+        return (378, 672)  # 16:9 S22 / widescreen capture
+    return (336, 448)  # 4:3 webcam capture
 
 
 HAND_CONNECTIONS = (
@@ -324,6 +339,11 @@ class NativeLiveApp:
         self.pose_estimator: PoseEstimator | None = None
         self.geometry_backend: TorchGeometryBackend | None = None
         self.window: NativeOpenGLWindow | None = None
+        self.depth_provider: DepthAnythingProvider | ColleagueDepthProvider | None = None
+        self.production_depth_size: tuple[int, int] = choose_production_depth_size(camera_width, camera_height)
+        self._latest_geometry: GeometryState | None = None
+        self._geometry_source_frame_id: int | str | None = None
+        self._rectify_maps: tuple[np.ndarray, np.ndarray] | None = None
 
         # Camera model
         self.camera = CameraModel(
@@ -382,19 +402,22 @@ class NativeLiveApp:
         else:
             self.synthetic_camera = SyntheticCameraProvider(self.camera_width, self.camera_height, self.camera_fps)
 
+        self.production_depth_size = choose_production_depth_size(self.camera_width, self.camera_height)
+
         # 2. Start Depth Worker
         self.depth_frame_buffer = LatestFrameBuffer()
         self.depth_buffer = LatestDepthBuffer()
         depth_source = os.getenv("NRW_DEPTH_SOURCE", "local").lower()
         if depth_source == "colleague":
-            provider = ColleagueDepthProvider(device="auto", input_size=self.profile_config.depth_size[0], fp16=True)
+            provider = ColleagueDepthProvider(device="auto", input_size=self.production_depth_size[0], fp16=True)
         else:
             provider = DepthAnythingProvider(
                 model_path=self.depth_model_path,
                 device="auto",
-                use_fp16=True,
-                input_size=self.profile_config.depth_size,
+                use_fp16=False,
+                input_size=self.production_depth_size,
             )
+        self.depth_provider = provider
         self.depth_worker = DepthWorker(provider.compute, self.depth_frame_buffer, self.depth_buffer)
         self.depth_worker.start()
 
@@ -412,7 +435,14 @@ class NativeLiveApp:
         self.pose_estimator = PoseEstimator(self.camera, max_samples=400, reprojection_error=3.0)
 
         # 5. Initialize CUDA/CPU Geometry Backend
-        self.geometry_backend = TorchGeometryBackend(device="auto")
+        try:
+            self.geometry_backend = TorchGeometryBackend(device="auto")
+        except RuntimeError as exc:
+            # Keep the native camera/UI usable when optional Torch is absent;
+            # completed depth states can still be rendered by the NumPy
+            # emergency path and the HUD exposes the provider error.
+            self.geometry_backend = None
+            print(f"[WARNING] Torch geometry unavailable; using CPU emergency path: {exc}")
 
         # 6. Initialize Native OpenGL Window
         if not self.headless:
@@ -487,6 +517,97 @@ class NativeLiveApp:
             cx=float(self.camera_width) / 2.0,
             cy=float(self.camera_height) / 2.0,
         )
+        self._rectify_maps = None
+        self._latest_geometry = None
+        self._geometry_source_frame_id = None
+
+    def set_camera_calibration(self, camera: CameraModel) -> None:
+        """Install a calibrated camera and precompute one capture remap.
+
+        Rectification is performed once at the capture boundary.  When no
+        distortion coefficients are present the frame is left untouched.
+        """
+        if camera.width != self.camera_width or camera.height != self.camera_height:
+            camera = camera.scaled_intrinsics(self.camera_width, self.camera_height)
+        self.camera = camera
+        self._rectify_maps = None
+        self._latest_geometry = None
+        self._geometry_source_frame_id = None
+        if camera.calibrated and camera.distortion:
+            matrix = camera.camera_matrix
+            distortion = np.asarray(camera.distortion, dtype=np.float64)
+            self._rectify_maps = cv2.initUndistortRectifyMap(
+                matrix, distortion, None, matrix,
+                (camera.width, camera.height), cv2.CV_32FC1,
+            )
+
+    def _geometry_for_depth(
+        self,
+        depth_state: DepthState | None,
+        depth_full: np.ndarray,
+        valid_full: np.ndarray,
+        frame_id: int | str,
+        frame_ts: float,
+    ) -> GeometryState | None:
+        """Compute geometry exactly once for each completed depth source."""
+        if depth_state is None:
+            return self._latest_geometry
+        source_id = depth_state.source_frame_id
+        if self._latest_geometry is not None and source_id == self._geometry_source_frame_id:
+            return self._latest_geometry
+        depth_input: object = depth_full
+        valid_input: object = valid_full
+        confidence_input: object | None = depth_state.confidence
+        device_depth = getattr(depth_state, "device_depth", None)
+        device_valid = getattr(depth_state, "device_valid_mask", None)
+        device_confidence = getattr(depth_state, "device_confidence", None)
+        expected_shape = (self.camera.height, self.camera.width)
+        if self.geometry_backend is not None and getattr(device_depth, "shape", None) == expected_shape:
+            depth_input = device_depth
+            if getattr(device_valid, "shape", None) == expected_shape:
+                valid_input = device_valid
+            if getattr(device_confidence, "shape", None) == expected_shape:
+                confidence_input = device_confidence
+        if confidence_input is not None and getattr(confidence_input, "shape", None) != expected_shape:
+            confidence_input = cv2.resize(
+                np.asarray(confidence_input, dtype=np.float32),
+                (self.camera.width, self.camera.height),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        if self.geometry_backend is not None:
+            geometry = self.geometry_backend.process_depth(
+                depth_input,
+                self.camera,
+                valid_mask=valid_input,
+                input_confidence=confidence_input,
+                frame_id=source_id,
+                timestamp=depth_state.timestamp,
+            )
+        else:
+            positions, cpu_valid = backproject_depth(depth_full, self.camera, depth_state.scale_mode, valid_full)
+            cpu_normals = estimate_normals(
+                positions,
+                cpu_valid,
+                depth_full,
+                input_confidence=np.asarray(confidence_input, dtype=np.float32) if confidence_input is not None else None,
+            )
+            geometry = GeometryState(
+                depth_state.timestamp,
+                source_id,
+                depth_full,
+                positions,
+                cpu_valid,
+                self.camera,
+                depth_state.scale_mode,
+                normals=cpu_normals.normals,
+                confidence=cpu_normals.confidence,
+                normal_valid_mask=cpu_normals.normal_valid_mask,
+                normal_confidence=cpu_normals.confidence,
+                selected_radius=cpu_normals.selected_radius,
+            )
+        self._latest_geometry = geometry
+        self._geometry_source_frame_id = source_id
+        return geometry
 
     def step(self) -> np.ndarray | None:
         """Execute one complete live render step at native display cadence."""
@@ -534,12 +655,15 @@ class NativeLiveApp:
         else:
             return None
 
-        # 2. Submit frame to AI workers
-        # Depth neural net downsampled according to Quality Profile
-        target_h, target_w = self.profile_config.depth_size
-        small_frame = cv2.resize(frame_rgb, (target_w, target_h), interpolation=cv2.INTER_AREA)
+        # Rectify once, before any worker sees the capture.  This keeps depth,
+        # hands, and camera intrinsics in the same ideal-pinhole domain.
+        if self._rectify_maps is not None:
+            frame_rgb = cv2.remap(frame_rgb, self._rectify_maps[0], self._rectify_maps[1], cv2.INTER_LINEAR)
+
+        # 2. Submit the native capture frame.  The provider owns its
+        # aspect-preserving preprocessing and returns camera-domain depth.
         if self.depth_frame_buffer is not None:
-            self.depth_frame_buffer.put(small_frame, frame_id, frame_ts)
+            self.depth_frame_buffer.put(frame_rgb, frame_id, frame_ts)
 
         # Hand tracking worker consumes full RGB frame
         if self.hand_worker is not None:
@@ -553,18 +677,19 @@ class NativeLiveApp:
 
         # 3. Retrieve newest depth state (never blocks on inference)
         depth_state: DepthState | None = self.depth_buffer.get() if self.depth_buffer else None
-        depth_full: np.ndarray
-        valid_full: np.ndarray
+        depth_full: np.ndarray | None
+        valid_full: np.ndarray | None
 
         if depth_state is not None:
             if depth_state.depth.shape != (self.camera.height, self.camera.width):
+                source_valid = depth_state.valid_mask if depth_state.valid_mask is not None else np.isfinite(depth_state.depth)
                 depth_full = cv2.resize(
                     depth_state.depth,
                     (self.camera.width, self.camera.height),
                     interpolation=cv2.INTER_LINEAR,
                 )
                 valid_full = cv2.resize(
-                    depth_state.valid_mask.astype(np.uint8),
+                    source_valid.astype(np.uint8),
                     (self.camera.width, self.camera.height),
                     interpolation=cv2.INTER_NEAREST,
                 ) > 0
@@ -572,35 +697,21 @@ class NativeLiveApp:
                 depth_full = depth_state.depth
                 valid_full = depth_state.valid_mask if depth_state.valid_mask is not None else np.ones(depth_full.shape, bool)
             depth_age_frames = max(0, int(frame_id) - int(depth_state.source_frame_id)) if isinstance(depth_state.source_frame_id, int) else 0
-            depth_age_ms = (frame_ts - depth_state.timestamp) * 1000.0
+            completed_ts = depth_state.completed_timestamp
+            depth_age_ms = max(0.0, (now - completed_ts) * 1000.0) if completed_ts is not None else max(0.0, (frame_ts - depth_state.timestamp) * 1000.0)
         else:
-            # Cold-start fallback before first depth inference finishes
-            depth_full = np.full((self.camera.height, self.camera.width), 1.5, dtype=np.float32)
-            valid_full = np.ones(depth_full.shape, dtype=bool)
+            # No fabricated plane: until the first completed inference, keep
+            # the RGB stream live and report depth as warming up.
+            depth_full = None
+            valid_full = None
             depth_age_frames = 0
             depth_age_ms = 0.0
 
-        # 4. Compute full-resolution 3D points and surface normals (1-2 ms on CUDA)
-        geometry: GeometryState
-        if self.geometry_backend is not None:
-            geometry = self.geometry_backend.process_depth(
-                depth_full,
-                self.camera,
-                valid_mask=valid_full,
-                frame_id=frame_id,
-                timestamp=frame_ts,
-            )
-        else:
-            # Fallback
-            geometry = GeometryState(
-                frame_ts,
-                frame_id,
-                depth_full,
-                np.zeros((*depth_full.shape, 3), np.float32),
-                valid_full,
-                self.camera,
-                DepthScaleMode.RELATIVE,
-            )
+        # 4. Compute full-resolution points/normals only when a new depth
+        # source arrives; display frames reuse the cached geometry snapshot.
+        geometry = self._geometry_for_depth(
+            depth_state, depth_full, valid_full, frame_id, frame_ts
+        ) if depth_state is not None and depth_full is not None and valid_full is not None else self._latest_geometry
 
         # 5. Retrieve newest hand gesture state
         gesture_state = self.hand_worker.get_latest() if self.hand_worker else None
@@ -712,10 +823,10 @@ class NativeLiveApp:
         if self.current_mode == AppMode.FEED:
             rendered = frame_rgb.copy()
         elif self.current_mode == AppMode.DEPTH:
-            rendered = _heatmap(depth_full, valid_full)
-        elif self.current_mode == AppMode.NORMALS:
+            rendered = _heatmap(depth_full, valid_full) if depth_full is not None and valid_full is not None else frame_rgb.copy()
+        elif self.current_mode == AppMode.NORMALS and geometry is not None:
             rendered = normals_to_rgb(geometry.normals, geometry.valid_mask)
-        elif self.current_mode == AppMode.DIFFUSE:
+        elif self.current_mode == AppMode.DIFFUSE and geometry is not None:
             rendered, lighting_stats = shade_geometry(
                 frame_rgb,
                 geometry,
@@ -725,7 +836,7 @@ class NativeLiveApp:
                 shadows=False,
                 volumetrics=False,
             )
-        elif self.current_mode == AppMode.SPECULAR:
+        elif self.current_mode == AppMode.SPECULAR and geometry is not None:
             rendered, lighting_stats = shade_geometry(
                 frame_rgb,
                 geometry,
@@ -736,7 +847,7 @@ class NativeLiveApp:
                 shadows=False,
                 volumetrics=False,
             )
-        elif self.current_mode in (AppMode.SHADOWS, AppMode.GESTURE):
+        elif self.current_mode in (AppMode.SHADOWS, AppMode.GESTURE) and geometry is not None:
             rendered, lighting_stats = shade_geometry(
                 frame_rgb,
                 geometry,
@@ -747,7 +858,7 @@ class NativeLiveApp:
                 shadows=self.shadows_enabled,
                 volumetrics=False,
             )
-        elif self.current_mode == AppMode.MULTILIGHT:
+        elif self.current_mode == AppMode.MULTILIGHT and geometry is not None:
             rendered, lighting_stats = shade_geometry(
                 frame_rgb,
                 geometry,
@@ -760,12 +871,14 @@ class NativeLiveApp:
             )
         elif self.current_mode == AppMode.INFINITY:
             # Mode 9: Persistent Infinity Geometry
-            if self.previous_geometry is not None and self.pose_estimator is not None and self.persistent_worker is not None:
+            if geometry is None:
+                rendered = frame_rgb.copy()
+            elif self.previous_geometry is not None and self.pose_estimator is not None and self.persistent_worker is not None:
                 pose_res = self.pose_estimator.estimate_pose(self.previous_geometry, geometry)
                 if pose_res.valid:
                     self.persistent_worker.submit(geometry, pose_res, frame_id=frame_id, timestamp=frame_ts)
-            self.previous_geometry = geometry
-
+            if geometry is not None:
+                self.previous_geometry = geometry
             # Query persistent map snapshot
             p_snapshot = self.persistent_worker.get_latest_snapshot() if self.persistent_worker else None
             if p_snapshot is not None and p_snapshot.surfel_count > 50:
@@ -773,13 +886,16 @@ class NativeLiveApp:
                 p_conf = p_snapshot.projected_confidence
                 has_p = np.isfinite(p_depth) & (p_conf > 0.1)
                 rendered = frame_rgb.copy()
-                # Tint persistent reconstructed surfels green/cyan
                 rendered[has_p] = np.clip(
                     rendered[has_p].astype(np.float32) * 0.4 + np.array([30, 220, 150], dtype=np.float32) * 0.6,
                     0, 255,
                 ).astype(np.uint8)
-            else:
+            elif geometry is not None:
                 rendered = frame_rgb.copy()
+        else:
+            # Geometry-dependent modes remain a live RGB stream while the
+            # first depth result is still in flight.
+            rendered = frame_rgb.copy()
 
         # 8. Draw Hand Skeleton Overlay
         if self.show_skeleton and hands:
@@ -789,7 +905,7 @@ class NativeLiveApp:
 
         # Emitters are projected from the same camera-space states used above
         # for shading, shadows, and volumetrics.
-        if lights:
+        if lights and geometry is not None:
             rendered = render_light_orbs(
                 rendered,
                 self.camera,
@@ -861,6 +977,8 @@ class NativeLiveApp:
         drops = self.camera_worker.dropped_frames if self.camera_worker else 0
         depth_fps = 1000.0 / max(self.depth_worker.last_inference_ms, 1e-3) if self.depth_worker else 0.0
         depth_lat = self.depth_worker.last_inference_ms if self.depth_worker else 0.0
+        depth_backend = getattr(self.depth_provider, "backend_name", "pending") if self.depth_provider else "pending"
+        depth_error = self.depth_worker.last_error if self.depth_worker else None
         hand_fps = self.hand_worker.tracking_fps if self.hand_worker else 0.0
         hand_lat = self.hand_worker.last_latency_ms if self.hand_worker else 0.0
         surfel_count = self.persistent_worker.surfel_count if self.persistent_worker else 0
@@ -870,6 +988,8 @@ class NativeLiveApp:
             f"Render FPS : {self.render_fps:5.1f} ({self.render_latency_ms:4.1f} ms)",
             f"Camera FPS : {cam_fps:5.1f} | Drops: {drops}",
             f"Depth FPS  : {depth_fps:5.1f} ({depth_lat:4.1f} ms)",
+            f"Depth In   : {self.production_depth_size[1]}x{self.production_depth_size[0]} FP32",
+            f"Depth BE   : {depth_backend[:30]}",
             f"Depth Age  : {depth_age_frames} frames ({depth_age_ms:4.1f} ms)",
             f"Hands FPS  : {hand_fps:5.1f} ({hand_lat:4.1f} ms) | Count: {len(hands)}",
             f"Surfel Map : {surfel_count} surfels",
@@ -879,6 +999,8 @@ class NativeLiveApp:
         for line in lines:
             cv2.putText(canvas, line, (18, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (225, 230, 235), 1, cv2.LINE_AA)
             y_pos += 16
+        if depth_error:
+            cv2.putText(canvas, f"Depth error: {depth_error[:42]}", (18, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (80, 120, 255), 1, cv2.LINE_AA)
 
         # Active Lights Panel (Right)
         if lights:
