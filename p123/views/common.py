@@ -214,11 +214,9 @@ def hit_test_navigation(x: int, y: int, display_size: tuple[int, int]) -> int | 
 
 def draw_header(
     canvas: np.ndarray,
-    active_mode: int,
     snapshot: Any,
     layout: dict[str, Any],
     display_fps: float | None = None,
-    hardware_info: dict[str, Any] | None = None,
 ) -> None:
     """Draw sleek top live-status header with camera, display, depth, and hardware telemetry."""
     w = layout["w"]
@@ -603,7 +601,6 @@ def finish(
     display_size: tuple[int, int] | None = None,
     display_fps: float | None = None,
     show_debug: bool = False,
-    hardware_info: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Compose the modern Google Material 3 UI layout for the selected view."""
     # Determine target canvas size
@@ -702,7 +699,7 @@ def finish(
     draw_viewport_hud(canvas, vx, vy, vw, vh, title, mode, snapshot, waiting)
 
     # Draw Header & Sidebar
-    draw_header(canvas, mode, snapshot, layout, display_fps=display_fps, hardware_info=hardware_info)
+    draw_header(canvas, snapshot, layout, display_fps=display_fps)
     draw_sidebar(canvas, mode, layout)
 
     # Debug HUD Overlay if enabled
@@ -710,37 +707,3 @@ def finish(
         draw_debug_overlay(canvas, vx, vy, vw, vh, snapshot, display_fps=display_fps)
 
     return canvas
-
-
-# ============================================================================
-# Backward Compatibility Shims
-# ============================================================================
-
-def fit(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    """Resize image to exact (width, height)."""
-    return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
-
-
-def overlay(image: np.ndarray, title: str, lines: list[str]) -> np.ndarray:
-    """Legacy text overlay shim; retained for any callers."""
-    out = image.copy()
-    cv2.rectangle(out, (0, 0), (out.shape[1], 28 + 17 * len(lines)), (12, 14, 18), -1)
-    cv2.putText(out, title, (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (245, 245, 245), 1, cv2.LINE_AA)
-    for i, line in enumerate(lines):
-        cv2.putText(out, line, (10, 43 + i * 17), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (210, 220, 225), 1, cv2.LINE_AA)
-    return out
-
-
-def buttons(image: np.ndarray, active_mode: int) -> np.ndarray:
-    """Legacy bottom button bar shim; retained for any callers."""
-    out = image.copy()
-    labels = ("1 RGB", "2 DEPTH", "3 NORMALS", "4 TEMP", "5 HANDS", "6 XYZ")
-    h, w = out.shape[:2]
-    button_w = max(1, w // len(labels))
-    for idx, label in enumerate(labels, start=1):
-        x0 = (idx - 1) * button_w
-        x1 = w if idx == len(labels) else idx * button_w
-        color = (38, 105, 150) if idx == active_mode else (28, 32, 40)
-        cv2.rectangle(out, (x0, h - 32), (x1 - 2, h - 2), color, -1)
-        cv2.putText(out, label, (x0 + 8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (245, 245, 245), 1, cv2.LINE_AA)
-    return out

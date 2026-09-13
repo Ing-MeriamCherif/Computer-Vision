@@ -24,7 +24,6 @@ def render(
     display_size: tuple[int, int] | None = None,
     display_fps: float | None = None,
     show_debug: bool = False,
-    hardware_info: dict[str, Any] | None = None,
 ) -> np.ndarray:
     """Render exactly one latest snapshot through the selected view module."""
     view = _VIEWS.get(int(mode), rgb)
@@ -38,7 +37,6 @@ def render(
         display_size=display_size,
         display_fps=display_fps,
         show_debug=show_debug,
-        hardware_info=hardware_info,
     )
 
 
