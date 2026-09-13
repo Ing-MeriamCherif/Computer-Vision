@@ -53,6 +53,12 @@ class TorchGeometryBackend:
     def is_cuda(self) -> bool:
         return self.device.type == "cuda"
 
+    def reset_history(self) -> None:
+        """Clear temporal normal state after a camera/source discontinuity."""
+        self._previous_normals = None
+        self._previous_depth = None
+        self._previous_valid = None
+
     def _sync(self) -> None:
         if self.is_cuda:
             self.torch.cuda.synchronize(self.device)

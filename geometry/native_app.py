@@ -520,6 +520,8 @@ class NativeLiveApp:
         self._rectify_maps = None
         self._latest_geometry = None
         self._geometry_source_frame_id = None
+        if self.geometry_backend is not None:
+            self.geometry_backend.reset_history()
 
     def set_camera_calibration(self, camera: CameraModel) -> None:
         """Install a calibrated camera and precompute one capture remap.
@@ -533,6 +535,8 @@ class NativeLiveApp:
         self._rectify_maps = None
         self._latest_geometry = None
         self._geometry_source_frame_id = None
+        if self.geometry_backend is not None:
+            self.geometry_backend.reset_history()
         if camera.calibrated and camera.distortion:
             matrix = camera.camera_matrix
             distortion = np.asarray(camera.distortion, dtype=np.float64)
@@ -553,6 +557,14 @@ class NativeLiveApp:
         if depth_state is None:
             return self._latest_geometry
         source_id = depth_state.source_frame_id
+        previous_id = self._geometry_source_frame_id
+        if previous_id is not None and (
+            type(previous_id) is not type(source_id)
+            or (isinstance(previous_id, int) and isinstance(source_id, int) and source_id < previous_id)
+        ):
+            if self.geometry_backend is not None:
+                self.geometry_backend.reset_history()
+            self._latest_geometry = None
         if self._latest_geometry is not None and source_id == self._geometry_source_frame_id:
             return self._latest_geometry
         depth_input: object = depth_full
