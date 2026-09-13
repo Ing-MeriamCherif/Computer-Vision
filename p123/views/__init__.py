@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import cv2
+from typing import Any
+
 import numpy as np
 
 from . import common, depth, hands, normals, rgb, temporal, xyz
-
 
 _VIEWS = {
     1: rgb,
@@ -18,13 +18,28 @@ _VIEWS = {
 }
 
 
-def render(snapshot, mode: int, display_size: tuple[int, int] | None = None) -> np.ndarray | None:
+def render(
+    snapshot: Any,
+    mode: int,
+    display_size: tuple[int, int] | None = None,
+    display_fps: float | None = None,
+    show_debug: bool = False,
+    hardware_info: dict[str, Any] | None = None,
+) -> np.ndarray:
     """Render exactly one latest snapshot through the selected view module."""
     view = _VIEWS.get(int(mode), rgb)
     image, title, waiting = view.render(snapshot)
-    if image is None:
-        return None
-    return common.finish(image, title, waiting, snapshot, int(mode), display_size)
+    return common.finish(
+        image,
+        title,
+        waiting,
+        snapshot,
+        int(mode),
+        display_size=display_size,
+        display_fps=display_fps,
+        show_debug=show_debug,
+        hardware_info=hardware_info,
+    )
 
 
-__all__ = ["render"]
+__all__ = ["common", "render"]

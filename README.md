@@ -70,51 +70,55 @@ PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate hands --camer
 PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate xyz --camera /dev/video0
 ```
 
-## P1/P2/P3 Asynchronous Live Diagnostics
+## P1/P2/P3 Asynchronous Live Diagnostics (Google Material 3 UI)
 
-This diagnostic UI is the live P123 path. It uses a physical camera, separate
-latest-only depth/geometry/hand workers, and stops at `P4InputState`; it does
-not render lighting, shadows, volumetrics, or any other Person 4 output:
+The P123 diagnostic interface features a modern Google Material 3 design system:
+dark theme (`#101216` obsidian surface), anti-aliased rounded cards, clean typography
+hierarchy, responsive sidebar navigation, compact telemetry header, and polished
+connection/loading states:
 
 ```bash
 PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 ```
 
-Use keys `1`–`6` for RGB, depth, normals, temporal confidence, hands, and XYZ
-contract diagnostics; press `q` to exit. The P123 live path now uses Mariem's
-vendored CUDA Depth Anything module exclusively, with Talel's hand tracker and
-palm-size XYZ convention. FP32 is the default because it is faster than FP16
-on the GTX 1650 Ti. The default Mariem input is 336px (use `--depth-size 420`
-for higher spatial quality); use `--headless --duration 10` for a bounded
-physical-camera smoke measurement. The older local/colleague depth providers
-remain only for legacy non-P123 tools and are not selectable by this live app.
-Native normals use the CUDA geometry stream
-independently of the slower temporal CPU diagnostics; mode 4 uses a lightweight
-native temporal-consistency map at the same live cadence.
-XYZ mode samples the same fresh CUDA geometry state and reports “Waiting for a
-detected hand...” when MediaPipe has no hand in view. Native depth and XYZ are
-EMA-smoothed, and mode 6 displays the camera coordinate axes (+X right, +Y
-down, +Z forward) in the upper-left corner beside each hand annotation. Depth,
-normals, temporal confidence, hand positions, and XYZ all use the postprocessed
-live states rather than raw worker buffers.
+### Layout Architecture
 
-XYZ follows Talel's hand-branch back-projection convention: palm size provides
-a bounded metric Z estimate (0.2–3.0 m) for relative-depth runs, then the
-calibrated camera model computes `+X right, +Y down, +Z forward`. Metric depth
-maps are used directly only when explicitly supplied.
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [● P123]  M3 NORMALS      CAM 30 FPS  UI 30 FPS  DEPTH 14Hz  XYZ Fresh  CUDA│
+├──────────────┬──────────────────────────────────────────────────────────────┤
+│ VIEW MODES   │                                                              │
+│ [1] RGB Cam  │  [● LIVE]  MODE 3 — SURFACE NORMALS                          │
+│ [2] Depth    │                                                              │
+│ [3] Normals* │                                                              │
+│ [4] Temporal │               CENTRAL VIEWPORT (Letterboxed / Aspect-Fit)    │
+│ [5] Hands    │                                                              │
+│ [6] XYZ      │                                                              │
+│              │                                                              │
+│ [1-6] Mode   │                                                              │
+│ [D] HUD      │                                                              │
+│ [F] Fullscr  │  Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue)│
+└──────────────┴──────────────────────────────────────────────────────────────┘
+```
 
-For the GTX 1650 Ti, the measured physical-camera sweet spot is FP32 at
-`--depth-size 336x448` (rectangular HxW syntax). The default runtime keeps the
-slower full CPU temporal reference disabled; enable it explicitly with
-`--full-temporal`. The HUD shows CAM/DEPTH/NORMALS/TEMP/HANDS rates and XYZ
-fresh/degraded age. V4L2 format negotiation prefers advertised MJPG and uses a
-capacity-one capture buffer; override with `--fourcc MJPG` or `--fourcc YUYV`
-when required by a specific camera.
+### Dedicated View Modules
 
-The live display is organized by view module under [`p123/views/`](p123/views):
-`rgb`, `depth`, `normals`, `temporal`, `hands`, and `xyz`. Each view only
-formats the latest snapshot; capture and inference remain in the asynchronous
-runtime and the UI never performs model work.
+Organized under [`p123/views/`](p123/views):
+1. **RGB Camera** (`p123/views/rgb/`): Physical sensor feed (`/dev/video0`), live frame rate, and sensor metadata.
+2. **Depth Map** (`p123/views/depth/`): Mariem CUDA Depth Anything visualization (warm=near, cool=far) with scale bar.
+3. **Surface Normals** (`p123/views/normals/`): Multiscale surface normals (R=Nx, G=Ny, B=Nz) computed via CUDA backend.
+4. **Temporal Confidence** (`p123/views/temporal/`): Scale-invariant temporal stability consistency map.
+5. **Hand Tracking** (`p123/views/hands/`): Talel MediaPipe 21-point skeletal joints, palm tracking, confidence pills, and coasting state.
+6. **XYZ Contract** (`p123/views/xyz/`): Camera-space metric 3D coordinates (m), 3D coordinate legend card, and freshness pill.
+
+### Controls & Navigation
+
+- **Mouse Navigation**: Click any item in the left sidebar to instantly switch views.
+- **Keyboard Shortcuts**:
+  - `1`–`6`: Direct view selection (RGB, Depth, Normals, Temporal, Hands, XYZ)
+  - `D`: Toggle engine telemetry HUD overlay (capture, inference, and latency breakdown)
+  - `F`: Toggle borderless fullscreen
+  - `Q` or `ESC`: Clean shutdown
 
 ---
 

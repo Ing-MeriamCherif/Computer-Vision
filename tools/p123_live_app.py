@@ -1,14 +1,16 @@
-"""Thin launcher for the P123 physical-camera diagnostic views."""
+"""Launcher for the P123 physical-camera diagnostic app with Google Material 3 UI."""
 
 from __future__ import annotations
 
 import argparse
 import time
+from collections import deque
 
 import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
 from p123.views import render as _panel
+from p123.views.common import hit_test_navigation
 
 
 def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
@@ -26,8 +28,22 @@ def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
     return size, size
 
 
+def _parse_display_size(value: str, camera_size: tuple[int, int]) -> tuple[int, int]:
+    text = str(value).lower().strip()
+    if text == "native":
+        return camera_size
+    if text == "auto":
+        # Widescreen Material 3 canvas that accommodates sidebar and header comfortably
+        return max(960, camera_size[0] + 200), max(600, camera_size[1] + 60)
+    if "x" in text:
+        w_str, h_str = text.split("x", 1)
+        return int(w_str), int(h_str)
+    size = int(text)
+    return size, size
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app")
+    parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app (Material 3 UI)")
     parser.add_argument("--camera", default="/dev/video0")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
@@ -35,6 +51,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-backend", choices=["mariem"], default="mariem", help="Use Mariem's CUDA depth module (the sole P123 depth backend)")
     parser.add_argument("--fp16", action="store_true", help="Use FP16 depth inference (benchmark first; FP32 is faster on GTX 1650 Ti)")
     parser.add_argument("--depth-size", default="336", help="Mariem model input side in pixels (default: 336; use 420 for higher quality)")
+    parser.add_argument("--display-size", default="auto", help="UI display resolution, e.g. 960x600, 1024x640, native, or auto")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
@@ -46,57 +63,103 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
-        camera = int(args.camera) if str(args.camera).isdigit() else args.camera
+        cam_str = str(args.camera).strip()
+        if cam_str.isdigit():
+            camera = int(cam_str)
+        elif cam_str.startswith("/dev/video") and cam_str[10:].isdigit():
+            camera = int(cam_str[10:])
+        else:
+            camera = args.camera
         depth_size = _parse_depth_size(args.depth_size, (args.height, args.width))
-        runtime = P123LiveRuntime(camera_device=camera, width=args.width, height=args.height, fps=args.fps,
-                                  depth_size=depth_size, depth_backend=args.depth_backend, use_fp16=args.fp16,
-                                  hand_backend=args.hand_backend, full_temporal=args.full_temporal)
+        display_size = _parse_display_size(args.display_size, (args.width, args.height))
+
+        runtime = P123LiveRuntime(
+            camera_device=camera,
+            width=args.width,
+            height=args.height,
+            fps=args.fps,
+            depth_size=depth_size,
+            depth_backend=args.depth_backend,
+            use_fp16=args.fp16,
+            hand_backend=args.hand_backend,
+            full_temporal=args.full_temporal,
+        )
         runtime.camera_worker.requested_fourcc = args.fourcc.upper()
         runtime.start()
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         print(f"P123 STARTUP FAILED: {type(exc).__name__}: {exc}")
         return 1
-    print("P123 ASYNCHRONOUS LIVE RUNTIME")
-    print(f"physical camera={args.camera} resolution={args.width}x{args.height} requested_fps={args.fps}")
-    print(f"depth backend={args.depth_backend} input={args.depth_size} precision={'fp16' if args.fp16 else 'fp32'}")
+
+    print("============================================================")
+    print("  NRW P123 LIVE DIAGNOSTICS — MATERIAL 3 INTERFACE")
+    print("============================================================")
+    print(f"  Physical Camera:   {args.camera} ({args.width}x{args.height} @ {args.fps} FPS)")
+    print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
+    print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
     depth_device = getattr(runtime.depth_provider, "device", None)
     normal_backend = getattr(runtime, "_normal_backend", None)
     normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"
-    print(f"cuda depth={depth_device or 'unknown'} normals={normal_device}")
-    print("keys: 1 RGB  2 depth  3 normals  4 temporal/confidence  5 hands  6 XYZ  q quit")
+    print(f"  CUDA Devices:      depth={depth_device or 'unknown'} | normals={normal_device}")
+    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ")
+    print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
+    print("============================================================")
+
     mode = 1
-    ui_state = {"mode": mode}
+    ui_state = {"mode": mode, "show_debug": False}
     started = time.monotonic()
-    window = "NRW P123 Live Diagnostics"
+    window = "NRW P123 Live Diagnostics (Material 3)"
+    frame_times: deque[float] = deque(maxlen=30)
+    is_fullscreen = False
+
     try:
         if not args.headless:
-            cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
+            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(window, display_size[0], display_size[1])
 
-            def on_mouse(event, x, y, _flags, state):
-                if event == cv2.EVENT_LBUTTONUP and y >= max(0, args.height - 42) and 0 <= x < args.width:
-                    state["mode"] = min(6, max(1, int(x / max(args.width / 6.0, 1.0)) + 1))
+            def on_mouse(event: int, x: int, y: int, _flags: int, state: dict) -> None:
+                if event == cv2.EVENT_LBUTTONUP:
+                    hit = hit_test_navigation(x, y, display_size)
+                    if hit is not None:
+                        state["mode"] = hit
 
             cv2.setMouseCallback(window, on_mouse, ui_state)
+
         while args.duration is None or time.monotonic() - started < args.duration:
+            now = time.monotonic()
+            frame_times.append(now)
+            display_fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else None
+
             snapshot = runtime.snapshot()
             if not args.headless:
                 mode = int(ui_state["mode"])
-                view = _panel(snapshot, mode, (args.width, args.height))
+                view = _panel(
+                    snapshot,
+                    mode,
+                    display_size,
+                    display_fps=display_fps,
+                    show_debug=ui_state.get("show_debug", False),
+                )
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
-                key = cv2.waitKey(10) & 0xFF
-                if key == ord("q") or key == 27:
+
+                key = cv2.waitKey(1) & 0xFF
+                if key in (ord("q"), ord("Q"), 27):
                     break
                 if ord("1") <= key <= ord("6"):
-                    mode = key - ord("0")
-                    ui_state["mode"] = mode
+                    ui_state["mode"] = key - ord("0")
+                elif key in (ord("d"), ord("D")):
+                    ui_state["show_debug"] = not ui_state.get("show_debug", False)
+                elif key in (ord("f"), ord("F")):
+                    is_fullscreen = not is_fullscreen
+                    prop = cv2.WINDOW_FULLSCREEN if is_fullscreen else cv2.WINDOW_NORMAL
+                    cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, prop)
             else:
                 time.sleep(0.02)
     finally:
         final = runtime.snapshot()
         runtime.stop()
         cv2.destroyAllWindows()
-        print(f"frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
+        print(f"Session summary: frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
     return 0
 
 
