@@ -53,13 +53,15 @@ def main():
     parser.add_argument("--camera-index", type=int, default=0)
     parser.add_argument("--input-size", type=int, default=DEPTH_CONFIG.input_size)
     parser.add_argument("--device", default=DEPTH_CONFIG.device)
+    parser.add_argument("--fp16", action="store_true", default=DEPTH_CONFIG.fp16)
+    parser.add_argument("--no-fp16", dest="fp16", action="store_false")
     parser.add_argument("--metric", action="store_true", default=DEPTH_CONFIG.metric,
                         help="Use metric model (depth in meters)")
     args = parser.parse_args()
 
     cap = open_camera(args.camera_index)
     model = DepthModel(backend=DEPTH_CONFIG.backend, device=args.device,
-                       input_size=args.input_size, fp16=DEPTH_CONFIG.fp16,
+                       input_size=args.input_size, fp16=args.fp16,
                        metric=args.metric)
     print("Loading model...", end=" ", flush=True)
     model.warmup(iterations=3)

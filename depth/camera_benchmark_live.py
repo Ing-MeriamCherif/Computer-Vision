@@ -65,7 +65,10 @@ def run_resolution(
 
     latencies = []
     ema_ms = None
-    paused = False
+
+    # Force CUDA to settle before timing
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
 
     for i in range(num_frames):
         ok, frame = cap.read()
@@ -73,8 +76,12 @@ def run_resolution(
             print("Camera stopped.")
             break
 
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
         state = model.infer(frame)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         ms = (time.perf_counter() - t0) * 1000.0
         ema_ms = ms if ema_ms is None else 0.9 * ema_ms + 0.1 * ms
         latencies.append(ms)
