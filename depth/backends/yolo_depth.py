@@ -33,6 +33,7 @@ class YOLO26Depth:
         device: str = "cuda",
         input_size: int = 640,
         fp16: bool = True,
+        metric: bool = False,
     ):
         self.device = device if torch.cuda.is_available() else "cpu"
         self.input_size = input_size
@@ -69,18 +70,25 @@ class YOLO26Depth:
         h_orig, w_orig = frame.shape[:2]
 
         # YOLO expects RGB BGR is fine — predict handles conversion
+        # YOLO imgsz must be multiple of 32
+        imgsz = ((self.input_size + 31) // 32) * 32
+
         results = self._model.predict(
             source=frame,
-            imgsz=self.input_size,
+            imgsz=imgsz,
             verbose=False,
         )
 
-        # result.depth is (H, W) float32 tensor in meters
-        depth_tensor = results[0].depth
-        if depth_tensor is None:
+        # result.depth is a DepthMap object — extract the tensor
+        depth_obj = results[0].depth
+        if depth_obj is None:
             depth_np = np.zeros((h_orig, w_orig), dtype=np.float32)
         else:
-            depth_np = depth_tensor.cpu().numpy().astype(np.float32)
+            # DepthMap has .data attribute with the underlying tensor
+            depth_tensor = depth_obj.data
+            if hasattr(depth_tensor, 'cpu'):
+                depth_tensor = depth_tensor.cpu()
+            depth_np = np.array(depth_tensor).astype(np.float32)
 
         # Resize to original resolution if needed
         if depth_np.shape != (h_orig, w_orig):

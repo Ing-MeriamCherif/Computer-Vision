@@ -51,6 +51,7 @@ def open_camera(index: int, width: int = 640, height: int = 480):
 def main():
     parser = argparse.ArgumentParser(description="Live async depth")
     parser.add_argument("--camera-index", type=int, default=0)
+    parser.add_argument("--backend", default=DEPTH_CONFIG.backend)
     parser.add_argument("--input-size", type=int, default=DEPTH_CONFIG.input_size)
     parser.add_argument("--device", default=DEPTH_CONFIG.device)
     parser.add_argument("--fp16", action="store_true", default=DEPTH_CONFIG.fp16)
@@ -60,7 +61,7 @@ def main():
     args = parser.parse_args()
 
     cap = open_camera(args.camera_index)
-    model = DepthModel(backend=DEPTH_CONFIG.backend, device=args.device,
+    model = DepthModel(backend=args.backend, device=args.device,
                        input_size=args.input_size, fp16=args.fp16,
                        metric=args.metric)
     print("Loading model...", end=" ", flush=True)
@@ -114,8 +115,9 @@ def main():
             frame_count += 1
 
             depth = state.depth_map
-            # For display: metric needs normalization, relative is already 0-1
-            if args.metric:
+            # Normalize for display: metric (meters) needs normalization,
+            # relative is already 0-1.
+            if state.scale_mode == "metric":
                 d_min, d_max = depth.min(), depth.max()
                 if d_max - d_min > 1e-6:
                     depth_norm = (depth - d_min) / (d_max - d_min)
@@ -139,7 +141,7 @@ def main():
                 val = depth[sy, sx]
                 cv2.line(view, (cam_w, mouse_y), (view.shape[1], mouse_y), (0, 255, 255), 1)
                 cv2.line(view, (mouse_x, 0), (mouse_x, view.shape[0]), (0, 255, 255), 1)
-                unit = "m" if args.metric else ""
+                unit = "m" if state.scale_mode == "metric" else ""
                 label = f"({sx},{sy}) {val:.4f}{unit}"
                 lx = mouse_x + 10 if mouse_x + 120 < view.shape[1] else mouse_x - 120
                 ly = mouse_y - 10 if mouse_y > 30 else mouse_y + 20
@@ -147,7 +149,7 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2)
 
             # Stats overlay
-            mode = "METRIC" if args.metric else "RELATIVE"
+            mode = state.scale_mode.upper()
             w_stats = worker.stats_dict()
             line1 = f"{mode} {args.input_size}x{args.input_size}  {ema_ms:.1f}ms  {ema_fps:.1f}FPS"
             line2 = f"depth_age={age_ms:.0f}ms  processed={w_stats['processed']}  worker={'alive' if w_stats['alive'] else 'DEAD'}"
