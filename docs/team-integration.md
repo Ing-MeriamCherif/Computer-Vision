@@ -24,7 +24,7 @@ while making both interoperable with the shared geometry stack.
 | 2 | `geometry/normals.py`, `geometry/cuda_backend.py` | ✅ Frozen |
 | 3 | `geometry/motion.py`, `geometry/temporal.py` | ✅ Frozen |
 | 4 | `geometry/async_pipeline.py`, `geometry/pose.py`, `geometry/lighting.py`, `geometry/hand_control.py` | ✅ Frozen |
-| 5 | `geometry/persistent.py`, `geometry/camera_worker.py`, `geometry/native_window.py`, `geometry/native_app.py`, `geometry/persistent_worker.py` | ✅ Production-hardened |
+| 5 | `geometry/persistent.py`, `geometry/camera_worker.py`, `geometry/persistent_worker.py` | ✅ Shared geometry services |
 
 ### Mariem's Depth Pipeline (Colleague PR #2)
 
@@ -66,7 +66,7 @@ Both providers produce:
    - `compute(rgb: np.ndarray, frame_id: int, timestamp: float) -> DepthState`
    - `last_diagnostics: dict[str, Any]`
 3. **Add provider selection** to `geometry/depth_provider.py` or equivalent
-4. **Write tests** in `tests/` following `test_native_live_integration.py` patterns
+4. **Write tests** in `tests/` following the P123 contract test patterns
 5. **Open a PR** to `main`; CI (smoke test) must pass
 
 ---
@@ -126,7 +126,7 @@ python main.py
 python -m pytest
 
 # Live camera acceptance (30-second soak)
-python -m tools.live_camera_acceptance --duration 30
+python -m tools.p123_live_app --headless --duration 30
 ```
 
 ---
@@ -135,7 +135,6 @@ python -m tools.live_camera_acceptance --duration 30
 
 | File | Coverage |
 |------|---------|
-| `tests/test_native_live_integration.py` | LatestFrameSlot, workers, lighting, pose, persistent, quality profiles, full app smoke |
 | `tests/test_phase5_persistent.py` | SurfelMap, PersistentGeometryMapper, AdvancedGeometryEngine |
 | `tests/test_phase4_contracts.py` | LightState, hand-depth fusion contracts |
 | `tests/test_phase4_hardening.py` | Static confidence, coordinate domains |

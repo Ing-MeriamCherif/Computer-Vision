@@ -724,7 +724,7 @@ class GPURelightRenderer:
         *,
         ambient: float = 0.40,
     ) -> tuple[int, dict[str, float | str]]:
-        """Render without CPU readback for a NativeOpenGLWindow sharing this context."""
+        """Render without CPU readback for the P123 shared OpenGL context."""
         self.render(rgb, geometry, lights, ambient=ambient, readback=False)
         return self.output_texture, dict(self.last_stats)
 

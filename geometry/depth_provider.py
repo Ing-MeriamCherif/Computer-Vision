@@ -186,7 +186,7 @@ class DepthAnythingProvider:
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
         state, device_state = self.compute_device(rgb_frame, source_frame_id, timestamp)
         # Keep the post-processing tensors paired with the CPU snapshot.  The
-        # native live path can therefore send depth/validity/confidence from
+        # P123 live path can therefore send depth/validity/confidence from
         # the provider's device directly into TorchGeometryBackend without a
         # redundant GPU -> CPU -> GPU round-trip.
         state.device_depth = device_state.depth

@@ -22,7 +22,7 @@
   - [`models/hand_landmarker.task`](file:///home/rami/Computer-Vision-NRW/models/hand_landmarker.task) (MediaPipe Tasks model asset)
 - **Tests**:
   - [`tests/test_hand_lighting.py`](file:///home/rami/Computer-Vision-NRW/tests/test_hand_lighting.py)
-  - Hand tests in [`tests/test_p123_remediation.py`](file:///home/rami/Computer-Vision-NRW/tests/test_p123_remediation.py) and [`tests/test_native_live_integration.py`](file:///home/rami/Computer-Vision-NRW/tests/test_native_live_integration.py)
+  - Hand tests in [`tests/test_p123_remediation.py`](file:///home/rami/Computer-Vision-NRW/tests/test_p123_remediation.py)
 
 ---
 
@@ -39,7 +39,7 @@
   - [`integrations/colleague_depth/`](file:///home/rami/Computer-Vision-NRW/integrations/colleague_depth) (Preserved upstream package from `feature/depth` / Meriam)
   - [`models/depth-anything-v2-small/`](file:///home/rami/Computer-Vision-NRW/models/depth-anything-v2-small) (Local model weights & config)
 - **Tests**:
-  - Depth provider tests in [`tests/test_p123_remediation.py`](file:///home/rami/Computer-Vision-NRW/tests/test_p123_remediation.py) and [`tests/test_native_live_integration.py`](file:///home/rami/Computer-Vision-NRW/tests/test_native_live_integration.py)
+  - Depth provider tests in [`tests/test_p123_remediation.py`](file:///home/rami/Computer-Vision-NRW/tests/test_p123_remediation.py)
 
 ---
 
@@ -91,7 +91,7 @@
 - **Status**: **BLACK BOX — DO NOT MODIFY IMPLEMENTATION**. Protected under the strict project scope guard.
 - **Tests**:
   - [`tests/test_phase4_contracts.py`](file:///home/rami/Computer-Vision-NRW/tests/test_phase4_contracts.py)
-  - Shading unit tests in [`tests/test_native_live_integration.py`](file:///home/rami/Computer-Vision-NRW/tests/test_native_live_integration.py)
+  - Shading unit tests in [`tests/test_gpu_lighting.py`](file:///home/rami/Computer-Vision-NRW/tests/test_gpu_lighting.py)
 
 ---
 
@@ -107,13 +107,11 @@
   - [`geometry/p123_contract.py`](file:///home/rami/Computer-Vision-NRW/geometry/p123_contract.py) (`HandXYZ`, `P4InputState`)
   - [`geometry/camera_worker.py`](file:///home/rami/Computer-Vision-NRW/geometry/camera_worker.py) (`CameraCaptureWorker`, `LatestFrameSlot`)
   - [`geometry/async_pipeline.py`](file:///home/rami/Computer-Vision-NRW/geometry/async_pipeline.py) (`DepthWorker`, `LatestFrameBuffer`, `LatestDepthBuffer`)
-  - [`geometry/native_app.py`](file:///home/rami/Computer-Vision-NRW/geometry/native_app.py) (`NativeLiveApp`, `AppMode`, `QualityProfile`)
-  - [`geometry/native_window.py`](file:///home/rami/Computer-Vision-NRW/geometry/native_window.py) (`NativeOpenGLWindow`)
   - [`geometry/p123_live_runtime.py`](file:///home/rami/Computer-Vision-NRW/geometry/p123_live_runtime.py) (`P123LiveRuntime`)
   - [`geometry/visualization.py`](file:///home/rami/Computer-Vision-NRW/geometry/visualization.py) (Diagnostic color mappers)
   - [`geometry/validation.py`](file:///home/rami/Computer-Vision-NRW/geometry/validation.py) (`validate_renderer_geometry`)
   - [`tools/physical_camera_gate.py`](file:///home/rami/Computer-Vision-NRW/tools/physical_camera_gate.py) (Hardware gate tool)
-  - [`tools/p123_live_app.py`](file:///home/rami/Computer-Vision-NRW/tools/p123_live_app.py) (Diagnostic viewer)
+  - [`tools/p123_live_app.py`](file:///home/rami/Computer-Vision-NRW/tools/p123_live_app.py) (single live UI)
   - [`main.py`](file:///home/rami/Computer-Vision-NRW/main.py) (Application launcher)
 - **Tests**:
   - [`tests/test_p123_remediation.py`](file:///home/rami/Computer-Vision-NRW/tests/test_p123_remediation.py)
@@ -122,5 +120,3 @@
 ---
 
 ## Uncertain / Legacy Files
-- [`tools/webcam_geometry_app.py`](file:///home/rami/Computer-Vision-NRW/tools/webcam_geometry_app.py): Legacy OpenCV 4-panel viewer. Replaced by `native_live_app.py` for competition and `p123_live_app.py` for diagnostics. Retained for backward reference.
-- [`tools/webcam_e2e.py`](file:///home/rami/Computer-Vision-NRW/tools/webcam_e2e.py): Legacy snapshot test relying on `webcam_geometry_app.py`.

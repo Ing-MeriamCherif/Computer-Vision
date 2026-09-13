@@ -52,9 +52,9 @@ GPU-rendered.
 The P123 Material UI currently consumes NumPy frames, so Mode 7 reads the
 final RGBA8 framebuffer back to CPU RGB before the existing OpenCV compositor.
 The renderer also exposes `render_to_texture()` for a native-window path that
-avoids this copy. Create `NativeOpenGLWindow` first, pass its GLFW window as
+avoids this copy. Create the P123 relight context first and pass its shared
 `share_window` to `GPURelightRenderer`, then pass the returned texture ID to
-`NativeOpenGLWindow.render_texture()`. The shared GL context owns the texture;
+render target. The shared GL context owns the texture;
 close the renderer and window during shutdown.
 
 The renderer is screen-space/camera-space ray marched, not hardware ray

@@ -9,14 +9,11 @@ A **native, live, low-latency, camera-first, GPU-first** computer-vision system 
 ## Quick Start
 
 ```bash
-# Headless smoke test (CI — no camera or display required)
-python main.py --smoke
-
-# Full native live application (default: multilight mode)
+# Single live Material 3 interface
 python main.py
 
-# Specify camera device, quality, fullscreen
-python main.py --camera 0 --quality high --fullscreen
+# Start hand relighting (Mode 7)
+python main.py --camera /dev/video2 --mode 7 --lighting-quality balanced
 
 # P123 live diagnostics (depth + hand XYZ)
 PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
@@ -25,7 +22,7 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 python main.py --help
 ```
 
-The P123 live path defaults to local Depth Anything V2 at `336x448` FP32 with
+The single P123 live path defaults to local Depth Anything V2 at `336x448` FP32 with
 latest-only depth handoff and CUDA normals. Mode 7 uses an OpenGL 3.3
 screen-space/camera-space renderer when available and an explicit CPU reference
 fallback otherwise. It is not hardware RTX ray tracing or full path tracing.
@@ -46,36 +43,21 @@ be selected with `--lighting-quality low|balanced|high`.
 
 ---
 
-## Native App Display Modes (keys 1–9)
+## P123 Display Modes (keys 1–7)
 
 | Key | Mode | Description |
 |-----|------|-------------|
-| `1` | FEED | Raw camera RGB |
-| `2` | DEPTH | Depth map (inferno colormap) |
-| `3` | NORMALS | Surface normals (RGB-encoded) |
-| `4` | DIFFUSE | Lambertian diffuse shading |
-| `5` | SPECULAR | Specular highlight shading |
-| `6` | SHADOWS | Ray-marched soft shadow shading |
-| `7` | GESTURE | Hand skeleton overlay |
-| `8` | MULTILIGHT | Hand-driven dual lighting (default) |
-| `9` | INFINITY | Persistent 3D surfel map overlay |
+| `1` | RGB | Raw camera RGB |
+| `2` | DEPTH | Mariem CUDA depth map |
+| `3` | NORMALS | CUDA surface normals |
+| `4` | TEMPORAL | Temporal confidence |
+| `5` | HANDS | Talel hand tracking |
+| `6` | XYZ | Camera-space hand coordinates |
+| `7` | RELIGHT | Hand-controlled GPU relighting |
 
-The P123 live diagnostics tool has its own navigation: in that app, `7` is
-Hand Relight (Mode 7), not the native app's gesture view.
-
-**Keyboard controls**: `F` fullscreen · `D` HUD · `P` profile · `V` volumetrics · `S` shadows · `H` skeleton · `R` reset map · `Q/ESC` quit
+**Keyboard controls**: `1–7` views · `F` fullscreen · `D` HUD · `Q/ESC` quit
 
 ---
-
-## Live Camera Acceptance Test
-
-```bash
-# 30-second soak with JSON report
-python -m tools.live_camera_acceptance --duration 30 --json-report report.json
-
-# Strict 5-minute soak
-python -m tools.live_camera_acceptance --soak --duration 300 --min-render-fps 28
-```
 
 ## P1/P2/P3 Physical Gates
 
@@ -151,7 +133,7 @@ Organized under [`p123/views/`](p123/views):
 ```bash
 python -m pytest                     # all 190+ tests
 python -m pytest -q --tb=short       # compact output
-python -m pytest tests/test_native_live_integration.py  # integration tests only
+python -m pytest tests/test_p123_modern_ui.py  # P123 UI integration tests
 ```
 
 ---
@@ -176,11 +158,11 @@ The `geometry/` package implements the complete calibrated geometry pipeline:
 ## Architecture
 
 ```
-Physical Camera ─→ LatestFrameSlot (cap=1) ─┬─→ DepthWorker (CUDA) ─→ GeometryState
-                                             ├─→ HandTrackingWorker  ─→ GestureState ─→ LightState
-                                             └─→ NativeOpenGLWindow  ←─ shade_geometry()
+Physical Camera ─→ LatestFrameSlot (cap=1) ─┬─→ Depth/Geometry workers ─→ P123Snapshot
+                                             ├─→ HandTrackingWorker ─→ HandXYZ
+                                             └─→ P123 Material 3 OpenCV UI
                                                         ↑
-                                              PersistentMapWorker (async, 2-10 Hz)
+                                              Mode 7 GPU relight renderer
 ```
 
 See [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) for the full thread model.
@@ -191,7 +173,7 @@ See [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) for
 
 This repository integrates work from two team members:
 
-- **Rami Troudi** — geometry stack (Phases 1–5), native live app, persistent mapping
+- **Rami Troudi** — geometry stack (Phases 1–5), P123 live app, persistent mapping
 - **Mariem Cherif** — colleague depth provider ([PR #2](https://github.com/Ing-MeriamCherif/Computer-Vision/pull/2))
 
 See [`docs/team-integration.md`](docs/team-integration.md) for integration contracts and contribution guide.

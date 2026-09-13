@@ -1,14 +1,12 @@
 """Challenge entry point.
 
-``python main.py`` launches the native live camera-first competition application.
-``python main.py --smoke`` runs a deterministic headless smoke test for CI.
+``python main.py`` launches the single P123 Material 3 live interface.
 
-All standard CLI arguments are forwarded to ``tools.native_live_app``.
+All standard CLI arguments are forwarded to ``tools.p123_live_app``.
 
 Quick start:
-    python main.py                            # launch full native live app
-    python main.py --smoke                    # headless 10-frame smoke test
-    python main.py --camera 0 --quality high --fullscreen
+    python main.py                            # launch the P123 Material 3 UI
+    python main.py --camera 0 --mode 7 --lighting-quality high
     python main.py --depth-backend colleague  # use colleague depth model
     python main.py --help                     # all options
 """
@@ -19,8 +17,8 @@ import sys
 
 
 def main() -> int:
-    from tools.native_live_app import main as _native_main
-    return _native_main()
+    from tools.p123_live_app import main as _p123_main
+    return _p123_main()
 
 
 if __name__ == "__main__":
