@@ -1,5 +1,37 @@
 # P123 QUALITY/PERFORMANCE CONSOLIDATION
 
+> **LATEST RAMI INTEGRATION STATE — 2026-09-13**
+>
+> Branch: `rami` (integration branch), starting from `eb2cfb0`.
+> The production default is the preserved local Depth Anything provider at
+> **336×448 FP32**; `--depth-backend colleague` and `--depth-backend mariem`
+> remain selectable alternatives, and `--depth-size native` is explicit.
+> The local provider now returns a CPU-compatible `DepthState` plus a private
+> device-resident state for CUDA normals, preserving frame IDs and latest-only
+> pairing. Display depth bounds use an EMA of robust 2–98% bounds; this is
+> visualization-only and never changes geometry. XYZ reports capture/source age
+> separately from worker completion age.
+>
+> Fresh physical run after this pass (`/dev/video0`, 640×480 MJPG, GTX 1650 Ti,
+> CUDA, local 336×448 FP32, 18 s): capture **30.65 Hz**, depth **17.17 Hz**,
+> CUDA normals **17.07 Hz**, hands **27.66 Hz**, XYZ **25.00 Hz**, with no
+> depth errors or overwritten frames. The GUI was inspected live in the depth
+> panel and rendered native-resolution structure continuously. Focused P123,
+> CUDA, normal, camera, state, and temporal tests: **77 passed**.
+
+### Exact-quality TensorRT acceleration
+
+The accepted production resolution remains **336×448 FP32** with the original
+Hugging Face image preprocessing and native 640×480 bicubic depth output. A
+fixed-shape TensorRT FP32 engine is selected automatically when present and
+falls back safely to PyTorch otherwise. Direct output validation measured
+correlation `1.0` and relative mean error `1.07e-7` against PyTorch. On the
+physical webcam, depth improved from about 15.9 Hz to **19.8–20.0 Hz** without
+reduced resolution, approximate preprocessing, learned upscaling, or synthetic
+frame interpolation. The rejected 280×392 experiment is not part of the code.
+
+The sections below are retained as historical run records.
+
 Base SHA: `85cae0e6deae1da8eff252907631de805392a531`
 
 Final SHA (code): `70f9ede`

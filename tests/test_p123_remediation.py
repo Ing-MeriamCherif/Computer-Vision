@@ -171,15 +171,13 @@ def test_depth_size_parser_accepts_rectangular_inputs():
     assert _parse_depth_size("native", (480, 640)) == (480, 640)
 
 
-def test_p123_live_cli_exposes_mariem_only(monkeypatch):
+def test_p123_live_cli_defaults_to_local_production(monkeypatch):
     from tools import p123_live_app
 
     monkeypatch.setattr("sys.argv", ["p123_live_app"])
     args = p123_live_app.parse_args()
-    assert args.depth_backend == "mariem"
-    assert args.depth_size == "252x336"
-    assert args.fp16 is True
-    assert args.normal_every_n == 2
+    assert args.depth_backend == "local"
+    assert args.depth_size == "336x448"
 
 
 def test_p123_views_are_separate_display_modules():

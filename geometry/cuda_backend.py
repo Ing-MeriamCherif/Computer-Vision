@@ -73,17 +73,17 @@ class TorchGeometryBackend:
             self._grid_cache[key] = rays
         return rays
 
-    def process_depth(self, depth, camera: CameraModel, *, frame_id: int | str = 0, timestamp: float = 0.0, scale_mode: DepthScaleMode | str = DepthScaleMode.RELATIVE, valid_mask=None, input_confidence=None) -> GeometryState:
+    def process_depth(self, depth: np.ndarray, camera: CameraModel, *, frame_id: int | str = 0, timestamp: float = 0.0, scale_mode: DepthScaleMode | str = DepthScaleMode.RELATIVE, valid_mask: np.ndarray | object | None = None, input_confidence: np.ndarray | object | None = None) -> GeometryState:
         torch = self.torch
-        if torch.is_tensor(depth):
-            z = depth.to(device=self.device, dtype=torch.float32)
-        else:
-            z = torch.as_tensor(np.asarray(depth, dtype=np.float32), device=self.device)
+        # DeviceDepthState tensors are already on CUDA; accepting them here
+        # removes the redundant CPU->GPU upload while preserving the public
+        # NumPy-compatible API for alternative providers.
+        z = depth.to(self.device, dtype=torch.float32) if isinstance(depth, torch.Tensor) else torch.as_tensor(np.asarray(depth, dtype=np.float32), device=self.device)
         if z.shape != (camera.height, camera.width):
             raise ValueError("depth shape must match camera resolution")
         valid = torch.isfinite(z) & (z > 1e-6)
         if valid_mask is not None:
-            mask = valid_mask.to(device=self.device, dtype=torch.bool) if torch.is_tensor(valid_mask) else torch.as_tensor(np.asarray(valid_mask, dtype=bool), device=self.device)
+            mask = valid_mask.to(self.device, dtype=torch.bool) if isinstance(valid_mask, torch.Tensor) else torch.as_tensor(np.asarray(valid_mask, dtype=bool), device=self.device)
             if mask.shape != z.shape:
                 raise ValueError("valid_mask must match depth")
             valid &= mask
@@ -146,7 +146,7 @@ class TorchGeometryBackend:
         confidence = torch.where(normal_valid, (total / 1.5).clamp(0.0, 1.0), torch.zeros_like(total))
         confidence *= torch.where(one_sided, 0.72, 1.0)
         if input_confidence is not None:
-            supplied = input_confidence.to(device=self.device, dtype=torch.float32) if torch.is_tensor(input_confidence) else torch.as_tensor(np.asarray(input_confidence, dtype=np.float32), device=self.device)
+            supplied = input_confidence.to(self.device, dtype=torch.float32) if isinstance(input_confidence, torch.Tensor) else torch.as_tensor(np.asarray(input_confidence, dtype=np.float32), device=self.device)
             if supplied.shape != z.shape:
                 raise ValueError("input_confidence must match depth")
             confidence *= torch.nan_to_num(supplied, nan=0.0).clamp(0, 1)

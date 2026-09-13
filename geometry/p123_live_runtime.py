@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-import os
 import threading
 import time
 from typing import Any
@@ -19,7 +18,7 @@ from .async_pipeline import LatestDepthBuffer, LatestFrameBuffer
 from .backproject import DepthScaleMode
 from .camera import CameraModel
 from .camera_worker import CameraCaptureWorker
-from .depth_sampling import sample_depth
+from .depth_provider import DeviceDepthState, DepthAnythingProvider
 from .hand_control import GestureState, HandControlEngine
 from .motion import OpenCVFlowProvider
 from .p123_contract import HandXYZ, P4InputState
@@ -45,6 +44,9 @@ class P123Metrics:
     depth_errors: int
     normal_hz: float | None = None
     normal_age_p95_ms: float | None = None
+    depth_completion_age_p95_ms: float | None = None
+    normal_completion_age_p95_ms: float | None = None
+    xyz_completion_age_p95_ms: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,9 +122,10 @@ def _smooth_depth(
     overlap = valid & np.isfinite(previous) & (previous > 1e-6)
     if not overlap.any():
         return np.where(valid, current, np.nan).astype(np.float32)
-    ratio = float(np.median(previous[overlap])) / max(float(np.median(current[overlap])), 1e-6)
-    aligned = current * ratio
-    relative_delta = np.abs(aligned - previous) / np.maximum(np.abs(previous), 1e-6)
+    # Provider scale is already canonical. Do not introduce a second global
+    # median normalization on every frame; compare in that established scale.
+    aligned = current
+    relative_delta = np.abs(current - previous) / np.maximum(np.abs(previous), 1e-6)
     # Responsive on motion/edges, smooth only where the two estimates agree.
     local_alpha = np.clip(alpha + 0.55 * np.clip(relative_delta / 0.20, 0.0, 1.0), alpha, 0.9)
     agree = relative_delta <= 0.28
@@ -159,32 +162,35 @@ class P123LiveRuntime:
         fps: int = 30,
         depth_provider: Any | None = None,
         depth_model: str = "models/depth-anything-v2-small",
-        depth_size: int | tuple[int, int] | None = 336,
-        depth_backend: str = "mariem",
+        depth_size: int | tuple[int, int] | None = (336, 448),
+        depth_backend: str = "local",
         use_fp16: bool = False,
         hand_backend: str = "auto",
         calibration: CameraModel | None = None,
         max_state_age_ms: float = 200.0,
         full_temporal: bool = False,
-        normal_every_n: int = 2,
-        metric_depth: bool = False,
+        mirror: bool = True,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
         self._explicit_calibration = calibration is not None
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
         if depth_provider is not None:
             self.depth_provider = depth_provider
-        elif depth_backend == "mariem":
-            from .colleague_depth import MariemDepthProvider
+        elif depth_backend in {"colleague", "mariem"}:
+            from .colleague_depth import ColleagueDepthProvider, MariemDepthProvider
             if depth_size is None:
-                colleague_size = (height, width)
+                colleague_size = max(height, width)
             elif isinstance(depth_size, tuple):
-                colleague_size = tuple(int(v) for v in depth_size)
+                colleague_size = max(int(v) for v in depth_size)
             else:
                 colleague_size = int(depth_size)
-            self.depth_provider = MariemDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16, metric=metric_depth)
+            provider_cls = MariemDepthProvider if depth_backend == "mariem" else ColleagueDepthProvider
+            self.depth_provider = provider_cls(device="auto", input_size=colleague_size, fp16=use_fp16)
+        elif depth_backend == "local":
+            native_size = (height, width) if depth_size is None else depth_size
+            self.depth_provider = DepthAnythingProvider(depth_model, device="auto", use_fp16=use_fp16, input_size=native_size)
         else:
-            raise ValueError("P123 live runtime uses Mariem's depth module only; pass depth_backend='mariem'")
+            raise ValueError(f"unknown depth backend: {depth_backend}")
         self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=2, max_coast_frames=8)
         self.temporal = TemporalGeometryEngine(
             self.camera,
@@ -193,7 +199,7 @@ class P123LiveRuntime:
         )
         self.max_state_age_ms = float(max_state_age_ms)
         self.full_temporal = bool(full_temporal)
-        self.normal_every_n = max(1, int(normal_every_n))
+        self.mirror = bool(mirror)
         self._depth_frames = LatestFrameBuffer()
         self._hand_frames = LatestFrameBuffer()
         self._depth_states = LatestDepthBuffer()
@@ -203,6 +209,7 @@ class P123LiveRuntime:
         self._state_lock = threading.Lock()
         self._rgb: tuple[np.ndarray, int, float] | None = None
         self._depth: DepthState | None = None
+        self._device_depth: DeviceDepthState | None = None
         self._geometry: GeometryState | None = None
         self._fast_geometry: GeometryState | None = None
         self._normal_backend = None
@@ -224,9 +231,9 @@ class P123LiveRuntime:
         self._capture_times = metric(); self._depth_times = metric(); self._geometry_times = metric()
         self._normal_times = metric(); self._fast_temporal_times = metric(); self._hand_times = metric(); self._xyz_times = metric()
         self._depth_ages = metric(); self._geometry_ages = metric(); self._hand_ages = metric(); self._xyz_ages = metric(); self._normal_ages = metric()
+        self._depth_completion_ages = metric(); self._normal_completion_ages = metric(); self._xyz_completion_ages = metric()
         self._xyz: tuple[HandXYZ, ...] = ()
         self._xyz_smooth: dict[int, np.ndarray] = {}
-        self._rectify_maps = None
 
     def start(self) -> None:
         if self._running:
@@ -235,17 +242,7 @@ class P123LiveRuntime:
         # concurrently on the same workstation.
         try:
             import cv2
-            cv2.setNumThreads(max(1, min(4, (os.cpu_count() or 4) // 2)))
-        except Exception:
-            pass
-        try:
-            import torch
-            torch.set_num_threads(max(1, min(8, (os.cpu_count() or 8) // 2)))
-            torch.set_float32_matmul_precision("high")
-            if torch.cuda.is_available():
-                torch.backends.cudnn.benchmark = True
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
+            cv2.setNumThreads(1)
         except Exception:
             pass
         self.depth_provider.load()
@@ -267,21 +264,10 @@ class P123LiveRuntime:
                 f"explicit calibration {self.camera.width}x{self.camera.height} mismatches negotiated camera "
                 f"{self.camera_worker.actual_width}x{self.camera_worker.actual_height}"
             )
-        if self.camera.calibrated and self.camera.distortion:
-            import cv2
-            self._rectify_maps = cv2.initUndistortRectifyMap(
-                self.camera.camera_matrix,
-                np.asarray(self.camera.distortion, dtype=np.float64),
-                None,
-                self.camera.camera_matrix,
-                (self.camera.width, self.camera.height),
-                cv2.CV_32FC1,
-            )
+        elif self.mirror:
             self.camera = CameraModel(
                 self.camera.width, self.camera.height, self.camera.fx, self.camera.fy,
-                self.camera.cx, self.camera.cy, calibrated=True,
-                calibration_width=self.camera.calibration_width,
-                calibration_height=self.camera.calibration_height,
+                self.camera.width - 1.0 - self.camera.cx, self.camera.cy,
             )
         self._running = True
         targets = [self._dispatch_loop, self._depth_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
@@ -297,9 +283,10 @@ class P123LiveRuntime:
             if packet is None:
                 continue
             frame, capture_id, timestamp = packet
-            if self._rectify_maps is not None:
-                import cv2
-                frame = cv2.remap(frame, self._rectify_maps[0], self._rectify_maps[1], cv2.INTER_LINEAR)
+            if self.mirror:
+                # Mirror once at the capture boundary so RGB, depth, hands,
+                # and XYZ all share the user-facing left/right convention.
+                frame = np.ascontiguousarray(frame[:, ::-1])
             self._last_dispatched_id = capture_id
             self._capture_times.append(time.monotonic())
             with self._rgb_lock:
@@ -318,14 +305,23 @@ class P123LiveRuntime:
             if packet is None:
                 continue
             try:
-                state = self.depth_provider.compute(packet.frame, packet.frame_id, packet.timestamp)
+                compute_device = getattr(self.depth_provider, "compute_device", None)
+                result = compute_device(packet.frame, packet.frame_id, packet.timestamp) if callable(compute_device) else self.depth_provider.compute(packet.frame, packet.frame_id, packet.timestamp)
+                if isinstance(result, tuple) and len(result) == 2 and isinstance(result[1], DeviceDepthState):
+                    state, device_state = result
+                else:
+                    state, device_state = result, None
                 self._depth_states.put(state)
                 completed = time.monotonic()
                 state.completed_timestamp = completed
+                if device_state is not None:
+                    device_state.completed_timestamp = completed
                 with self._state_lock:
                     self._depth = state
+                    self._device_depth = device_state
                 self._depth_times.append(completed)
                 self._depth_ages.append(max(0.0, (completed - packet.timestamp) * 1000.0))
+                self._depth_completion_ages.append(0.0)
             except Exception:
                 self._depth_errors += 1
 
@@ -366,47 +362,66 @@ class P123LiveRuntime:
             return
         last_depth_id: int | str | None = None
         version = 0
-        update_index = 0
         previous_depth: np.ndarray | None = None
         smoothed_depth: np.ndarray | None = None
+        previous_device_depth = None
+        torch = getattr(self._normal_backend, "torch", None)
         while self._running:
             state, version = self._depth_states.wait_for_new(version, timeout=0.2)
             if state is None:
                 continue
-            update_index += 1
-            if update_index % self.normal_every_n:
-                continue
             try:
-                use_device_depth = state.device_depth is not None
-                if use_device_depth:
-                    normal_depth = state.device_depth
-                    normal_valid = state.device_valid_mask
-                    normal_confidence = state.device_confidence
+                with self._state_lock:
+                    device_state = self._device_depth if self._device_depth is not None and self._device_depth.source_frame_id == state.source_frame_id else None
+                if device_state is not None:
+                    current = device_state.depth
+                    valid_device = device_state.valid_mask
+                    if previous_device_depth is None or previous_device_depth.shape != current.shape:
+                        smoothed_device = current
+                    else:
+                        overlap = valid_device & torch.isfinite(previous_device_depth) & (previous_device_depth > 1e-6)
+                        if bool(overlap.any().item()):
+                            aligned = current
+                            delta = torch.abs(current - previous_device_depth) / torch.clamp(torch.abs(previous_device_depth), min=1e-6)
+                            local_alpha = (0.30 + 0.55 * (delta / 0.20).clamp(0.0, 1.0)).clamp(0.30, 0.90)
+                            smoothed_device = torch.where(overlap & (delta <= 0.28), (1.0 - local_alpha) * previous_device_depth + local_alpha * aligned, aligned)
+                        else:
+                            smoothed_device = current
+                    previous_device_depth = smoothed_device.detach()
+                    smoothed_depth = state.depth
+                    fast = self._normal_backend.process_depth(
+                        smoothed_device,
+                        self.camera,
+                        frame_id=state.source_frame_id,
+                        timestamp=state.timestamp,
+                        scale_mode=state.scale_mode,
+                        valid_mask=valid_device,
+                        input_confidence=device_state.confidence,
+                    )
                 else:
                     smoothed_depth = _smooth_depth(smoothed_depth, state.depth, state.valid_mask)
-                    normal_depth = smoothed_depth
-                    normal_valid = state.valid_mask
-                    normal_confidence = state.confidence
-                fast = self._normal_backend.process_depth(
-                    normal_depth,
-                    self.camera,
-                    frame_id=state.source_frame_id,
-                    timestamp=state.timestamp,
-                    scale_mode=state.scale_mode,
-                    valid_mask=normal_valid,
-                    input_confidence=normal_confidence,
-                )
+                    fast = self._normal_backend.process_depth(
+                        smoothed_depth,
+                        self.camera,
+                        frame_id=state.source_frame_id,
+                        timestamp=state.timestamp,
+                        scale_mode=state.scale_mode,
+                        valid_mask=state.valid_mask,
+                        input_confidence=state.confidence,
+                    )
                 fast.processing_frame_id = state.source_frame_id
                 fast.completed_timestamp = time.monotonic()
                 fast.temporal_confidence = _fast_temporal_confidence(
-                    previous_depth, fast.depth, state.valid_mask, state.confidence
+                    previous_depth, smoothed_depth, state.valid_mask, state.confidence
                 )
                 with self._state_lock:
                     self._fast_geometry = fast
                 self._normal_times.append(time.monotonic())
-                self._normal_ages.append(max(0.0, (time.monotonic() - state.timestamp) * 1000.0))
+                normal_completed = time.monotonic()
+                self._normal_ages.append(max(0.0, (normal_completed - state.timestamp) * 1000.0))
+                self._normal_completion_ages.append(max(0.0, (normal_completed - (state.completed_timestamp or state.timestamp)) * 1000.0))
                 self._fast_temporal_times.append(time.monotonic())
-                previous_depth = fast.depth.copy()
+                previous_depth = smoothed_depth.copy()
                 last_depth_id = state.source_frame_id
             except Exception:
                 # Keep the temporal worker/UI alive if CUDA geometry rejects a frame.
@@ -444,12 +459,11 @@ class P123LiveRuntime:
                 time.sleep(0.01)
                 continue
             last_key = key
-            # Freshness is measured from geometry completion, not capture
-            # time. Mariem/Talel inference can legitimately finish a frame
-            # 100+ ms after capture; using the source timestamp made every
-            # valid hand appear perpetually "depth pending".
-            completed_at = geometry.completed_timestamp or geometry.timestamp
-            age_ms = max(0.0, (time.monotonic() - completed_at) * 1000.0)
+            # Keep physical freshness tied to capture time. Completion age is
+            # reported separately so a slow worker cannot hide stale frames.
+            now = time.monotonic()
+            age_ms = max(0.0, (now - geometry.timestamp) * 1000.0)
+            completion_age_ms = max(0.0, (now - (geometry.completed_timestamp or geometry.timestamp)) * 1000.0)
             depth_hz = self._depth_times and _rate(self._depth_times) or 8.0
             freshness_limit = min(self.max_state_age_ms, max(180.0, 1.75 * (1000.0 / max(depth_hz, 1.0))))
             if age_ms > freshness_limit:
@@ -458,25 +472,15 @@ class P123LiveRuntime:
                     self._xyz_smooth.pop(stale_id, None)
                 continue
             values: list[HandXYZ] = []
-            with self._state_lock:
-                raw_depth_state = self._depth
             for hand in hands.hands:
-                sampled_z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
-                if sampled_z <= 0.0 and raw_depth_state is not None:
-                    sampled_z, reliability = sample_depth(raw_depth_state.depth, raw_depth_state.valid_mask, *hand.palm_uv)
-                # Relative monocular depth has no metric unit. Use it only
-                # when it lands in Talel's physically plausible working
-                # volume; otherwise use his palm-size proxy so XYZ cannot
-                # collapse to centimetre-scale coordinates.
+                # XYZ intentionally does not recalculate/sample depth. The
+                # P123 hand contract uses Talel's stable palm-size metric-Z
+                # proxy; depth inference remains an independent visualization
+                # and geometry worker.
                 size_z, size_ok = _talel_depth_from_palm_size(self.camera.fx, hand.palm_width_px)
-                mode_value = getattr(getattr(geometry, "scale_mode", "relative"), "value", getattr(geometry, "scale_mode", "relative"))
-                metric_depth = str(mode_value) == "metric"
-                z = sampled_z if metric_depth and 0.20 <= sampled_z <= 3.0 else size_z
-                if not size_ok:
-                    reliability *= 0.5
-                if metric_depth and z > 0:
-                    raw_xyz = np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
-                elif z > 0:
+                reliability = 1.0 if size_ok else 0.5
+                z = size_z if size_ok else 0.0
+                if z > 0:
                     raw_xyz, _ = _talel_hand_xyz(geometry.camera, hand.palm_uv, hand.palm_width_px)
                 else:
                     raw_xyz = None
@@ -491,11 +495,12 @@ class P123LiveRuntime:
                     smooth_xyz = raw_xyz if prior_xyz is None else blend * raw_xyz + (1.0 - blend) * prior_xyz
                     self._xyz_smooth[hand.hand_id] = smooth_xyz
                     xyz = tuple(float(v) for v in smooth_xyz)
-                values.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence * reliability), hand.timestamp, hands.source_frame_id, age_ms, hand.handedness))
+                values.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence * reliability), hand.timestamp, hands.source_frame_id, age_ms, hand.handedness, age_ms, completion_age_ms))
             self._xyz = tuple(values)
             now = time.monotonic()
             self._xyz_times.append(now)
             self._xyz_ages.append(max(0.0, (now - hands.timestamp) * 1000.0))
+            self._xyz_completion_ages.append(completion_age_ms)
 
     def snapshot(self) -> P123Snapshot:
         with self._rgb_lock:
@@ -523,6 +528,7 @@ class P123LiveRuntime:
             _percentile(self._depth_ages, 50), _percentile(self._depth_ages, 95), _percentile(self._geometry_ages, 95), _percentile(self._hand_ages, 95), _percentile(self._xyz_ages, 95),
             self.camera_worker.captured_frames, self.camera_worker.overwritten_before_consumption, self._depth_errors,
             _rate(self._normal_times), _percentile(self._normal_ages, 95),
+            _percentile(self._depth_completion_ages, 95), _percentile(self._normal_completion_ages, 95), _percentile(self._xyz_completion_ages, 95),
         )
         return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, canonical_geometry, hands, xyz, contract, metrics, fast_geometry)
 

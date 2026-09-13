@@ -21,6 +21,8 @@ class HandXYZ:
     source_frame_id: int | str
     age_ms: float
     handedness: str | None = None
+    source_age_ms: float | None = None
+    completion_age_ms: float | None = None
 
 
 @dataclass(frozen=True, slots=True)

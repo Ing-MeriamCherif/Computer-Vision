@@ -26,13 +26,15 @@ def _robust_bounds(values: np.ndarray, valid: np.ndarray) -> tuple[float, float]
     return float(lo), float(hi)
 
 
-def depth_to_rgb(depth: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray:
+def depth_to_rgb(depth: np.ndarray, valid: np.ndarray | None = None, *, bounds: tuple[float, float] | None = None) -> np.ndarray:
     """Map canonical depth to RGB: near is warm, far is cool, invalid black."""
     arr = np.asarray(depth, dtype=np.float32)
     mask = np.isfinite(arr) & (arr > 1e-6)
     if valid is not None:
         mask &= np.asarray(valid, dtype=bool)
-    lo, hi = _robust_bounds(arr, mask)
+    lo, hi = _robust_bounds(arr, mask) if bounds is None else (float(bounds[0]), float(bounds[1]))
+    if hi <= lo:
+        hi = lo + 1e-6
     # Larger forward-Z is farther; the first warm stop therefore represents
     # the near surface and the final cool stop the far surface.
     t = np.clip((arr - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
