@@ -207,7 +207,7 @@ void main() {
             if (lightIndex >= uLightCount) break;
             vec3 delta = uLightPosition[lightIndex] - s;
             float distanceSq = max(dot(delta, delta), 0.0025);
-            float rangeM = max(uLightPower[lightIndex].z, 0.01);
+            float rangeM = max(uLightPower[lightIndex].z * 0.78, 0.01);
             float rangeWeight = exp(-0.5 * distanceSq / (rangeM * rangeM));
             float visibility = lightVisibility(s, uLightPosition[lightIndex]);
             float scatter = uDensity * uLightPower[lightIndex].x * uLightPower[lightIndex].y;
@@ -261,9 +261,9 @@ void main() {
         float power = clamp(uLightPower[i].x * uLightPower[i].y, 0.0, 2.0);
         float sceneZ = texture(uDepth, vUv).r;
         float haloVisibility = sceneZ > 1e-5 && sceneZ + max(0.025, 0.04 * p.z) < p.z ? 0.28 : 1.0;
-        color += uLightColor[i] * max(outer-inner, 0.0) * 0.035 * power * haloVisibility;
-        color += uLightColor[i] * inner * 0.075 * power * mix(0.55, 1.0, haloVisibility);
-        color = mix(color, mix(uLightColor[i], vec3(1.0,0.97,0.90),0.68), core * 0.34);
+        color += uLightColor[i] * max(outer-inner, 0.0) * 0.012 * power * haloVisibility;
+        color += uLightColor[i] * inner * 0.05 * power * mix(0.55, 1.0, haloVisibility);
+        color = mix(color, mix(uLightColor[i], vec3(1.0,0.97,0.90),0.68), core * 0.46);
     }
     oColor = vec4(clamp(toSrgb(color), 0.0, 1.0), 1.0);
 }
@@ -615,7 +615,7 @@ class GPURelightRenderer:
         gl.glUniform1i(gl.glGetUniformLocation(volume_program, "uVolShadowSteps"), self.quality.volume_shadow_steps)
         gl.glUniform1i(gl.glGetUniformLocation(volume_program, "uHistoryAllowed"), int(history_ok))
         gl.glUniform1f(gl.glGetUniformLocation(volume_program, "uHistoryWeight"), self.quality.history_weight)
-        gl.glUniform1f(gl.glGetUniformLocation(volume_program, "uDensity"), 0.035)
+        gl.glUniform1f(gl.glGetUniformLocation(volume_program, "uDensity"), 0.020)
         self._bind_texture(1, self._textures["depth"], volume_program, "uDepth")
         self._bind_texture(2, self._textures["valid"], volume_program, "uValid")
         self._bind_texture(5, self._textures[f"volume{previous_index}"], volume_program, "uPrevVolume")

@@ -15,7 +15,7 @@ from geometry.state import GeometryState
 
 
 LIGHT_COLORS = ((0.44, 0.72, 0.82), (0.88, 0.63, 0.40))
-DEFAULT_RANGE_M = 0.45
+DEFAULT_RANGE_M = 0.30
 DEFAULT_INTENSITY = 0.70
 FRESHNESS_LIMIT_MS = 250.0
 FADE_START_MS = 150.0
@@ -87,7 +87,7 @@ def lights_from_snapshot(
                 enabled=True,
                 light_id=hand_id,
                 range_m=DEFAULT_RANGE_M,
-                source_radius_m=0.025,
+                source_radius_m=0.018,
             )
         )
         if len(lights) == 2:

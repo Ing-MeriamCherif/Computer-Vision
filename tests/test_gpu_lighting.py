@@ -53,8 +53,8 @@ def _light(camera: CameraModel, hand_id: int, color: tuple[float, float, float])
         confidence=1.0,
         source_hand=hand_id,
         light_id=hand_id,
-        range_m=0.45,
-        source_radius_m=0.025,
+        range_m=0.30,
+        source_radius_m=0.018,
     )
 
 
@@ -87,6 +87,9 @@ def test_gpu_renderer_compiles_renders_detail_and_reallocates_on_resize():
         light = _light(geometry.camera, 0, (0.44, 0.72, 0.82))
         one_light, _ = renderer.render(rgb, geometry, [light])
         assert one_light[12, 16].mean() > no_light[12, 16].mean()
+        center_gain = one_light[12, 16].astype(np.float32).mean() - no_light[12, 16].mean()
+        edge_gain = one_light[0, 0].astype(np.float32).mean() - no_light[0, 0].mean()
+        assert center_gain > edge_gain
 
         second = _light(geometry.camera, 1, (0.88, 0.63, 0.40))
         two_lights, stats = renderer.render(rgb, geometry, [light, second])

@@ -142,7 +142,8 @@ def test_handxyz_positions_drive_lights_and_keep_ids_colors_and_range():
     np.testing.assert_allclose(lights[0].position_camera, (0.21, -0.08, 0.62))
     np.testing.assert_allclose(lights[1].position_camera, (-0.18, 0.04, 0.71))
     assert not np.array_equal(lights[0].color_rgb, lights[1].color_rgb)
-    assert all(light.range_m == 0.45 for light in lights)
+    assert all(light.range_m == 0.30 for light in lights)
+    assert all(light.source_radius_m == 0.018 for light in lights)
     assert age == 35.0
 
 

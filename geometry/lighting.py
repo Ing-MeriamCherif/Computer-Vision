@@ -170,10 +170,10 @@ def render_light_orbs(
         roi = result[y0:y1, x0:x1].astype(np.float32)
         color = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
         power = float(np.clip(light.intensity * light.confidence, 0.0, 2.0))
-        glow = (halo_roi * 0.12 * halo_visibility + inner_roi * 0.28) * power
+        glow = (halo_roi * 0.05 * halo_visibility + inner_roi * 0.18) * power
         roi += glow[..., None] * color[None, None, :] * 100.0
 
-        core_alpha = np.clip(core_roi * min(0.62, 0.38 + power * 0.05), 0.0, 0.62)[..., None]
+        core_alpha = np.clip(core_roi * min(0.68, 0.46 + power * 0.04), 0.0, 0.68)[..., None]
         hot_color = color * 0.35 + np.array([1.0, 0.98, 0.92], dtype=np.float32) * 0.65
         roi = roi * (1.0 - core_alpha) + hot_color[None, None, :] * (255.0 * core_alpha)
         result[y0:y1, x0:x1] = np.clip(roi, 0.0, 255.0).astype(np.uint8)
@@ -311,7 +311,7 @@ def render_volumetric_scattering(
             dy = light_pos[1] - py
             dz = light_pos[2] - pz
             dist_sq = dx ** 2 + dy ** 2 + dz ** 2 + 0.05
-            range_m = max(float(getattr(light, "range_m", 1.0)), 1e-3)
+            range_m = max(float(getattr(light, "range_m", 1.0)) * 0.78, 1e-3)
             source_falloff = np.exp(-0.5 * dist_sq / (range_m * range_m))
             in_scatter = intensity / dist_sq * source_falloff
 
