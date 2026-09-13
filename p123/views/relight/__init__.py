@@ -11,7 +11,18 @@ from typing import Any
 import cv2
 import numpy as np
 
-from geometry.lighting import LightState, project_light_orb, render_light_orbs, shade_geometry
+from geometry.lighting import (
+    DEFAULT_DIRECT_GAIN,
+    DEFAULT_DIFFUSE_STRENGTH,
+    DEFAULT_SHININESS,
+    DEFAULT_SPECULAR_STRENGTH,
+    LIGHTING_STAGES,
+    LightState,
+    normalize_lighting_stage,
+    project_light_orb,
+    render_light_orbs,
+    shade_geometry,
+)
 from geometry.state import GeometryState
 
 
@@ -158,6 +169,7 @@ class RelightRenderer:
         self.backend_name = "UNINITIALIZED"
         self.backend_reason: str | None = None
         self._rtx_renderer = None
+        self._rtx_probe_done = False
         self._gpu_renderer = None
         self._gpu_error: str | None = None
         self._gpu_error_reported = False
@@ -175,6 +187,7 @@ class RelightRenderer:
         self._gesture_enabled: dict[int, bool] = {}
         self._gesture_last_seen: dict[int, float] = {}
         self._recent_lights: dict[int, LightState] = {}
+        self.lighting_stage = "full"
 
     def set_lighting_quality(self, quality: str) -> None:
         self.lighting_quality = str(quality).lower()
@@ -182,12 +195,28 @@ class RelightRenderer:
             self._gpu_renderer.set_quality(self.lighting_quality)
         self._cache_key = None
 
+    def set_lighting_stage(self, stage: str) -> None:
+        value = normalize_lighting_stage(stage)
+        if value == self.lighting_stage:
+            return
+        self.lighting_stage = value
+        self._cache_key = None
+        if self._gpu_renderer is not None:
+            self._gpu_renderer.reset_history()
+
+    def cycle_lighting_stage(self) -> str:
+        stages = ("l2_diffuse", "l2_diffuse_specular", "full")
+        index = stages.index(self.lighting_stage)
+        self.set_lighting_stage(stages[(index + 1) % len(stages)])
+        return self.lighting_stage
+
     def set_backend(self, backend: str) -> None:
         value = str(backend).lower()
         if value not in {"auto", "rtx", "raster"}:
             raise ValueError("backend must be auto, rtx, or raster")
         self.backend_requested = value
         self._rtx_renderer = None
+        self._rtx_probe_done = False
         self.backend_name = "UNINITIALIZED"
         self.backend_reason = None
         self.reset_for_source_change()
@@ -289,45 +318,10 @@ class RelightRenderer:
         return getattr(snapshot, "fast_geometry_state", None) or snapshot.geometry_state
 
     def _low_geometry(self, geometry: GeometryState) -> GeometryState:
-        full_h, full_w = geometry.depth.shape
-        scale = min(1.0, self.max_width / full_w, self.max_height / full_h)
-        width = max(2, int(round(full_w * scale)))
-        height = max(2, int(round(full_h * scale)))
-        camera = geometry.camera.scaled_intrinsics(width, height)
-        source_valid = geometry.valid_mask & np.isfinite(geometry.depth) & (geometry.depth > 1e-6)
-        coverage = cv2.resize(source_valid.astype(np.float32), (width, height), interpolation=cv2.INTER_AREA)
-        weighted_depth = cv2.resize(
-            np.where(source_valid, geometry.depth, 0.0).astype(np.float32),
-            (width, height),
-            interpolation=cv2.INTER_AREA,
-        )
-        depth = weighted_depth / np.maximum(coverage, 1e-6)
-        valid = (coverage >= 0.35) & np.isfinite(depth) & (depth > 1e-6)
-        depth = np.where(valid, depth, np.nan).astype(np.float32)
-        normals = None
-        if geometry.normals is not None:
-            normals = cv2.resize(np.nan_to_num(geometry.normals, nan=0.0).astype(np.float32), (width, height), interpolation=cv2.INTER_AREA)
-            normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1e-6)
-            normals[~valid] = 0.0
-        confidence = geometry.confidence
-        if confidence is not None:
-            confidence = cv2.resize(np.asarray(confidence, dtype=np.float32), (width, height), interpolation=cv2.INTER_AREA)
-            confidence = np.clip(np.nan_to_num(confidence), 0.0, 1.0)
-        else:
-            confidence = valid.astype(np.float32)
-        uu, vv = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-        positions = camera.unproject(uu, vv, depth).astype(np.float32)
-        return GeometryState(
-            timestamp=geometry.timestamp,
-            source_frame_id=geometry.source_frame_id,
-            depth=depth,
-            positions_3d=positions,
-            valid_mask=valid,
-            camera=camera,
-            scale_mode=geometry.scale_mode,
-            normals=normals,
-            confidence=confidence,
-        )
+        # Kept as a compatibility hook for callers/tests from the earlier
+        # renderer.  L2 quality is never reduced by downsampling the surface
+        # pass, so the production fallback uses the authoritative state.
+        return geometry
 
     def _cache_key_for(self, snapshot: Any, geometry: GeometryState, lights: list[LightState]) -> tuple[Any, ...]:
         return (
@@ -336,29 +330,36 @@ class RelightRenderer:
             tuple((light.light_id, tuple(np.round(light.position_camera, 3)), round(light.confidence, 2)) for light in lights),
             int((self.last_xyz_source_age_ms or 0.0) // 25),
             self.lighting_quality,
+            self.lighting_stage,
         )
 
     def _cpu_render(self, frame: np.ndarray, geometry: GeometryState, lights: list[LightState]) -> np.ndarray:
-        small_geometry = self._low_geometry(geometry)
-        small_rgb = cv2.resize(frame, (small_geometry.camera.width, small_geometry.camera.height), interpolation=cv2.INTER_AREA)
-        ambient = 0.40
+        stage = LIGHTING_STAGES[self.lighting_stage]
+        surface_geometry = self._low_geometry(geometry)
         relit, stats = shade_geometry(
-            small_rgb,
-            small_geometry,
+            frame,
+            surface_geometry,
             lights,
-            ambient=ambient,
-            specular_strength=0.12,
-            shininess=36.0,
-            shadows=True,
-            volumetrics=True,
+            ambient=0.40,
+            diffuse_strength=DEFAULT_DIFFUSE_STRENGTH,
+            specular_strength=DEFAULT_SPECULAR_STRENGTH,
+            shininess=DEFAULT_SHININESS,
+            direct_gain=DEFAULT_DIRECT_GAIN,
+            specular_enabled=bool(stage["specular"]),
+            shadows=bool(stage["shadows"]),
+            volumetrics=bool(stage["volumetrics"]),
+            shadows_enabled=bool(stage["shadows"]),
+            volumetrics_enabled=bool(stage["volumetrics"]),
         )
-        result = _detail_preserving_composite(frame, small_rgb, relit, small_geometry, ambient=ambient)
+        result = relit
         result = render_light_orbs(result, geometry.camera, lights, depth=geometry.depth, valid=geometry.valid_mask)
         stats.update({
             "renderer": "CPU_FALLBACK",
             "quality": self.lighting_quality,
             "shadow_quality": "CPU reference",
             "volumetric_quality": "CPU reference",
+            "stage": self.lighting_stage,
+            "fallback_reason": self._gpu_error or "GPU renderer unavailable",
         })
         self.last_lighting_stats = stats
         return result
@@ -387,8 +388,11 @@ class RelightRenderer:
     def _ensure_rtx(self):
         if self.backend_requested == "raster":
             return None
+        if self._rtx_probe_done:
+            return self._rtx_renderer
         if self._rtx_renderer is not None:
             return self._rtx_renderer
+        self._rtx_probe_done = True
         try:
             from geometry.rtx_lighting import create_optix_renderer
 
@@ -411,7 +415,15 @@ class RelightRenderer:
 
         def warm() -> None:
             try:
-                renderer.render(warm_frame, geometry, lights, ambient=0.40, readback=False)
+                stage = LIGHTING_STAGES[self.lighting_stage]
+                renderer.render(
+                    warm_frame, geometry, lights, ambient=0.40, readback=False,
+                    stage=self.lighting_stage, diffuse_strength=DEFAULT_DIFFUSE_STRENGTH,
+                    specular_strength=DEFAULT_SPECULAR_STRENGTH,
+                    shininess=DEFAULT_SHININESS, direct_gain=DEFAULT_DIRECT_GAIN,
+                    shadows_enabled=bool(stage["shadows"]),
+                    volumetrics_enabled=bool(stage["volumetrics"]),
+                )
                 self._gpu_warmed = True
             except Exception as exc:
                 self._gpu_error = f"warmup {type(exc).__name__}: {exc}"
@@ -473,7 +485,12 @@ class RelightRenderer:
             return self._cache_image, title, None
         if rtx_renderer is not None:
             try:
-                image, stats = rtx_renderer.render(frame, geometry, lights, ambient=0.40)
+                image, stats = rtx_renderer.render(
+                    frame, geometry, lights, ambient=0.40, stage=self.lighting_stage,
+                    diffuse_strength=DEFAULT_DIFFUSE_STRENGTH,
+                    specular_strength=DEFAULT_SPECULAR_STRENGTH,
+                    shininess=DEFAULT_SHININESS, direct_gain=DEFAULT_DIRECT_GAIN,
+                )
                 self.last_lighting_stats = dict(stats)
                 self.last_lighting_stats["renderer"] = "RTX_OPTIX"
             except Exception as exc:  # noqa: BLE001
@@ -494,7 +511,12 @@ class RelightRenderer:
                     self.last_render_ms = (time.perf_counter() - started) * 1000.0
                     return frame.copy(), title, None
                 try:
-                    image, stats = renderer.render(frame, geometry, lights, ambient=0.40)
+                    image, stats = renderer.render(
+                        frame, geometry, lights, ambient=0.40, stage=self.lighting_stage,
+                        diffuse_strength=DEFAULT_DIFFUSE_STRENGTH,
+                        specular_strength=DEFAULT_SPECULAR_STRENGTH,
+                        shininess=DEFAULT_SHININESS, direct_gain=DEFAULT_DIRECT_GAIN,
+                    )
                     self.last_lighting_stats = dict(stats)
                     self.last_lighting_stats["renderer"] = "OPENGL_RASTER"
                 except Exception as exc:

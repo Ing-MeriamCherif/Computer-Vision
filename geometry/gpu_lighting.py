@@ -9,7 +9,15 @@ from typing import Any
 
 import numpy as np
 
-from .lighting import LightState
+from .lighting import (
+    DEFAULT_DIRECT_GAIN,
+    DEFAULT_DIFFUSE_STRENGTH,
+    DEFAULT_SHININESS,
+    DEFAULT_SPECULAR_STRENGTH,
+    LIGHTING_STAGES,
+    LightState,
+    normalize_lighting_stage,
+)
 from .state import GeometryState
 
 
@@ -47,6 +55,7 @@ layout(location=2) out float oDepth;
 uniform sampler2D uRgb;
 uniform sampler2D uDepth;
 uniform sampler2D uNormal;
+uniform sampler2D uNormalConfidence;
 uniform sampler2D uConfidence;
 uniform sampler2D uValid;
 uniform sampler2D uPrevShadow;
@@ -59,9 +68,13 @@ uniform vec3 uLightColor[2];
 uniform vec4 uLightPower[2]; // intensity, confidence, range, source radius
 uniform int uShadowRays;
 uniform int uShadowSteps;
+uniform int uShadowsEnabled;
 uniform int uHistoryAllowed;
 uniform float uHistoryWeight;
-uniform float uAmbient;
+uniform float uDiffuseStrength;
+uniform float uSpecularStrength;
+uniform float uShininess;
+uniform float uDirectGain;
 
 vec3 toLinear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
@@ -121,9 +134,19 @@ void main() {
     vec2 pixel = vUv * uResolution - vec2(0.5);
     vec3 p = vec3((pixel.x - uCamera.z) * z / uCamera.x,
                   (pixel.y - uCamera.w) * z / uCamera.y, z);
-    vec3 n = normalize(texture(uNormal, vUv).xyz);
+    vec3 rawNormal = texture(uNormal, vUv).xyz;
+    float normalLength = length(rawNormal);
+    if (!(normalLength > 1e-4)) {
+        oSurface = vec4(base, 1.0);
+        oShadow = 1.0;
+        oDepth = z;
+        return;
+    }
+    vec3 n = rawNormal / normalLength;
     float conf = clamp(texture(uConfidence, vUv).r, 0.0, 1.0);
-    float normalConfidence = smoothstep(0.05, 0.45, length(texture(uNormal, vUv).xyz));
+    float normalConfidence = clamp(texture(uNormalConfidence, vUv).r, 0.0, 1.0);
+    float diffuseConfidence = conf * normalConfidence;
+    float specularConfidence = conf * smoothstep(0.35, 0.75, normalConfidence);
     vec3 diffuseTerm = vec3(0.0);
     vec3 specularTerm = vec3(0.0);
     float visibilityMean = 1.0;
@@ -136,13 +159,13 @@ void main() {
         vec3 v = normalize(-p);
         vec3 h = normalize(l + v);
         float diffuse = max(dot(n, l), 0.0);
-        float specular = pow(max(dot(n, h), 0.0), 36.0);
+        float specular = diffuse > 0.0 ? pow(max(dot(n, h), 0.0), uShininess) : 0.0;
         float rangeM = max(uLightPower[i].z, 0.01);
         float attenuation = uLightPower[i].x / (1.0 + pow(distanceToLight / rangeM, 2.0));
-        float visibility = rayVisibility(p, n, uLightPosition[i], uLightPower[i].w);
+        float visibility = uShadowsEnabled != 0 ? rayVisibility(p, n, uLightPosition[i], uLightPower[i].w) : 1.0;
         // The stored visibility texture is shared; only a single emitter can
         // safely reuse it. Multi-light frames keep independent current rays.
-        if (uLightCount == 1 && uHistoryAllowed != 0 && uHistoryWeight > 0.0) {
+        if (uShadowsEnabled != 0 && uLightCount == 1 && uHistoryAllowed != 0 && uHistoryWeight > 0.0) {
             float previousZ = texture(uPrevDepth, vUv).r;
             float previousVisibility = texture(uPrevShadow, vUv).r;
             if (previousZ > 1e-5 && abs(previousZ - z) < max(0.018, 0.025 * z)) {
@@ -150,14 +173,13 @@ void main() {
             }
         }
         visibilitySum += visibility;
-        float directScale = attenuation * visibility * uLightPower[i].y * conf * normalConfidence;
-        diffuseTerm += base * uLightColor[i] * diffuse * 0.92 * directScale;
-        specularTerm += uLightColor[i] * specular * 0.12 * directScale;
+        float directScale = attenuation * visibility * uLightPower[i].y;
+        diffuseTerm += base * uLightColor[i] * diffuse * uDiffuseStrength * diffuseConfidence * directScale;
+        specularTerm += uLightColor[i] * specular * uSpecularStrength * specularConfidence * directScale;
     }
     if (uLightCount > 0) visibilityMean = visibilitySum / float(uLightCount);
-    float ambient = max(uAmbient, 0.05);
-    vec3 ambientTerm = base * ambient;
-    vec3 shaded = (ambientTerm + diffuseTerm + specularTerm) / ambient;
+    vec3 shaded = base + uDirectGain * (diffuseTerm + specularTerm);
+    shaded = max(shaded, vec3(0.0));
     oSurface = vec4(shaded, 1.0);
     oShadow = visibilityMean;
     oDepth = z;
@@ -256,6 +278,7 @@ uniform vec3 uLightPosition[2];
 uniform vec3 uLightColor[2];
 uniform vec4 uLightPower[2];
 uniform float uLightVisualRadius[2];
+uniform int uVolumeEnabled;
 
 vec3 toSrgb(vec3 c) {
     c = max(c, vec3(0.0));
@@ -263,7 +286,8 @@ vec3 toSrgb(vec3 c) {
 }
 
 void main() {
-    vec3 color = texture(uSurface, vUv).rgb + texture(uVolume, vUv).rgb;
+    vec3 color = texture(uSurface, vUv).rgb;
+    if (uVolumeEnabled != 0) color += texture(uVolume, vUv).rgb;
     vec2 pixel = vUv * uResolution - vec2(0.5);
     for (int i=0; i<2; ++i) {
         if (i >= uLightCount) break;
@@ -313,12 +337,16 @@ class GPURelightRenderer:
         self._volume_width = 0
         self._volume_height = 0
         self._programs: dict[str, int] = {}
+        self._uniform_cache: dict[tuple[int, str], int] = {}
         self._textures: dict[str, int] = {}
         self._framebuffers: dict[str, int] = {}
         self._vao = 0
         self._history_index = 0
         self._history_key: tuple[Any, ...] | None = None
         self._history_time = 0.0
+        self._geometry_upload_key: tuple[Any, ...] | None = None
+        self._geometry_upload_count = 0
+        self._rgb_upload_count = 0
         self._render_lock = threading.Lock()
         self.initialized = False
         self.gl_version = "unknown"
@@ -461,6 +489,7 @@ class GPURelightRenderer:
         self._texture("rgb", width, height, gl.GL_RGB8, gl.GL_RGB, gl.GL_UNSIGNED_BYTE, filtering=linear)
         self._texture("depth", width, height, gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
         self._texture("normal", width, height, gl.GL_RGB16F, gl.GL_RGB, gl.GL_FLOAT, filtering=nearest)
+        self._texture("normal_confidence", width, height, gl.GL_R16F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
         self._texture("confidence", width, height, gl.GL_R16F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
         self._texture("valid", width, height, gl.GL_R8, gl.GL_RED, gl.GL_UNSIGNED_BYTE, filtering=nearest)
         self._texture("surface", width, height, gl.GL_RGBA16F, gl.GL_RGBA, gl.GL_FLOAT, filtering=linear)
@@ -469,21 +498,34 @@ class GPURelightRenderer:
             self._texture(f"shadow{i}", width, height, gl.GL_R16F, gl.GL_RED, gl.GL_FLOAT, filtering=linear)
             self._texture(f"history_depth{i}", width, height, gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
             self._texture(f"volume{i}", volume_width, volume_height, gl.GL_RGBA16F, gl.GL_RGBA, gl.GL_FLOAT, filtering=linear)
-        self._framebuffers["surface"] = int(gl.glGenFramebuffers(1))
-        self._framebuffers["volume"] = int(gl.glGenFramebuffers(1))
+        for i in range(2):
+            self._framebuffers[f"surface{i}"] = int(gl.glGenFramebuffers(1))
+            self._framebuffers[f"volume{i}"] = int(gl.glGenFramebuffers(1))
         self._framebuffers["output"] = int(gl.glGenFramebuffers(1))
+        for i in range(2):
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers[f"surface{i}"])
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures["surface"], 0)
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_TEXTURE_2D, self._textures[f"shadow{i}"], 0)
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT2, gl.GL_TEXTURE_2D, self._textures[f"history_depth{i}"], 0)
+            gl.glDrawBuffers(3, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2])
+            self._check_framebuffer(f"surface{i}")
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers[f"volume{i}"])
+            gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures[f"volume{i}"], 0)
+            gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
+            self._check_framebuffer(f"volume{i}")
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["output"])
+        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures["output"], 0)
+        gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
+        self._check_framebuffer("output")
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, 0)
         self._history_index = 0
         self._history_key = None
         self._history_time = 0.0
+        self._geometry_upload_key = None
 
     def _attach_surface_targets(self, write_index: int) -> None:
         gl = self._gl
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["surface"])
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures["surface"], 0)
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT1, gl.GL_TEXTURE_2D, self._textures[f"shadow{write_index}"], 0)
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT2, gl.GL_TEXTURE_2D, self._textures[f"history_depth{write_index}"], 0)
-        gl.glDrawBuffers(3, [gl.GL_COLOR_ATTACHMENT0, gl.GL_COLOR_ATTACHMENT1, gl.GL_COLOR_ATTACHMENT2])
-        self._check_framebuffer("surface")
+        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers[f"surface{write_index}"])
 
     def _check_framebuffer(self, name: str) -> None:
         status = self._gl.glCheckFramebufferStatus(self._gl.GL_FRAMEBUFFER)
@@ -496,13 +538,11 @@ class GPURelightRenderer:
         gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
         gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, self._width, self._height, fmt, typ, data)
 
-    @staticmethod
-    def _uniform(program: int, name: str) -> int:
-        return int(GPURelightRenderer._current_gl.glGetUniformLocation(program, name))
-
-    @property
-    def _current_gl(self):
-        return self._gl
+    def _uniform(self, program: int, name: str) -> int:
+        key = (int(program), str(name))
+        if key not in self._uniform_cache:
+            self._uniform_cache[key] = int(self._gl.glGetUniformLocation(program, name))
+        return self._uniform_cache[key]
 
     def _set_lights(self, program: int, lights: list[LightState]) -> None:
         gl = self._gl
@@ -520,11 +560,11 @@ class GPURelightRenderer:
                 max(float(getattr(light, "source_radius_m", 0.018)), 0.001),
             )
             visual_radii[i] = max(float(getattr(light, "visual_radius_m", 0.035)), 0.004)
-        gl.glUniform1i(gl.glGetUniformLocation(program, "uLightCount"), min(len(lights), 2))
-        gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightPosition[0]"), 2, positions)
-        gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightColor[0]"), 2, colors)
-        gl.glUniform4fv(gl.glGetUniformLocation(program, "uLightPower[0]"), 2, powers)
-        visual_radius_location = gl.glGetUniformLocation(program, "uLightVisualRadius[0]")
+        gl.glUniform1i(self._uniform(program, "uLightCount"), min(len(lights), 2))
+        gl.glUniform3fv(self._uniform(program, "uLightPosition[0]"), 2, positions)
+        gl.glUniform3fv(self._uniform(program, "uLightColor[0]"), 2, colors)
+        gl.glUniform4fv(self._uniform(program, "uLightPower[0]"), 2, powers)
+        visual_radius_location = self._uniform(program, "uLightVisualRadius[0]")
         if visual_radius_location >= 0:
             gl.glUniform1fv(visual_radius_location, 2, visual_radii)
 
@@ -532,7 +572,9 @@ class GPURelightRenderer:
         gl = self._gl
         gl.glActiveTexture(gl.GL_TEXTURE0 + unit)
         gl.glBindTexture(gl.GL_TEXTURE_2D, texture)
-        gl.glUniform1i(gl.glGetUniformLocation(program, uniform_name), unit)
+        location = self._uniform(program, uniform_name)
+        if location >= 0:
+            gl.glUniform1i(location, unit)
 
     def _draw(self, program: int, width: int, height: int) -> None:
         gl = self._gl
@@ -586,10 +628,23 @@ class GPURelightRenderer:
         *,
         ambient: float = 0.40,
         readback: bool = True,
+        stage: str = "full",
+        diffuse_strength: float = DEFAULT_DIFFUSE_STRENGTH,
+        specular_strength: float = DEFAULT_SPECULAR_STRENGTH,
+        shininess: float = DEFAULT_SHININESS,
+        direct_gain: float = DEFAULT_DIRECT_GAIN,
+        shadows_enabled: bool | None = None,
+        volumetrics_enabled: bool | None = None,
     ) -> tuple[np.ndarray | None, dict[str, float | str]]:
         with self._render_lock:
             try:
-                return self._render_impl(rgb, geometry, lights, ambient=ambient, readback=readback)
+                return self._render_impl(
+                    rgb, geometry, lights, ambient=ambient, readback=readback,
+                    stage=stage, diffuse_strength=diffuse_strength,
+                    specular_strength=specular_strength, shininess=shininess,
+                    direct_gain=direct_gain, shadows_enabled=shadows_enabled,
+                    volumetrics_enabled=volumetrics_enabled,
+                )
             finally:
                 if self._window is not None:
                     self._glfw.make_context_current(None)
@@ -602,10 +657,26 @@ class GPURelightRenderer:
         *,
         ambient: float = 0.40,
         readback: bool = True,
+        stage: str = "full",
+        diffuse_strength: float = DEFAULT_DIFFUSE_STRENGTH,
+        specular_strength: float = DEFAULT_SPECULAR_STRENGTH,
+        shininess: float = DEFAULT_SHININESS,
+        direct_gain: float = DEFAULT_DIRECT_GAIN,
+        shadows_enabled: bool | None = None,
+        volumetrics_enabled: bool | None = None,
     ) -> tuple[np.ndarray | None, dict[str, float | str]]:
         if not self.initialized:
             raise RuntimeError("GPU relight renderer is not initialized")
         render_started = time.perf_counter()
+        stage_name = normalize_lighting_stage(stage)
+        stage_defaults = LIGHTING_STAGES[stage_name]
+        if shadows_enabled is None:
+            shadows_enabled = bool(stage_defaults["shadows"])
+        if volumetrics_enabled is None:
+            volumetrics_enabled = bool(stage_defaults["volumetrics"])
+        specular_enabled = bool(stage_defaults["specular"]) and float(specular_strength) > 0.0
+        if stage_name == "l2_diffuse":
+            specular_strength = 0.0
         frame = np.ascontiguousarray(np.asarray(rgb)[..., :3], dtype=np.uint8)
         height, width = frame.shape[:2]
         if geometry.depth.shape != (height, width) or geometry.normals is None:
@@ -621,12 +692,30 @@ class GPURelightRenderer:
         if confidence is None:
             confidence = valid.astype(np.float32)
         confidence = np.clip(np.nan_to_num(np.asarray(confidence, dtype=np.float32), nan=0.0), 0.0, 1.0)
+        normal_length = np.linalg.norm(normals, axis=-1)
+        normal_confidence = getattr(geometry, "normal_confidence", None)
+        if normal_confidence is None:
+            normal_confidence = np.clip((normal_length - 1e-4) / 0.25, 0.0, 1.0)
+        normal_confidence = np.clip(np.nan_to_num(np.asarray(normal_confidence, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+        normal_valid_mask = getattr(geometry, "normal_valid_mask", None)
+        if normal_valid_mask is not None:
+            normal_confidence = np.where(np.asarray(normal_valid_mask, dtype=bool), normal_confidence, 0.0)
         valid_tex = valid.astype(np.uint8) * 255
         self._upload("rgb", frame, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
-        self._upload("depth", depth, gl.GL_RED, gl.GL_FLOAT)
-        self._upload("normal", np.ascontiguousarray(normals), gl.GL_RGB, gl.GL_FLOAT)
-        self._upload("confidence", np.ascontiguousarray(confidence), gl.GL_RED, gl.GL_FLOAT)
-        self._upload("valid", np.ascontiguousarray(valid_tex), gl.GL_RED, gl.GL_UNSIGNED_BYTE)
+        self._rgb_upload_count += 1
+        geometry_key = (
+            geometry.source_frame_id, width, height,
+            round(float(geometry.camera.fx), 4), round(float(geometry.camera.fy), 4),
+            round(float(geometry.camera.cx), 4), round(float(geometry.camera.cy), 4),
+        )
+        if geometry_key != self._geometry_upload_key:
+            self._upload("depth", depth, gl.GL_RED, gl.GL_FLOAT)
+            self._upload("normal", np.ascontiguousarray(normals), gl.GL_RGB, gl.GL_FLOAT)
+            self._upload("normal_confidence", np.ascontiguousarray(normal_confidence), gl.GL_RED, gl.GL_FLOAT)
+            self._upload("confidence", np.ascontiguousarray(confidence), gl.GL_RED, gl.GL_FLOAT)
+            self._upload("valid", np.ascontiguousarray(valid_tex), gl.GL_RED, gl.GL_UNSIGNED_BYTE)
+            self._geometry_upload_key = geometry_key
+            self._geometry_upload_count += 1
         active = [light for light in lights if light.enabled and light.confidence > 0 and np.isfinite(light.position_camera).all() and light.position_camera[2] > 0][:2]
         now = time.monotonic()
         history_ok = self._history_compatible(geometry, active, now)
@@ -642,54 +731,55 @@ class GPURelightRenderer:
         gl.glClearColor(0.0, 0.0, 0.0, 0.0)
         gl.glClear(gl.GL_COLOR_BUFFER_BIT)
         gl.glUseProgram(surface_program)
-        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uLightCount"), min(len(active), 2))
+        gl.glUniform1i(self._uniform(surface_program, "uLightCount"), min(len(active), 2))
         self._set_lights(surface_program, active)
-        gl.glUniform2f(gl.glGetUniformLocation(surface_program, "uResolution"), width, height)
-        gl.glUniform4fv(gl.glGetUniformLocation(surface_program, "uCamera"), 1, cam)
-        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowRays"), self.quality.shadow_rays)
-        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowSteps"), self.quality.shadow_steps)
-        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uHistoryAllowed"), int(history_ok))
-        gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uHistoryWeight"), self.quality.history_weight)
-        gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uAmbient"), float(ambient))
+        gl.glUniform2f(self._uniform(surface_program, "uResolution"), width, height)
+        gl.glUniform4fv(self._uniform(surface_program, "uCamera"), 1, cam)
+        gl.glUniform1i(self._uniform(surface_program, "uShadowRays"), self.quality.shadow_rays)
+        gl.glUniform1i(self._uniform(surface_program, "uShadowSteps"), self.quality.shadow_steps)
+        gl.glUniform1i(self._uniform(surface_program, "uShadowsEnabled"), int(bool(shadows_enabled)))
+        gl.glUniform1i(self._uniform(surface_program, "uHistoryAllowed"), int(history_ok and shadows_enabled))
+        gl.glUniform1f(self._uniform(surface_program, "uHistoryWeight"), self.quality.history_weight)
+        gl.glUniform1f(self._uniform(surface_program, "uDiffuseStrength"), float(diffuse_strength))
+        gl.glUniform1f(self._uniform(surface_program, "uSpecularStrength"), float(specular_strength if specular_enabled else 0.0))
+        gl.glUniform1f(self._uniform(surface_program, "uShininess"), max(float(shininess), 1.0))
+        gl.glUniform1f(self._uniform(surface_program, "uDirectGain"), max(float(direct_gain), 0.0))
         self._bind_texture(0, self._textures["rgb"], surface_program, "uRgb")
         self._bind_texture(1, self._textures["depth"], surface_program, "uDepth")
         self._bind_texture(2, self._textures["normal"], surface_program, "uNormal")
-        self._bind_texture(3, self._textures["confidence"], surface_program, "uConfidence")
-        self._bind_texture(4, self._textures["valid"], surface_program, "uValid")
-        self._bind_texture(5, self._textures[f"shadow{previous_index}"], surface_program, "uPrevShadow")
-        self._bind_texture(6, self._textures[f"history_depth{previous_index}"], surface_program, "uPrevDepth")
+        self._bind_texture(3, self._textures["normal_confidence"], surface_program, "uNormalConfidence")
+        self._bind_texture(4, self._textures["confidence"], surface_program, "uConfidence")
+        self._bind_texture(5, self._textures["valid"], surface_program, "uValid")
+        self._bind_texture(6, self._textures[f"shadow{previous_index}"], surface_program, "uPrevShadow")
+        self._bind_texture(7, self._textures[f"history_depth{previous_index}"], surface_program, "uPrevDepth")
         self._draw(surface_program, width, height)
 
-        volume_program = self._programs["volume"]
-        gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["volume"])
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures[f"volume{write_index}"], 0)
-        gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
-        self._check_framebuffer("volume")
-        gl.glUseProgram(volume_program)
-        gl.glUniform2f(gl.glGetUniformLocation(volume_program, "uResolution"), width, height)
-        gl.glUniform2f(gl.glGetUniformLocation(volume_program, "uVolumeResolution"), self._volume_width, self._volume_height)
-        gl.glUniform4fv(gl.glGetUniformLocation(volume_program, "uCamera"), 1, cam)
-        self._set_lights(volume_program, active)
-        gl.glUniform1i(gl.glGetUniformLocation(volume_program, "uVolumeSteps"), self.quality.volume_steps)
-        gl.glUniform1i(gl.glGetUniformLocation(volume_program, "uVolShadowSteps"), self.quality.volume_shadow_steps)
-        gl.glUniform1i(gl.glGetUniformLocation(volume_program, "uHistoryAllowed"), int(history_ok))
-        gl.glUniform1f(gl.glGetUniformLocation(volume_program, "uHistoryWeight"), self.quality.history_weight)
-        gl.glUniform1f(gl.glGetUniformLocation(volume_program, "uDensity"), 0.12)
-        self._bind_texture(1, self._textures["depth"], volume_program, "uDepth")
-        self._bind_texture(2, self._textures["valid"], volume_program, "uValid")
-        self._bind_texture(5, self._textures[f"volume{previous_index}"], volume_program, "uPrevVolume")
-        self._bind_texture(6, self._textures[f"history_depth{previous_index}"], volume_program, "uPrevDepth")
-        self._draw(volume_program, self._volume_width, self._volume_height)
+        if volumetrics_enabled:
+            volume_program = self._programs["volume"]
+            gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers[f"volume{write_index}"])
+            gl.glUseProgram(volume_program)
+            gl.glUniform2f(self._uniform(volume_program, "uResolution"), width, height)
+            gl.glUniform2f(self._uniform(volume_program, "uVolumeResolution"), self._volume_width, self._volume_height)
+            gl.glUniform4fv(self._uniform(volume_program, "uCamera"), 1, cam)
+            self._set_lights(volume_program, active)
+            gl.glUniform1i(self._uniform(volume_program, "uVolumeSteps"), self.quality.volume_steps)
+            gl.glUniform1i(self._uniform(volume_program, "uVolShadowSteps"), self.quality.volume_shadow_steps)
+            gl.glUniform1i(self._uniform(volume_program, "uHistoryAllowed"), int(history_ok))
+            gl.glUniform1f(self._uniform(volume_program, "uHistoryWeight"), self.quality.history_weight)
+            gl.glUniform1f(self._uniform(volume_program, "uDensity"), 0.12)
+            self._bind_texture(1, self._textures["depth"], volume_program, "uDepth")
+            self._bind_texture(2, self._textures["valid"], volume_program, "uValid")
+            self._bind_texture(5, self._textures[f"volume{previous_index}"], volume_program, "uPrevVolume")
+            self._bind_texture(6, self._textures[f"history_depth{previous_index}"], volume_program, "uPrevDepth")
+            self._draw(volume_program, self._volume_width, self._volume_height)
 
         composite_program = self._programs["composite"]
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["output"])
-        gl.glFramebufferTexture2D(gl.GL_FRAMEBUFFER, gl.GL_COLOR_ATTACHMENT0, gl.GL_TEXTURE_2D, self._textures["output"], 0)
-        gl.glDrawBuffers(1, [gl.GL_COLOR_ATTACHMENT0])
-        self._check_framebuffer("output")
         gl.glUseProgram(composite_program)
-        gl.glUniform2f(gl.glGetUniformLocation(composite_program, "uResolution"), width, height)
-        gl.glUniform2f(gl.glGetUniformLocation(composite_program, "uVolumeResolution"), self._volume_width, self._volume_height)
-        gl.glUniform4fv(gl.glGetUniformLocation(composite_program, "uCamera"), 1, cam)
+        gl.glUniform2f(self._uniform(composite_program, "uResolution"), width, height)
+        gl.glUniform2f(self._uniform(composite_program, "uVolumeResolution"), self._volume_width, self._volume_height)
+        gl.glUniform4fv(self._uniform(composite_program, "uCamera"), 1, cam)
+        gl.glUniform1i(self._uniform(composite_program, "uVolumeEnabled"), int(bool(volumetrics_enabled)))
         self._set_lights(composite_program, active)
         self._bind_texture(0, self._textures["surface"], composite_program, "uSurface")
         self._bind_texture(1, self._textures[f"volume{write_index}"], composite_program, "uVolume")
@@ -713,6 +803,13 @@ class GPURelightRenderer:
             "volumetric_quality": f"{self.quality.volume_steps}/{self.quality.volume_shadow_steps}",
             "gl_version": self.gl_version,
             "volumetric_resolution": f"{self._volume_width}x{self._volume_height}",
+            "stage": stage_name,
+            "diffuse_strength": float(diffuse_strength),
+            "specular_strength": float(specular_strength),
+            "direct_gain": float(direct_gain),
+            "shadows_enabled": float(bool(shadows_enabled)),
+            "volumetrics_enabled": float(bool(volumetrics_enabled)),
+            "geometry_uploads": float(self._geometry_upload_count),
         }
         return result, dict(self.last_stats)
 
@@ -723,9 +820,21 @@ class GPURelightRenderer:
         lights: list[LightState] | tuple[LightState, ...],
         *,
         ambient: float = 0.40,
+        stage: str = "full",
+        diffuse_strength: float = DEFAULT_DIFFUSE_STRENGTH,
+        specular_strength: float = DEFAULT_SPECULAR_STRENGTH,
+        shininess: float = DEFAULT_SHININESS,
+        direct_gain: float = DEFAULT_DIRECT_GAIN,
+        shadows_enabled: bool | None = None,
+        volumetrics_enabled: bool | None = None,
     ) -> tuple[int, dict[str, float | str]]:
         """Render without CPU readback for the P123 shared OpenGL context."""
-        self.render(rgb, geometry, lights, ambient=ambient, readback=False)
+        self.render(
+            rgb, geometry, lights, ambient=ambient, readback=False, stage=stage,
+            diffuse_strength=diffuse_strength, specular_strength=specular_strength,
+            shininess=shininess, direct_gain=direct_gain,
+            shadows_enabled=shadows_enabled, volumetrics_enabled=volumetrics_enabled,
+        )
         return self.output_texture, dict(self.last_stats)
 
     @property
@@ -744,6 +853,8 @@ class GPURelightRenderer:
                     for program in self._programs.values():
                         gl.glDeleteProgram(program)
                     self._programs.clear()
+                    self._uniform_cache.clear()
+                    self._geometry_upload_key = None
                     if self._vao:
                         gl.glDeleteVertexArrays(1, [self._vao])
                         self._vao = 0

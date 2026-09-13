@@ -1,12 +1,14 @@
 # GPU Hand Relighting
 
-Mode 7 is an OpenGL 3.3 GPU screen-space/camera-space ray-marched relighter over
-monocular 2.5D geometry. It uses `fast_geometry_state` when available, falling
-back to `geometry_state`, and positions lights from fresh `HandXYZ.xyz_camera`;
-it never samples palm depth to infer a production light position. RGB is
-converted from sRGB to linear before surface lighting, then converted back at
-the final composite. Diffuse is albedo-weighted; specular is additive. The CPU
-Youssef renderer remains the explicit fallback and reference path.
+Mode 7 is an OpenGL 3.3 GPU screen-space/camera-space relighter over full-
+resolution monocular 2.5D geometry. It uses `fast_geometry_state` when
+available, falling back to `geometry_state`, and positions lights from fresh
+`HandXYZ.xyz_camera`; it never samples palm depth to infer a production light
+position. RGB is converted from sRGB to linear before surface lighting, then
+converted back at the final composite. Diffuse is albedo-weighted Lambertian;
+specular is additive Blinn-Phong and is gated by front-facing and normal
+reliability checks. The CPU Youssef renderer remains the explicit fallback and
+mathematically consistent reference path.
 
 The GPU path combines full-resolution surface lighting, up to two independently
 colored lights, camera-space soft area-light shadow rays, reduced-resolution
@@ -57,11 +59,19 @@ avoids this copy. Create the P123 relight context first and pass its shared
 render target. The shared GL context owns the texture;
 close the renderer and window during shutdown.
 
-The renderer is screen-space/camera-space ray marched, not hardware ray
-tracing. Balanced settings use four deterministic area-light shadow rays with
+The renderer is screen-space/camera-space ray marched, not hardware RTX ray
+tracing. The L2 surface pass is always full resolution. Mode 7's `L` key cycles
+the stage selector: `L2 · DIFFUSE`, `L2 · DIFFUSE + SPECULAR`, and `FULL ·
+SHADOWS + VOLUMETRICS`. L2 stages skip shadow ray marching and the volumetric
+pass; `FULL` retains the existing optional shadow, volume, orb, and temporal
+behavior. Balanced settings use four deterministic area-light shadow rays with
 six samples each, quarter-resolution volumetrics with six camera samples and
 four sample-to-light visibility steps, and conservative depth-rejected
 temporal history. No per-frame depth normalization is performed.
+
+The CPU fallback uses the same linear-light equations and defaults. Low normal
+or geometry confidence attenuates only synthetic lighting; observed camera RGB
+remains visible. It is explicitly labeled `CPU_FALLBACK` in telemetry.
 
 ## Backend selection
 
@@ -75,4 +85,6 @@ The optional native build is under `native/optix_relight/` and requires the
 NVIDIA OptiX SDK, CUDA Toolkit, CMake, a C++ compiler, and pybind11. Set
 `OPTIX_ROOT` or pass `--optix-root` to `tools/build_optix_backend.py`. The
 current GTX 1650 Ti is intentionally detected as non-RTX and uses the raster
-backend.
+backend. OpenGL raster is not hardware RTX ray tracing; the optional OptiX
+module is not the production path until it is genuinely functional and
+physically validated on an RTX card.
