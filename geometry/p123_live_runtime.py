@@ -130,6 +130,17 @@ def _smooth_depth(
     return np.where(valid, smoothed, np.nan).astype(np.float32)
 
 
+def _talel_depth_from_palm_size(
+    fx: float, palm_width_px: float | None, *, real_palm_m: float = 0.085,
+    z_min: float = 0.20, z_max: float = 3.0, fallback: float = 0.50,
+) -> tuple[float, bool]:
+    """Talel hand branch's stable metric Z proxy from apparent palm width."""
+    if palm_width_px is None or palm_width_px < 8.0:
+        return float(fallback), False
+    z = float(fx * real_palm_m / palm_width_px)
+    return float(np.clip(z, z_min, z_max)), True
+
+
 class P123LiveRuntime:
     """Run camera, depth, geometry/temporal, and hands on independent workers."""
 
@@ -400,9 +411,19 @@ class P123LiveRuntime:
             with self._state_lock:
                 raw_depth_state = self._depth
             for hand in hands.hands:
-                z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
-                if z <= 0.0 and raw_depth_state is not None:
-                    z, reliability = sample_depth(raw_depth_state.depth, raw_depth_state.valid_mask, *hand.palm_uv)
+                sampled_z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
+                if sampled_z <= 0.0 and raw_depth_state is not None:
+                    sampled_z, reliability = sample_depth(raw_depth_state.depth, raw_depth_state.valid_mask, *hand.palm_uv)
+                # Relative monocular depth has no metric unit. Use it only
+                # when it lands in Talel's physically plausible working
+                # volume; otherwise use his palm-size proxy so XYZ cannot
+                # collapse to centimetre-scale coordinates.
+                size_z, size_ok = _talel_depth_from_palm_size(self.camera.fx, hand.palm_width_px)
+                mode_value = getattr(getattr(geometry, "scale_mode", "relative"), "value", getattr(geometry, "scale_mode", "relative"))
+                metric_depth = str(mode_value) == "metric"
+                z = sampled_z if metric_depth and 0.20 <= sampled_z <= 3.0 else size_z
+                if not size_ok:
+                    reliability *= 0.5
                 raw_xyz = None if z <= 0 else np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
                 if raw_xyz is None:
                     prior_xyz = self._xyz_smooth.get(hand.hand_id)

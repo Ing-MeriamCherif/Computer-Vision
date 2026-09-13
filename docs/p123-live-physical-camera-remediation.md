@@ -41,6 +41,15 @@ physical A/B run showed cleaner foreground/background separation than the local
 provider, but approximately 9.8 Hz FP32 and 3 Hz FP16 on this GTX 1650 Ti;
 therefore the local provider remains the default for responsive live video.
 
+### Talel XYZ correction
+
+XYZ now uses Talel's `light_vector.py` math for relative-depth runs: apparent
+palm width estimates metric Z with `z = fx * 0.085 / palm_pixels`, clamped to
+0.2–3.0 m, followed by camera-model back-projection. A sampled depth value is
+used directly only for an explicitly metric depth state. This prevents the
+previous relative-depth values (for example `z≈0.02`) from being mislabeled as
+camera-space meters.
+
 ## P123 CONSOLIDATION NOTES
 
 The runtime now negotiates camera dimensions after `start()`, rebuilds the

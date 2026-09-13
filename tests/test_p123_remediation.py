@@ -169,3 +169,13 @@ def test_depth_size_parser_accepts_rectangular_inputs():
 
     assert _parse_depth_size("336x448", (480, 640)) == (336, 448)
     assert _parse_depth_size("native", (480, 640)) == (480, 640)
+
+
+def test_talel_xyz_depth_proxy_stays_in_metric_working_volume():
+    from geometry.p123_live_runtime import _talel_depth_from_palm_size
+
+    z, estimated = _talel_depth_from_palm_size(525.0, 45.0)
+    assert estimated is True
+    assert 0.20 <= z <= 3.0
+    fallback, estimated = _talel_depth_from_palm_size(525.0, None)
+    assert (fallback, estimated) == (0.50, False)

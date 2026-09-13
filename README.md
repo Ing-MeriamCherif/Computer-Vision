@@ -100,6 +100,11 @@ down, +Z forward) in the upper-left corner beside each hand annotation. Depth,
 normals, temporal confidence, hand positions, and XYZ all use the postprocessed
 live states rather than raw worker buffers.
 
+XYZ follows Talel's hand-branch back-projection convention: palm size provides
+a bounded metric Z estimate (0.2–3.0 m) for relative-depth runs, then the
+calibrated camera model computes `+X right, +Y down, +Z forward`. Metric depth
+maps are used directly only when explicitly supplied.
+
 For the GTX 1650 Ti, the measured physical-camera sweet spot is FP32 at
 `--depth-size 336x448` (rectangular HxW syntax). The default runtime keeps the
 slower full CPU temporal reference disabled; enable it explicitly with
