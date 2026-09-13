@@ -40,7 +40,11 @@ def _draw_mode_buttons(image: np.ndarray, active_mode: int) -> np.ndarray:
     return out
 
 
-def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
+def _panel(
+    snapshot: P123Snapshot,
+    mode: int,
+    display_size: tuple[int, int] | None = None,
+) -> np.ndarray | None:
     rgb = snapshot.rgb_frame
     if rgb is None:
         return None
@@ -49,19 +53,31 @@ def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
         title = "MODE 1 — RGB CAMERA"
     elif mode == 2:
         if snapshot.depth_state is None:
-            return _overlay(np.zeros_like(rgb), "MODE 2 — DEPTH", ["waiting for depth worker"])
-        image = depth_to_rgb(snapshot.depth_state.depth, snapshot.depth_state.valid_mask)
-        title = "MODE 2 — DEPTH (warm=near, cool=far)"
+            image = np.zeros_like(rgb)
+            title = "MODE 2 — DEPTH"
+            waiting = "waiting for depth worker"
+        else:
+            image = depth_to_rgb(snapshot.depth_state.depth, snapshot.depth_state.valid_mask)
+            title = "MODE 2 — DEPTH (warm=near, cool=far)"
+            waiting = None
     elif mode == 3:
         if snapshot.geometry_state is None or snapshot.geometry_state.normals is None:
-            return _overlay(np.zeros_like(rgb), "MODE 3 — NORMALS", ["waiting for geometry worker"])
-        image = normals_to_rgb_diagnostic(snapshot.geometry_state.normals, snapshot.geometry_state.normal_valid_mask)
-        title = "MODE 3 — NORMALS (R=Nx G=Ny B=Nz)"
+            image = np.zeros_like(rgb)
+            title = "MODE 3 — NORMALS"
+            waiting = "waiting for geometry worker"
+        else:
+            image = normals_to_rgb_diagnostic(snapshot.geometry_state.normals, snapshot.geometry_state.normal_valid_mask)
+            title = "MODE 3 — NORMALS (R=Nx G=Ny B=Nz)"
+            waiting = None
     elif mode == 4:
         if snapshot.geometry_state is None:
-            return _overlay(np.zeros_like(rgb), "MODE 4 — TEMPORAL / CONFIDENCE", ["waiting for temporal geometry"])
-        image = confidence_to_rgb(snapshot.geometry_state.temporal_confidence, snapshot.geometry_state.valid_mask)
-        title = "MODE 4 — TEMPORAL CONFIDENCE"
+            image = np.zeros_like(rgb)
+            title = "MODE 4 — TEMPORAL / CONFIDENCE"
+            waiting = "waiting for temporal geometry"
+        else:
+            image = confidence_to_rgb(snapshot.geometry_state.temporal_confidence, snapshot.geometry_state.valid_mask)
+            title = "MODE 4 — TEMPORAL CONFIDENCE"
+            waiting = None
     elif mode == 5:
         image = rgb.copy()
         title = "MODE 5 — HANDS"
@@ -78,6 +94,8 @@ def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
             text = f"H{hand.hand_id} UV=({hand.palm_uv[0]:.0f},{hand.palm_uv[1]:.0f}) XYZ={hand.xyz_camera} conf={hand.confidence:.2f} age={hand.age_ms:.0f}ms"
             cv2.putText(image, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 210), 1, cv2.LINE_AA)
             y += 18
+    if display_size is not None and (image.shape[1], image.shape[0]) != display_size:
+        image = _fit(image, display_size)
     metrics = snapshot.metrics
     lines = [
         f"capture {snapshot.rgb_capture_id} | capture Hz {metrics.capture_hz or 0:.1f} | overwritten {metrics.overwritten_before_consumption}",
@@ -85,6 +103,8 @@ def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")
+    if "waiting" in locals() and waiting is not None:
+        lines.append(waiting)
     return _draw_mode_buttons(_overlay(image, title, lines), mode)
 
 
@@ -123,16 +143,16 @@ def main() -> int:
     window = "NRW P123 Live Diagnostics"
     try:
         if not args.headless:
-            cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+            cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
             def on_mouse(event, x, y, _flags, state):
-                if event == cv2.EVENT_LBUTTONUP and y >= max(0, args.height - 42):
+                if event == cv2.EVENT_LBUTTONUP and y >= max(0, args.height - 42) and 0 <= x < args.width:
                     state["mode"] = min(6, max(1, int(x / max(args.width / 6.0, 1.0)) + 1))
             cv2.setMouseCallback(window, on_mouse, ui_state)
         while args.duration is None or time.monotonic() - started < args.duration:
             snapshot = runtime.snapshot()
             if not args.headless:
                 mode = int(ui_state["mode"])
-                view = _panel(snapshot, mode)
+                view = _panel(snapshot, mode, (args.width, args.height))
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
                 key = cv2.waitKey(10) & 0xFF
@@ -140,6 +160,7 @@ def main() -> int:
                     break
                 if ord("1") <= key <= ord("6"):
                     mode = key - ord("0")
+                    ui_state["mode"] = mode
             else:
                 time.sleep(0.02)
     finally:
