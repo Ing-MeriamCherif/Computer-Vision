@@ -110,9 +110,23 @@ float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius, int lightIndex)
     return visibility / float(max(uShadowRays, 1));
 }
 
-float rtVisibility(vec2 uv, int lightIndex) {
-    vec2 visibility = texture(uRtVisibility, uv).rg;
-    return lightIndex == 0 ? visibility.r : visibility.g;
+// Depth-aware replacement for the legacy rtVisibility(vUv, i) lookup.
+float rtVisibility(vec2 uv, float receiverZ, int lightIndex) {
+    vec2 texel = 1.0 / vec2(textureSize(uRtVisibility, 0));
+    float sum = 0.0;
+    float weights = 0.0;
+    for (int oy = -1; oy <= 1; ++oy) {
+        for (int ox = -1; ox <= 1; ++ox) {
+            vec2 sampleUv = clamp(uv + vec2(ox, oy) * texel, vec2(0.0), vec2(1.0));
+            float candidateZ = texture(uDepth, sampleUv).r;
+            float dz = abs(candidateZ - receiverZ);
+            float depthWeight = exp(-dz / max(0.025, 0.04 * receiverZ));
+            float value = lightIndex == 0 ? texture(uRtVisibility, sampleUv).r : texture(uRtVisibility, sampleUv).g;
+            sum += value * depthWeight;
+            weights += depthWeight;
+        }
+    }
+    return sum / max(weights, 1e-5);
 }
 
 void main() {
@@ -153,7 +167,7 @@ void main() {
         float beamLobe = smoothstep(uLightCone[i].x, uLightCone[i].y, beamCosine);
         attenuation *= mix(1.0, beamLobe, clamp(uLightBeam[i].w, 0.0, 1.0));
         float visibility = uShadowsEnabled == 0 ? 1.0 : (uUseRtShadow != 0
-            ? rtVisibility(vUv, i)
+            ? rtVisibility(vUv, z, i)
             : rayVisibility(p, n, uLightPosition[i], uLightPower[i].w, i));
         // The stored visibility texture is shared; only a single emitter can
         // safely reuse it. Multi-light frames keep independent current rays.
@@ -171,8 +185,7 @@ void main() {
     }
     if (uLightCount > 0) visibilityMean = visibilitySum / float(uLightCount);
     float ambient = max(uAmbient, 0.05);
-    vec3 ambientTerm = base * ambient;
-    vec3 shaded = (ambientTerm + diffuseTerm + specularTerm) / ambient;
+    vec3 shaded = base + diffuseTerm + specularTerm;
     oSurface = vec4(shaded, 1.0);
     oShadow = visibilityMean;
     oDepth = z;
@@ -360,6 +373,13 @@ class GPURelightRenderer:
         self._rt_renderer = None
         self._rt_init_error = "not initialized"
         self._rt_mode = os.environ.get("NRW_RAY_BACKEND", "auto").strip().lower()
+        self._require_rt = False
+        try:
+            import torch
+            gpu_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else ""
+            self._require_rt = bool(gpu_name and "RTX" in gpu_name.upper() and self._rt_mode in {"auto", "optix", "rtx"})
+        except Exception:
+            self._require_rt = False
         try:
             self._rt_width = max(32, int(os.environ.get("NRW_RT_WIDTH", "96")))
             self._rt_height = max(18, int(os.environ.get("NRW_RT_HEIGHT", "54")))
@@ -430,6 +450,8 @@ class GPURelightRenderer:
                     self._rt_renderer, self._rt_init_error = create_optix_renderer(self._rt_width, self._rt_height)
                 except Exception as exc:
                     self._rt_init_error = f"{type(exc).__name__}: {exc}"
+            if self._require_rt and self._rt_renderer is None:
+                raise RuntimeError(f"RTX GPU DETECTED BUT OPTIX RAY TRACING IS UNAVAILABLE: {self._rt_init_error}")
             self.initialized = True
             glfw.make_context_current(None)
         except Exception:
@@ -518,7 +540,7 @@ class GPURelightRenderer:
         self._texture("surface", width, height, gl.GL_RGBA16F, gl.GL_RGBA, gl.GL_FLOAT, filtering=linear)
         self._texture("output", width, height, gl.GL_RGBA8, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, filtering=linear)
         self._texture("rt_visibility", self._rt_width, self._rt_height,
-                      gl.GL_RG32F, gl.GL_RG, gl.GL_FLOAT, filtering=linear)
+                      gl.GL_RG32F, gl.GL_RG, gl.GL_FLOAT, filtering=nearest)
         for i in range(2):
             self._texture(f"shadow{i}", width, height, gl.GL_R16F, gl.GL_RED, gl.GL_FLOAT, filtering=linear)
             self._texture(f"history_depth{i}", width, height, gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
@@ -736,6 +758,8 @@ class GPURelightRenderer:
                                    gl.GL_RG, gl.GL_FLOAT, np.ascontiguousarray(rt_visibility))
             except Exception as exc:
                 self._rt_init_error = f"{type(exc).__name__}: {exc}"
+                if self._require_rt:
+                    raise RuntimeError(f"OptiX runtime failure on RTX hardware: {self._rt_init_error}") from exc
                 self._rt_renderer = None
                 rt_active = False
         now = time.monotonic()
@@ -759,6 +783,8 @@ class GPURelightRenderer:
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowRays"), self.quality.shadow_rays)
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowSteps"), self.quality.shadow_steps)
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uHistoryAllowed"), int(history_ok))
+        if self._require_rt and stage in {"l4_shadows", "full"} and active and not rt_active:
+            raise RuntimeError("RTX shadow stage requires an active OptixShadowRenderer")
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uUseRtShadow"), int(rt_active))
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uHistoryWeight"), self.quality.history_weight)
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uAmbient"), float(ambient))
@@ -799,7 +825,12 @@ class GPURelightRenderer:
         self._bind_texture(5, self._textures[f"volume{previous_index}"], volume_program, "uPrevVolume")
         self._bind_texture(6, self._textures[f"history_depth{previous_index}"], volume_program, "uPrevDepth")
         pass_started = time.perf_counter()
-        self._draw(volume_program, self._volume_width, self._volume_height)
+        if stage == "full":
+            self._draw(volume_program, self._volume_width, self._volume_height)
+        else:
+            gl.glClearColor(0.0, 0.0, 0.0, 0.0)
+            gl.glClear(gl.GL_COLOR_BUFFER_BIT)
+            volumetric_submit_ms = 0.0
         volumetric_submit_ms = (time.perf_counter() - pass_started) * 1000.0
 
         composite_program = self._programs["composite"]
