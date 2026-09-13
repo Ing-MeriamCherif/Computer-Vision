@@ -1,9 +1,11 @@
-"""Compare Depth Anything V2 models — Small vs Base vs Large.
+"""Compare depth models: Depth Anything V2 vs YOLO26.
 
 Runs dummy-frame benchmarks (no camera needed) and writes a CSV.
 
 Usage:
     python -m model_comparison.benchmark --device cuda --num-frames 50
+    python -m model_comparison.benchmark --device cuda --models yolo26n,yolo26s
+    python -m model_comparison.benchmark --device cuda --models all
 """
 
 from __future__ import annotations
@@ -18,72 +20,46 @@ import numpy as np
 import torch
 
 from depth.benchmark import get_vram_mb
-
-
-MODELS = {
-    "depth_anything_v2_small": "depth-anything/Depth-Anything-V2-Small-hf",
-    "depth_anything_v2_base": "depth-anything/Depth-Anything-V2-Base-hf",
-    "depth_anything_v2_large": "depth-anything/Depth-Anything-V2-Large-hf",
-}
-
-MODELS_METRIC = {
-    "depth_anything_v2_small_metric": "depth-anything/Depth-Anything-V2-Small-metric-hf",
-    "depth_anything_v2_base_metric": "depth-anything/Depth-Anything-V2-Base-metric-hf",
-    "depth_anything_v2_large_metric": "depth-anything/Depth-Anything-V2-Large-metric-hf",
-}
+from depth.model import DepthModel
 
 
 def benchmark_model(
-    model_id: str,
+    backend: str,
     device: str,
     input_size: int,
     fp16: bool,
     num_frames: int = 50,
     warmup: int = 5,
 ) -> dict:
-    """Benchmark a single HF depth model."""
-    from transformers import pipeline
+    """Benchmark a single depth backend on dummy frames."""
+    model = DepthModel(backend=backend, device=device, input_size=input_size, fp16=fp16)
 
-    dtype = torch.float16 if fp16 and device == "cuda" else torch.float32
-    dev = 0 if device == "cuda" else -1
-
-    print(f"  Loading {model_id}...", end=" ", flush=True)
-    pipe = pipeline(
-        task="depth-estimation",
-        model=model_id,
-        device=dev,
-        torch_dtype=dtype,
-    )
+    print(f"  Loading {backend}...", end=" ", flush=True)
+    model.warmup(iterations=warmup)
     print("ready.")
 
-    from PIL import Image
+    dummy = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
 
-    dummy = Image.fromarray(
-        np.random.randint(0, 255, (input_size, input_size, 3), dtype=np.uint8)
-    )
-
-    # Warmup
-    for _ in range(warmup):
-        pipe(dummy)
-    if device == "cuda":
+    if torch.cuda.is_available():
         torch.cuda.synchronize()
         torch.cuda.reset_peak_memory_stats()
 
-    # Benchmark
     latencies = []
     for _ in range(num_frames):
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         t0 = time.perf_counter()
-        pipe(dummy)
-        if device == "cuda":
+        model.infer(dummy)
+        if torch.cuda.is_available():
             torch.cuda.synchronize()
         latencies.append((time.perf_counter() - t0) * 1000.0)
 
     latencies = np.array(latencies)
     vram = get_vram_mb()
 
-    del pipe
+    del model
     gc.collect()
-    if device == "cuda":
+    if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     return {
@@ -95,6 +71,18 @@ def benchmark_model(
     }
 
 
+MODELS = {
+    "da_v2_small": "depth_anything_v2_small",
+    "da_v2_base": "depth_anything_v2_base",
+    "da_v2_large": "depth_anything_v2_large",
+    "yolo26n": "yolo26n_depth",
+    "yolo26s": "yolo26s_depth",
+    "yolo26m": "yolo26m_depth",
+    "yolo26l": "yolo26l_depth",
+    "yolo26x": "yolo26x_depth",
+}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare depth models")
     parser.add_argument("--device", default="cuda")
@@ -102,47 +90,57 @@ def main():
     parser.add_argument("--fp16", action="store_true", default=True)
     parser.add_argument("--no-fp16", dest="fp16", action="store_false")
     parser.add_argument("--num-frames", type=int, default=50)
-    parser.add_argument("--metric", action="store_true",
-                        help="Use metric models (depth in meters)")
     parser.add_argument("--models", default="all",
-                        help="Comma-separated model names or 'all' (small,base,large)")
+                        help="Comma-separated: da_v2_small,da_v2_base,yolo26n,yolo26s,yolo26m,all")
     parser.add_argument("--output", default="model_comparison/results.csv")
     args = parser.parse_args()
 
-    model_pool = MODELS_METRIC if args.metric else MODELS
-
     if args.models == "all":
-        models = model_pool
+        models = MODELS
     else:
         names = [n.strip() for n in args.models.split(",")]
-        models = {k: v for k, v in model_pool.items() if k in names}
+        models = {k: v for k, v in MODELS.items() if k in names}
         if not models:
-            raise SystemExit(f"Unknown models: {names}. Available: {list(model_pool.keys())}")
+            raise SystemExit(f"Unknown models: {names}. Available: {list(MODELS.keys())}")
 
     results = []
-    for name, model_id in models.items():
-        print(f"[{name}]")
-        stats = benchmark_model(model_id, args.device, args.input_size,
-                                args.fp16, args.num_frames)
-        stats["model"] = name
-        stats["model_id"] = model_id
-        results.append(stats)
-        print(f"  median={stats['median_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  "
-              f"fps={stats['fps']:.1f}  vram={stats['vram_mb']:.0f}MB\n")
+    for name, backend in models.items():
+        print(f"\n[{name}]")
+        try:
+            stats = benchmark_model(backend, args.device, args.input_size,
+                                    args.fp16, args.num_frames)
+            stats["model"] = name
+            stats["backend"] = backend
+            results.append(stats)
+            print(f"  median={stats['median_ms']:.1f}ms  p95={stats['p95_ms']:.1f}ms  "
+                  f"fps={stats['fps']:.1f}  vram={stats['vram_mb']:.0f}MB")
+        except Exception as e:
+            print(f"  FAILED: {e}")
+
+    if not results:
+        raise SystemExit("No models succeeded.")
 
     # Summary
-    print("=" * 65)
-    print(f"{'Model':<30} {'Median':>8} {'P95':>8} {'FPS':>6} {'VRAM':>6}")
-    print("-" * 65)
-    for r in results:
-        print(f"{r['model']:<30} {r['median_ms']:>7.1f}ms {r['p95_ms']:>7.1f}ms "
+    print("\n" + "=" * 70)
+    print(f"{'Model':<20} {'Median':>8} {'P95':>8} {'FPS':>6} {'VRAM':>6}")
+    print("-" * 70)
+    for r in sorted(results, key=lambda x: x["median_ms"]):
+        print(f"{r['model']:<20} {r['median_ms']:>7.1f}ms {r['p95_ms']:>7.1f}ms "
               f"{r['fps']:>5.1f} {r['vram_mb']:>5.0f}MB")
-    print("=" * 65)
+    print("=" * 70)
+
+    # Speedup vs DA V2 Small
+    da_small = next((r for r in results if r["model"] == "da_v2_small"), None)
+    if da_small:
+        print(f"\nSpeedup vs Depth Anything V2 Small ({da_small['median_ms']:.1f}ms):")
+        for r in sorted(results, key=lambda x: x["median_ms"]):
+            speedup = da_small["median_ms"] / r["median_ms"] if r["median_ms"] > 0 else 0
+            print(f"  {r['model']:<20} {speedup:.1f}x")
 
     # CSV
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["model", "model_id", "median_ms", "p95_ms", "fps", "vram_mb", "num_frames"]
+    fieldnames = ["model", "backend", "median_ms", "p95_ms", "fps", "vram_mb", "num_frames"]
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
