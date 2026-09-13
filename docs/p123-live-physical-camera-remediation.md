@@ -2,7 +2,7 @@
 
 Base SHA: `85cae0e6deae1da8eff252907631de805392a531`
 
-Final SHA (code): `6bf8044818236639e831aaa10682c824f293a58d`
+Final SHA (code): `70f9ede`
 
 Branch: `bug-fixes/p123-quality-performance-consolidation`
 
@@ -27,6 +27,11 @@ latest-only CUDA-backed stream; full CPU temporal geometry is opt-in with
 at 200 ms (adaptive to depth cadence), with motion-responsive smoothing and
 expiry of held coordinates. No physical hand was present during the bounded
 headless comparison, so XYZ coordinates were not claimed as hardware-validated.
+
+Direct visual inspection of rendered panels found and corrected display-only
+depth speckle, normal speckle, and an obscured XYZ-axis legend. A low-confidence
+MediaPipe false hand near the face was also rejected; the post-fix webcam panel
+showed zero hands when no hand was present.
 
 ## P123 CONSOLIDATION NOTES
 
