@@ -48,7 +48,10 @@ palm width estimates metric Z with `z = fx * 0.085 / palm_pixels`, clamped to
 0.2–3.0 m, followed by camera-model back-projection. A sampled depth value is
 used directly only for an explicitly metric depth state. This prevents the
 previous relative-depth values (for example `z≈0.02`) from being mislabeled as
-camera-space meters.
+camera-space meters. The pending-state bug was a timestamp-domain error:
+freshness now uses the CUDA geometry completion timestamp rather than the older
+camera capture timestamp, so valid hand XYZ is not rejected while inference is
+still within the adaptive 180–200 ms window.
 
 ## P123 CONSOLIDATION NOTES
 

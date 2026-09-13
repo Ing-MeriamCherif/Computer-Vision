@@ -58,6 +58,13 @@ class ColleagueDepthProvider:
         return getattr(getattr(self._model, "_backend", None), "device", None)
 
     def warmup(self, iterations: int = 1) -> None:
+        try:
+            import torch
+            if self.device is not None and getattr(self.device, "type", "") == "cuda":
+                torch.backends.cudnn.benchmark = True
+                torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
         self._model.warmup(iterations=max(0, int(iterations)))
 
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:

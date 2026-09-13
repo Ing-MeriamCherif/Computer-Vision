@@ -172,10 +172,13 @@ def test_depth_size_parser_accepts_rectangular_inputs():
 
 
 def test_talel_xyz_depth_proxy_stays_in_metric_working_volume():
-    from geometry.p123_live_runtime import _talel_depth_from_palm_size
+    from geometry import CameraModel
+    from geometry.p123_live_runtime import _talel_depth_from_palm_size, _talel_hand_xyz
 
     z, estimated = _talel_depth_from_palm_size(525.0, 45.0)
     assert estimated is True
     assert 0.20 <= z <= 3.0
     fallback, estimated = _talel_depth_from_palm_size(525.0, None)
     assert (fallback, estimated) == (0.50, False)
+    xyz, estimated = _talel_hand_xyz(CameraModel(640, 480, 525, 525, 320, 240), (320, 240), 45)
+    assert estimated is True and np.allclose(xyz[:2], 0.0, atol=1e-6) and 0.9 < xyz[2] < 1.1

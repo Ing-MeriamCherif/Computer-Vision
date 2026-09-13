@@ -141,6 +141,12 @@ def _talel_depth_from_palm_size(
     return float(np.clip(z, z_min, z_max)), True
 
 
+def _talel_hand_xyz(camera: CameraModel, palm_uv: tuple[float, float], palm_width_px: float | None) -> tuple[np.ndarray, bool]:
+    """Return Talel's camera-space hand position and whether Z was estimated."""
+    z, estimated = _talel_depth_from_palm_size(camera.fx, palm_width_px)
+    return np.asarray(camera.unproject(palm_uv[0], palm_uv[1], z), dtype=np.float32), estimated
+
+
 class P123LiveRuntime:
     """Run camera, depth, geometry/temporal, and hands on independent workers."""
 
@@ -399,7 +405,12 @@ class P123LiveRuntime:
                 time.sleep(0.01)
                 continue
             last_key = key
-            age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
+            # Freshness is measured from geometry completion, not capture
+            # time. Mariem/Talel inference can legitimately finish a frame
+            # 100+ ms after capture; using the source timestamp made every
+            # valid hand appear perpetually "depth pending".
+            completed_at = geometry.completed_timestamp or geometry.timestamp
+            age_ms = max(0.0, (time.monotonic() - completed_at) * 1000.0)
             depth_hz = self._depth_times and _rate(self._depth_times) or 8.0
             freshness_limit = min(self.max_state_age_ms, max(180.0, 1.75 * (1000.0 / max(depth_hz, 1.0))))
             if age_ms > freshness_limit:
@@ -424,7 +435,12 @@ class P123LiveRuntime:
                 z = sampled_z if metric_depth and 0.20 <= sampled_z <= 3.0 else size_z
                 if not size_ok:
                     reliability *= 0.5
-                raw_xyz = None if z <= 0 else np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
+                if metric_depth and z > 0:
+                    raw_xyz = np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
+                elif z > 0:
+                    raw_xyz, _ = _talel_hand_xyz(geometry.camera, hand.palm_uv, hand.palm_width_px)
+                else:
+                    raw_xyz = None
                 if raw_xyz is None:
                     prior_xyz = self._xyz_smooth.get(hand.hand_id)
                     xyz = None if prior_xyz is None else tuple(float(v) for v in prior_xyz)
