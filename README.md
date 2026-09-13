@@ -142,6 +142,10 @@ See [`docs/team-integration.md`](docs/team-integration.md) for integration contr
 
 | Doc | Contents |
 |-----|---------|
+| [`docs/repository-inventory.md`](docs/repository-inventory.md) | File classification (Critical, Shared, Diagnostic, Experimental, Legacy) |
+| [`docs/runtime-path.md`](docs/runtime-path.md) | End-to-end critical runtime path & subsystem hand-off diagram |
+| [`docs/team-ownership.md`](docs/team-ownership.md) | Subsystem ownership (P1, P2, P3, P4, Shared) & provenance |
+| [`docs/known-issues.md`](docs/known-issues.md) | Active technical debt & known issues across all phases |
 | [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) | Thread model, frame ID contract, component reference |
 | [`docs/team-integration.md`](docs/team-integration.md) | Shared contracts, contribution workflow |
 | [`docs/geometry-phase1.md`](docs/geometry-phase1.md) | Calibration, backprojection |
