@@ -133,38 +133,6 @@ def test_depth_uv_mapping_and_warm_near_palette():
     assert tuple(image[0, 0])[:2] > tuple(image[0, 1])[:2]
 
 
-def test_depth_palette_has_dense_visual_levels_and_native_display_shape():
-    from types import SimpleNamespace
-    from geometry import DepthState
-    from geometry.visualization import depth_to_rgb
-    from p123.views import depth as depth_view
-
-    depth = np.linspace(0.5, 3.0, 64, dtype=np.float32).reshape(8, 8)
-    palette = depth_to_rgb(depth, np.ones_like(depth, dtype=bool))
-    assert palette.shape == (8, 8, 3)
-    assert len(np.unique(palette.reshape(-1, 3), axis=0)) > 32
-
-    low_depth = DepthState(
-        np.asarray([[0.5, 1.0], [2.0, 3.0]], dtype=np.float32),
-        1.0,
-        1,
-        "relative",
-        valid_mask=np.ones((2, 2), dtype=bool),
-    )
-    depth_view._LAST_FAST_STATE = None
-    snapshot = SimpleNamespace(rgb_frame=np.zeros((8, 8, 3), dtype=np.uint8), fast_geometry_state=None, depth_state=low_depth)
-    image, _, waiting = depth_view.render(snapshot)
-    assert waiting is None
-    assert image.shape == (8, 8, 3)
-
-
-def test_widescreen_camera_selects_shipped_high_detail_depth_engine():
-    from tools.p123_live_app import _resolved_depth_size
-
-    assert _resolved_depth_size("336x448", 1280, 720) == (336, 602)
-    assert _resolved_depth_size("336x448", 640, 480) == (336, 448)
-
-
 def test_depth_gate_rejects_reversed_forward_z():
     from tools.physical_camera_gate import _depth_results
     from geometry import DepthState

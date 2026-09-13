@@ -62,16 +62,6 @@ def _source_profile(args: argparse.Namespace, source: str, *, legacy_camera_is_p
     return str(camera), args.width, args.height
 
 
-def _resolved_depth_size(requested: str, source_width: int, source_height: int) -> tuple[int, int]:
-    """Choose the exact high-detail TensorRT shape for widescreen cameras."""
-    value = str(requested).strip().lower()
-    if value == "336x448" and source_width / max(source_height, 1) >= 1.5:
-        # The repository ships an exact 336x602 engine for 16:9 input. Keep
-        # the 4:3 336x448 default for webcams to avoid aspect distortion.
-        value = "336x602"
-    return _parse_depth_size(value, (source_height, source_width))
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app (Material 3 UI)")
     parser.add_argument("--camera", default=None, help="Legacy initial camera selector; use --webcam-camera/--phone-camera to configure both sources")
@@ -114,7 +104,7 @@ def main() -> int:
             camera_device = int(cam_str[10:])
         else:
             camera_device = camera_name
-        source_depth_size = _resolved_depth_size(args.depth_size, source_width, source_height)
+        source_depth_size = _parse_depth_size(args.depth_size, (source_height, source_width))
         result = P123LiveRuntime(
             camera_device=camera_device,
             width=source_width,
@@ -150,10 +140,7 @@ def main() -> int:
     )
     print(f"  Physical Camera:   {active_camera} ({active_width}x{active_height} @ {args.fps} FPS)")
     print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
-    actual_depth_size = getattr(runtime.depth_provider, "input_size", None) or args.depth_size
-    if isinstance(actual_depth_size, tuple):
-        actual_depth_size = f"{actual_depth_size[0]}x{actual_depth_size[1]}"
-    print(f"  Depth Backend:     {args.depth_backend} (input {actual_depth_size}, {'fp16' if args.fp16 else 'fp32'})")
+    print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
     print(f"  Depth Runtime:     {getattr(runtime.depth_provider, 'backend_name', 'unknown')}")
     depth_device = getattr(runtime.depth_provider, "device", None)
     normal_backend = getattr(runtime, "_normal_backend", None)

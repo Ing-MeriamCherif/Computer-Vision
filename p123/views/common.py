@@ -581,7 +581,7 @@ def draw_viewport_hud(
         desc = f"Sensor Frame #{fid} | Cadence {(metrics.capture_hz or 0):.1f} Hz | Overwritten {metrics.overwritten_before_consumption if metrics else 0}"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_TEXT_SECONDARY, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 2:
-        desc = "Depth detail: Turbo warm-near -> cool-far + contours | CUDA depth"
+        desc = "Scale: Warm Near (Yellow/Red) -> Cool Far (Blue/Purple) | CUDA depth"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 3:
         desc = "Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue) | Multiscale R=1..4"
