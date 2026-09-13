@@ -241,6 +241,22 @@ class TestLightingAttenuation:
         assert mean_near >= mean_far * 0.5, \
             f"Unexpected inversion: near={mean_near:.1f} far={mean_far:.1f}"
 
+    def test_short_light_range_localizes_illumination(self):
+        from geometry.lighting import LightState, shade_geometry
+        geom = self._make_flat_geometry(depth_value=1.0)
+        rgb = np.full((8, 8, 3), 50, dtype=np.uint8)
+        light = LightState(
+            position_camera=np.array([0.0, 0.0, 0.5], dtype=np.float32),
+            intensity=1.0,
+            color_rgb=np.ones(3, dtype=np.float32),
+            confidence=1.0,
+            range_m=0.4,
+        )
+
+        relit, _ = shade_geometry(rgb, geom, [light], ambient=0.0, shadows=False, volumetrics=False)
+
+        assert relit[4, 4].mean() > relit[0, 0].mean() * 1.5
+
     def test_two_lights_additive(self):
         """Two lights produce more illumination than one."""
         from geometry.lighting import LightState, shade_geometry

@@ -24,6 +24,7 @@ class LightState:
     enabled: bool = True
     light_id: int | str = 0
     position_camera_m: np.ndarray | None = None
+    range_m: float = 1.0
 
     def __post_init__(self) -> None:
         if self.position_camera is not None:
@@ -186,6 +187,7 @@ def light_from_palm(
     color_rgb: tuple[float, float, float] = (1.0, 0.78, 0.48),
     intensity: float = 1.4,
     d_ref: float = 0.7,
+    range_m: float = 1.0,
     source_hand: int = 0,
     timestamp: float | None = None,
 ) -> LightState | None:
@@ -205,6 +207,7 @@ def light_from_palm(
         timestamp=time.time() if timestamp is None else float(timestamp),
         enabled=True,
         light_id=int(source_hand),
+        range_m=float(range_m),
     )
 
 
@@ -293,7 +296,9 @@ def render_volumetric_scattering(
             dy = light_pos[1] - py
             dz = light_pos[2] - pz
             dist_sq = dx ** 2 + dy ** 2 + dz ** 2 + 0.05
-            in_scatter = intensity / dist_sq
+            range_m = max(float(getattr(light, "range_m", 1.0)), 1e-3)
+            source_falloff = np.exp(-0.5 * dist_sq / (range_m * range_m))
+            in_scatter = intensity / dist_sq * source_falloff
 
             # Screen-space shadow test for sample point
             su = np.rint(cx_low + fx_low * px / np.maximum(pz, 1e-4)).astype(np.int32).clip(0, w - 1)
@@ -353,8 +358,9 @@ def shade_geometry(
         halfway /= np.maximum(np.linalg.norm(halfway, axis=-1, keepdims=True), 1e-6)
         specular = np.maximum(np.sum(normals * halfway, axis=-1), 0.0) ** float(shininess)
 
-        # Physically coherent 1 / (1 + r^2) distance attenuation from light to surface
-        attenuation = float(light.intensity) / (1.0 + distance[..., 0] ** 2)
+        # Keep each hand light local while retaining smooth quadratic falloff.
+        range_m = max(float(getattr(light, "range_m", 1.0)), 1e-3)
+        attenuation = float(light.intensity) / (1.0 + (distance[..., 0] / range_m) ** 2)
         visibility = _shadow_factor(geometry, light) if shadows else 1.0
         contribution = (diffuse * 0.92 + specular * specular_strength) * attenuation * visibility * float(light.confidence)
         lit += contribution[..., None] * light.color_rgb.reshape(1, 1, 3)

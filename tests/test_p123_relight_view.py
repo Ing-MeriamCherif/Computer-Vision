@@ -63,6 +63,18 @@ def test_p123_relight_projects_light_and_returns_cached_material_view():
     assert image[60, 58].mean() > snapshot.rgb_frame[60, 58].mean()
 
 
+def test_p123_relight_preserves_full_resolution_camera_detail():
+    snapshot = _snapshot()
+    checker = (np.indices(snapshot.rgb_frame.shape[:2]).sum(axis=0) % 2) * 120 + 50
+    snapshot.rgb_frame[:] = checker[..., None]
+
+    image, _, _ = RelightRenderer(max_width=80, max_height=60).render(snapshot)
+
+    # This distant patch should retain the camera's fine checker texture rather
+    # than inherit the blur from enlarging the low-resolution lighting render.
+    assert image[94:112, 136:154].var() > 2500.0
+
+
 def test_p123_relight_keeps_two_hand_sources_separate():
     renderer = RelightRenderer(max_width=80, max_height=60)
     image, _, waiting = renderer.render(_snapshot(hand_count=2))

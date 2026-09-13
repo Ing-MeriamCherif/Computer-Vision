@@ -12,6 +12,31 @@ from geometry.lighting import LightState, light_from_palm, project_light_orb, re
 from geometry.state import GeometryState
 
 
+def _detail_preserving_composite(
+    full_rgb: np.ndarray,
+    small_rgb: np.ndarray,
+    small_relit: np.ndarray,
+    geometry: GeometryState,
+    *,
+    ambient: float,
+) -> np.ndarray:
+    """Upsample only bounded illumination, preserving the camera's fine detail."""
+    base = np.asarray(full_rgb, dtype=np.float32)[..., :3]
+    source = np.asarray(small_rgb, dtype=np.float32)[..., :3]
+    relit = np.asarray(small_relit, dtype=np.float32)[..., :3]
+    confidence = geometry.confidence
+    if confidence is None:
+        confidence = geometry.valid_mask.astype(np.float32)
+    quality = np.clip(0.65 + 0.35 * np.nan_to_num(confidence, nan=0.0), 0.0, 1.0)
+    baseline = source * max(float(ambient), 1e-3) * quality[..., None]
+
+    gain = relit / np.maximum(baseline, 24.0)
+    gain = np.clip(np.nan_to_num(gain, nan=1.0, posinf=1.8, neginf=1.0), 1.0, 1.8)
+    gain[~geometry.valid_mask] = 1.0
+    gain_full = cv2.resize(gain, (base.shape[1], base.shape[0]), interpolation=cv2.INTER_LINEAR)
+    return np.clip(base * gain_full, 0.0, 255.0).astype(np.uint8)
+
+
 class RelightRenderer:
     """Render one bounded-resolution P4 preview per new source snapshot."""
 
@@ -109,6 +134,7 @@ class RelightRenderer:
                     hand.confidence,
                     color_rgb=colors[index % len(colors)],
                     intensity=0.70,
+                    range_m=0.45,
                     source_hand=hand.hand_id,
                     timestamp=hand.timestamp,
                 )
@@ -117,24 +143,32 @@ class RelightRenderer:
 
             small_geometry = self._low_geometry(geometry)
             small_rgb = cv2.resize(np.asarray(frame), (small_geometry.camera.width, small_geometry.camera.height), interpolation=cv2.INTER_AREA)
+            ambient = 0.40
             relit, self.last_lighting_stats = shade_geometry(
                 small_rgb,
                 small_geometry,
                 lights,
-                ambient=0.40,
+                ambient=ambient,
                 specular_strength=0.12,
                 shininess=36.0,
                 shadows=True,
                 volumetrics=True,
             )
-            relit = render_light_orbs(
+            self._cache_image = _detail_preserving_composite(
+                frame,
+                small_rgb,
                 relit,
-                small_geometry.camera,
-                lights,
-                depth=small_geometry.depth,
-                valid=small_geometry.valid_mask,
+                small_geometry,
+                ambient=ambient,
             )
-            self._cache_image = cv2.resize(relit, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_LINEAR)
+            relit = render_light_orbs(
+                self._cache_image,
+                geometry.camera,
+                lights,
+                depth=geometry.depth,
+                valid=geometry.valid_mask,
+            )
+            self._cache_image = relit
             self.last_light_count = len(lights)
             for light_index, light in enumerate(lights):
                 projected = project_light_orb(geometry.camera, light)
