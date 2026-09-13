@@ -2,7 +2,7 @@
 
 Base SHA: `85cae0e6deae1da8eff252907631de805392a531`
 
-Final SHA: `TBD (see git history)`
+Final SHA (code): `6bf8044818236639e831aaa10682c824f293a58d`
 
 Branch: `bug-fixes/p123-quality-performance-consolidation`
 
@@ -38,6 +38,14 @@ instead of busy polling. The HUD reports camera/depth/normals/temporal/hands
 rates plus XYZ fresh/degraded age. CUDA normals use edge-aware radii 1/2 and
 unit-vector normalization without per-frame synchronization or peak-memory
 resets.
+
+Remaining measured limitations: the Hugging Face DPT processor remains on the
+depth hot path because its PIL bicubic output was not numerically equivalent to
+OpenCV interpolation (the equivalence check is documented in the engineering
+notes); depth is still copied to a CPU `DepthState` for compatibility before
+CUDA geometry. TensorRT/ONNX conversion and architectural replacement were not
+introduced. Physical XYZ hand coordinates require a hand in view and were not
+claimed from a no-hand webcam soak.
 
 ============================================================
 
