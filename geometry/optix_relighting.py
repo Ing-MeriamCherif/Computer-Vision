@@ -215,6 +215,11 @@ class OptixShadowRenderer:
         output = cp.asnumpy(self.visibility).transpose(1, 2, 0)
         return output, (time.perf_counter() - started) * 1000.0
 
+    def close(self):
+        if self.ctx is not None:
+            self.ctx.destroy()
+            self.ctx = None
+
 
 def create_optix_renderer(width: int = 96, height: int = 54):
     try:

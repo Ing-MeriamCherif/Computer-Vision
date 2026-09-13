@@ -898,6 +898,12 @@ class GPURelightRenderer:
     def close(self) -> None:
         gl, glfw = self._gl, self._glfw
         with self._render_lock:
+            if self._rt_renderer is not None:
+                try:
+                    self._rt_renderer.close()
+                except Exception as exc:
+                    print(f"OPTIX CLEANUP FAILED: {type(exc).__name__}: {exc}")
+                self._rt_renderer = None
             if gl is not None:
                 try:
                     if self._window is not None:

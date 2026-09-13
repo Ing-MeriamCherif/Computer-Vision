@@ -275,8 +275,7 @@ def main() -> int:
                 f"hands={len(hand.hands)} hand_fps={final.metrics.hand_hz} "
                 f"luma={hand.frame_luminance:.1f} low_light={hand.low_light_active} "
                 f"gamma={hand.low_light_gamma:.2f} preprocess_ms={hand.preprocess_ms:.3f} "
-                f"detect_ms={hand.detection_ms:.3f} detect_avg_ms={hand.detection_avg_ms:.3f} "
-                f"filter_ms={hand.filtering_ms:.3f} "
+                f"tracker_ms={hand.tracker_ms:.3f} "
                 f"dropout_ms={hand.dropout_age_ms:.1f}"
             )
         relight_stats = relight_view._renderer.last_lighting_stats

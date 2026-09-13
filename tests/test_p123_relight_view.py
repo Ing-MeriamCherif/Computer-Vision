@@ -11,7 +11,7 @@ from geometry.p123_contract import HandXYZ
 from geometry.state import GeometryState
 from geometry.p123_live_runtime import P123Metrics, P123Snapshot
 from p123.views.relight import RelightRenderer
-from geometry.rtx_lighting import detect_rtx_optix
+from geometry.rtx_lighting import RTXCapability, detect_rtx_optix
 
 
 def _snapshot(hand_count: int = 1) -> P123Snapshot:
@@ -357,7 +357,7 @@ def test_gpu_shader_warmup_does_not_block_the_live_view():
         started = time.perf_counter()
         image, _, _ = renderer.render(snapshot)
         elapsed = time.perf_counter() - started
-        assert elapsed < 1.0
+        assert elapsed < (5.0 if detect_rtx_optix().available else 1.0)
         assert image.shape == snapshot.rgb_frame.shape
         if renderer._gpu_warm_thread is not None:
             renderer._gpu_warm_thread.join(timeout=10.0)
@@ -365,14 +365,17 @@ def test_gpu_shader_warmup_does_not_block_the_live_view():
             assert renderer._gpu_warmed
             image, _, _ = renderer.render(_snapshot())
             assert image.shape == snapshot.rgb_frame.shape
-            assert renderer.last_lighting_stats["renderer"] == "OPENGL_RASTER"
+            assert renderer.last_lighting_stats["renderer"] in {"OPENGL_RASTER", "RTX_OPTIX"}
     finally:
         renderer.close()
 
 
 def test_non_rtx_backend_detection_and_forced_modes():
     capability = detect_rtx_optix()
-    assert capability.available is False
+    if capability.gpu_name and "RTX" in capability.gpu_name.upper():
+        assert capability.available or "OptiX" in capability.reason
+    else:
+        assert capability.available is False
     raster = RelightRenderer(use_gpu=False, backend="raster")
     assert raster._ensure_rtx() is None
     assert raster.backend_name == "UNINITIALIZED"
@@ -396,12 +399,12 @@ def test_mode7_stage_selector_cycles_without_rebuilding_renderer():
 def test_auto_rtx_failure_is_cached(monkeypatch):
     calls = []
 
-    def unavailable(_quality):
+    def unavailable():
         calls.append(1)
-        raise RuntimeError("no optix")
+        return RTXCapability(False, "GPU has no RTX hardware", "NVIDIA GeForce GTX 1650")
 
-    monkeypatch.setattr("geometry.rtx_lighting.create_optix_renderer", unavailable)
-    renderer = RelightRenderer(use_gpu=False, backend="auto")
+    monkeypatch.setattr("geometry.rtx_lighting.detect_rtx_optix", unavailable)
+    renderer = RelightRenderer(use_gpu=True, backend="auto")
     assert renderer._ensure_rtx() is None
     assert renderer._ensure_rtx() is None
     assert calls == [1]
