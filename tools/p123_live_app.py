@@ -25,6 +25,21 @@ def _overlay(image: np.ndarray, title: str, lines: list[str]) -> np.ndarray:
     return out
 
 
+def _draw_mode_buttons(image: np.ndarray, active_mode: int) -> np.ndarray:
+    """Draw the six clickable P123 mode controls along the bottom edge."""
+    out = image.copy()
+    labels = ("1 RGB", "2 DEPTH", "3 NORMALS", "4 TEMP", "5 HANDS", "6 XYZ")
+    h, w = out.shape[:2]
+    button_w = max(1, w // len(labels))
+    for idx, label in enumerate(labels, start=1):
+        x0 = (idx - 1) * button_w
+        x1 = w if idx == len(labels) else idx * button_w
+        color = (38, 105, 150) if idx == active_mode else (28, 32, 40)
+        cv2.rectangle(out, (x0, h - 32), (x1 - 2, h - 2), color, -1)
+        cv2.putText(out, label, (x0 + 8, h - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (245, 245, 245), 1, cv2.LINE_AA)
+    return out
+
+
 def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
     rgb = snapshot.rgb_frame
     if rgb is None:
@@ -72,7 +87,7 @@ def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")
-    return _overlay(image, title, lines)
+    return _draw_mode_buttons(_overlay(image, title, lines), mode)
 
 
 def parse_args() -> argparse.Namespace:
@@ -105,14 +120,20 @@ def main() -> int:
     print(f"physical camera={args.camera} resolution={args.width}x{args.height} requested_fps={args.fps}")
     print("keys: 1 RGB  2 depth  3 normals  4 temporal/confidence  5 hands  6 XYZ  q quit")
     mode = 1
+    ui_state = {"mode": mode}
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics"
     try:
         if not args.headless:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
+            def on_mouse(event, x, y, _flags, state):
+                if event == cv2.EVENT_LBUTTONUP and y >= max(0, args.height - 42):
+                    state["mode"] = min(6, max(1, int(x / max(args.width / 6.0, 1.0)) + 1))
+            cv2.setMouseCallback(window, on_mouse, ui_state)
         while args.duration is None or time.monotonic() - started < args.duration:
             snapshot = runtime.snapshot()
             if not args.headless:
+                mode = int(ui_state["mode"])
                 view = _panel(snapshot, mode)
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
