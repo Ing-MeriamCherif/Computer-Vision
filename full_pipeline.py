@@ -30,9 +30,9 @@ from depth.config import DEPTH_CONFIG
 from depth.model import DepthModel
 from normal_translator import recipe
 from pipeline import TorchPipeline
-from renderer.config import (ShadowConfig, ShadowQualityProfile,
-                             StageQualityProfile, VolumetricConfig,
-                             stage_quality_settings)
+from renderer.config import (LightingConfig, ShadowConfig,
+                             ShadowQualityProfile, StageQualityProfile,
+                             VolumetricConfig, stage_quality_settings)
 from renderer.renderer import DebugMode, Renderer
 from utils import FPSMeter, StageProfiler
 
@@ -60,7 +60,7 @@ def edge_mask(depth_m: np.ndarray, tau: float = 0.08) -> np.ndarray:
 
 
 def build_packet(frame_bgr, torch_pkt, depth_m, fx, fy, cx, cy,
-                 frame_id: int) -> RenderPacket:
+                 frame_id: int, light_scale: float = 1.0) -> RenderPacket:
     h, w = frame_bgr.shape[:2]
     rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     ts = time.time()
@@ -77,7 +77,7 @@ def build_packet(frame_bgr, torch_pkt, depth_m, fx, fy, cx, cy,
         lights.append(Light(
             position_camera_m=np.array(torch_pkt.position_camera_m, dtype=np.float32),
             color_rgb=np.array([1.0, 0.85, 0.7], dtype=np.float32),
-            intensity=float(max(torch_pkt.intensity, 0.0)),
+            intensity=float(max(torch_pkt.intensity, 0.0)) * light_scale,
             active=True, confidence=float(max(0.0, min(1.0, torch_pkt.confidence)))))
     return RenderPacket(rgb=rgb, depth=depth,
                         normals=NormalFrame(normals_camera=normals,
@@ -148,12 +148,21 @@ def main() -> None:
     worker.start()
 
     # renderer (SAFE profile on CPU check; balanced/high on GPU)
+    # Punchy relight defaults: low ambient so unlit space goes near-black,
+    # scaled intensity so the torch falloff reads clearly in light space.
     profile = cfg("FULL_RENDER_PROFILE", "safe").lower()
     settings = stage_quality_settings(StageQualityProfile(profile))
+    lighting = LightingConfig(
+        ambient_strength=float(cfg("FULL_AMBIENT", "0.05")),
+        specular_strength=float(cfg("FULL_SPECULAR", "0.5")),
+        shininess=float(cfg("FULL_SHININESS", "64")),
+        attenuation_k=float(cfg("FULL_ATTEN_K", "1.2")))
+    light_scale = float(cfg("FULL_LIGHT_SCALE", "2.0"))
     glfw, win, ctx = make_context(W, H, show=not args.no_show)
     pkt0 = build_packet(f0, torch_pipe.step(frame_bgr=f0),
-                        depth_to_meters(state0), fx, fy, cx, cy, 0)
-    renderer = Renderer(ctx, pkt0,
+                        depth_to_meters(state0), fx, fy, cx, cy, 0,
+                        light_scale=light_scale)
+    renderer = Renderer(ctx, pkt0, config=lighting,
                         shadow_config=settings.shadow,
                         secondary_shadow_mode=settings.secondary_shadow_mode,
                         volumetric_config=settings.volumetric)
@@ -186,7 +195,8 @@ def main() -> None:
             depth_m = depth_to_meters(st)
             t_depth = time.perf_counter()
 
-            pkt = build_packet(frame, tpkt, depth_m, fx, fy, cx, cy, i)
+            pkt = build_packet(frame, tpkt, depth_m, fx, fy, cx, cy, i,
+                               light_scale=light_scale)
             t_norm = time.perf_counter()
 
             renderer.render(pkt, mode)
