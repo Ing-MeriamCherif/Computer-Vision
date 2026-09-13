@@ -79,6 +79,7 @@ class OptixShadowRenderer:
             ("visibility", np.uint64), ("width", np.uint32), ("height", np.uint32),
             ("light_count", np.uint32), ("light_positions", np.float32, (6,)),
             ("source_radii", np.float32, (2,)), ("self_eps", np.float32, (2,)),
+            ("emitter_exclusion", np.float32, (2,)),
         ], align=True)
 
     def _create_pipeline(self, ptx):
@@ -195,14 +196,17 @@ class OptixShadowRenderer:
         positions = np.zeros((2, 3), dtype=np.float32)
         radii = np.full(2, 0.025, dtype=np.float32)
         epsilons = np.full(2, 0.002, dtype=np.float32)
+        exclusions = np.zeros(2, dtype=np.float32)
         count = min(len(lights), 2)
         for i, light in enumerate(lights[:count]):
             positions[i] = light.position_camera
             radii[i] = max(float(getattr(light, "source_radius_m", 0.025)), 0.0)
             epsilons[i] = max(float(getattr(light, "self_intersection_epsilon_m", 0.002)), 1e-4)
+            if bool(getattr(light, "is_palm_attached", False)):
+                exclusions[i] = 0.06
         host_params = np.zeros(1, dtype=self.param_dtype)
         host_params[0] = (handle, self.points.data.ptr, self.normals.data.ptr,
-                          self.visibility.data.ptr, self.width, self.height, count, positions.reshape(-1), radii, epsilons)
+                          self.visibility.data.ptr, self.width, self.height, count, positions.reshape(-1), radii, epsilons, exclusions)
         self.params.set(host_params.view(np.uint8))
         optix = self.optix
         optix.launch(self.pipeline, 0, self.params.data.ptr, self.param_dtype.itemsize,

@@ -11,6 +11,7 @@ struct LaunchParams {
     float light_positions[6];
     float source_radii[2];
     float self_eps[2];
+    float emitter_exclusion[2];
 };
 
 extern "C" {
@@ -75,7 +76,7 @@ extern "C" __global__ void __raygen__shadow() {
         float3 to_emitter = sub3(emitter, point); float d = length3(to_emitter);
         unsigned int visible = 0;
         optixTrace(params.traversable, origin, scale3(to_emitter, 1.0f/max(d,1e-5f)), 0.001f,
-            max(d - params.self_eps[light_index], 0.001f), 0.0f, OptixVisibilityMask(255),
+            max(d - params.self_eps[light_index] - params.emitter_exclusion[light_index], 0.001f), 0.0f, OptixVisibilityMask(255),
             OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0, 1, 0, visible);
         visible_count += visible ? 1u : 0u;
     }
