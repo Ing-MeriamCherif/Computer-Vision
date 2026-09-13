@@ -52,13 +52,14 @@ def _panel(
         image = rgb
         title = "MODE 1 — RGB CAMERA"
     elif mode == 2:
-        if snapshot.depth_state is None:
+        depth_state = snapshot.fast_geometry_state or snapshot.depth_state
+        if depth_state is None:
             image = np.zeros_like(rgb)
             title = "MODE 2 — DEPTH"
             waiting = "waiting for depth worker"
         else:
-            image = depth_to_rgb(snapshot.depth_state.depth, snapshot.depth_state.valid_mask)
-            title = "MODE 2 — DEPTH (warm=near, cool=far)"
+            image = depth_to_rgb(depth_state.depth, depth_state.valid_mask)
+            title = "MODE 2 — DEPTH (smoothed live, warm=near, cool=far)"
             waiting = None
     elif mode == 3:
         normal_state = snapshot.fast_geometry_state or snapshot.geometry_state
@@ -91,15 +92,15 @@ def _panel(
     else:
         image = rgb.copy()
         title = "MODE 6 — XYZ CONTRACT"
-        camera = snapshot.contract.camera_model if snapshot.contract is not None else None
-        origin = (
-            int(round(camera.cx)), int(round(camera.cy))
-        ) if camera is not None else (image.shape[1] // 2, image.shape[0] // 2)
-        cv2.arrowedLine(image, origin, (min(image.shape[1] - 8, origin[0] + 70), origin[1]), (255, 70, 70), 2, cv2.LINE_AA, tipLength=0.18)
-        cv2.arrowedLine(image, origin, (origin[0], min(image.shape[0] - 8, origin[1] + 70)), (70, 255, 70), 2, cv2.LINE_AA, tipLength=0.18)
-        cv2.putText(image, "+X right", (min(image.shape[1] - 90, origin[0] + 72), origin[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 90, 90), 1, cv2.LINE_AA)
-        cv2.putText(image, "+Y down", (origin[0] + 5, min(image.shape[0] - 10, origin[1] + 86)), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 255, 90), 1, cv2.LINE_AA)
-        cv2.putText(image, "+Z forward", (8, image.shape[0] - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 150, 255), 1, cv2.LINE_AA)
+        # Keep the camera coordinate convention in a fixed, readable corner.
+        origin = (38, 42)
+        cv2.rectangle(image, (8, 8), (190, 112), (12, 18, 22), -1)
+        cv2.circle(image, origin, 3, (240, 240, 240), -1)
+        cv2.arrowedLine(image, origin, (108, origin[1]), (255, 70, 70), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.arrowedLine(image, origin, (origin[0], 98), (70, 255, 70), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.putText(image, "+X right", (112, origin[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 90, 90), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Y down", (origin[0] + 5, 108), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 255, 90), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Z forward", (12, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 150, 255), 1, cv2.LINE_AA)
         xyz_by_id = {item.hand_id: item for item in snapshot.xyz}
         visible_hands = () if snapshot.hand_state is None else snapshot.hand_state.hands
         if not visible_hands:
@@ -179,6 +180,10 @@ def main() -> int:
     print("P123 ASYNCHRONOUS LIVE RUNTIME")
     print(f"physical camera={args.camera} resolution={args.width}x{args.height} requested_fps={args.fps}")
     print(f"depth backend={args.depth_backend} input={args.depth_size} precision={'fp16' if args.fp16 else 'fp32'}")
+    depth_device = getattr(runtime.depth_provider, "device", None)
+    normal_backend = getattr(runtime, "_normal_backend", None)
+    normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"
+    print(f"cuda depth={depth_device or 'unknown'} normals={normal_device}")
     print("keys: 1 RGB  2 depth  3 normals  4 temporal/confidence  5 hands  6 XYZ  q quit")
     mode = 1
     ui_state = {"mode": mode}

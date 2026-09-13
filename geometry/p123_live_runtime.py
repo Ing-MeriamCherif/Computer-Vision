@@ -373,12 +373,17 @@ class P123LiveRuntime:
                 self._xyz = ()
                 continue
             values: list[HandXYZ] = []
+            with self._state_lock:
+                raw_depth_state = self._depth
             for hand in hands.hands:
                 z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
+                if z <= 0.0 and raw_depth_state is not None:
+                    z, reliability = sample_depth(raw_depth_state.depth, raw_depth_state.valid_mask, *hand.palm_uv)
                 raw_xyz = None if z <= 0 else np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
                 if raw_xyz is None:
-                    xyz = None
-                    self._xyz_smooth.pop(hand.hand_id, None)
+                    prior_xyz = self._xyz_smooth.get(hand.hand_id)
+                    xyz = None if prior_xyz is None else tuple(float(v) for v in prior_xyz)
+                    reliability = 0.0 if prior_xyz is None else reliability * 0.5
                 else:
                     prior_xyz = self._xyz_smooth.get(hand.hand_id)
                     smooth_xyz = raw_xyz if prior_xyz is None else 0.35 * raw_xyz + 0.65 * prior_xyz

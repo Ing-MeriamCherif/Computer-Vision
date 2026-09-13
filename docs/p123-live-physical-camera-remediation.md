@@ -28,6 +28,8 @@ XYZ now samples that same fast geometry stream instead of stale full-temporal
 geometry; it remains empty by design when no physical hand is detected. Native
 depth and XYZ use EMA smoothing, and mode 6 overlays the fixed camera frame
 (+X right, +Y down, +Z forward) with each hand's coordinates.
+Mode 2/3/4 consume the same postprocessed native depth state, CUDA normals, and
+fast temporal-confidence state; mode 5 uses the hand tracker's One-Euro output.
 
 ============================================================
 SCOPE GUARD

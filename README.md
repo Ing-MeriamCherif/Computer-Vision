@@ -92,7 +92,9 @@ native temporal-consistency map at the same live cadence.
 XYZ mode samples the same fresh CUDA geometry state and reports “Waiting for a
 detected hand...” when MediaPipe has no hand in view. Native depth and XYZ are
 EMA-smoothed, and mode 6 displays the camera coordinate axes (+X right, +Y
-down, +Z forward) beside each hand annotation.
+down, +Z forward) in the upper-left corner beside each hand annotation. Depth,
+normals, temporal confidence, hand positions, and XYZ all use the postprocessed
+live states rather than raw worker buffers.
 
 ---
 
