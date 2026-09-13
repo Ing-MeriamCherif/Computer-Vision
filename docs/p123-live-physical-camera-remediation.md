@@ -1,8 +1,51 @@
+# P123 QUALITY/PERFORMANCE CONSOLIDATION
+
+Base SHA: `85cae0e6deae1da8eff252907631de805392a531`
+
+Final SHA: `TBD (see git history)`
+
+Branch: `bug-fixes/p123-quality-performance-consolidation`
+
+## LATEST AUTHORITATIVE LIVE RUN (2026-09-13)
+
+GPU: NVIDIA GeForce GTX 1650 Ti (4 GB), CUDA, FP32 depth (measured faster than FP16)
+
+Camera: HP Wide Vision HD Camera `/dev/video0`, V4L2, MJPG, negotiated 640x480 at 30 FPS
+
+Depth input comparison on the physical webcam (10 seconds each):
+
+| Input | Capture Hz | Depth Hz | CUDA normals Hz | Hands Hz |
+|---|---:|---:|---:|---:|
+| 336x448 | 28.4 | 17.5 | 17.7 | 24.6 |
+| 378x504 | 27.7 | 14.6 | 14.7 | 24.4 |
+| 420x560 | 30.6 | 11.2 | 11.3 | 23.8 |
+| native 480x640 | 28.0 | 8.8 | 8.8 | 25.0 |
+
+Selected live sweet spot: **336x448 FP32**. Depth and normals are one
+latest-only CUDA-backed stream; full CPU temporal geometry is opt-in with
+`--full-temporal` and is not on the default live path. XYZ freshness is capped
+at 200 ms (adaptive to depth cadence), with motion-responsive smoothing and
+expiry of held coordinates. No physical hand was present during the bounded
+headless comparison, so XYZ coordinates were not claimed as hardware-validated.
+
+## P123 CONSOLIDATION NOTES
+
+The runtime now negotiates camera dimensions after `start()`, rebuilds the
+uncalibrated camera model to the negotiated size, prefers advertised MJPG, and
+requests a capacity-one V4L2 buffer. Metrics use bounded deques, RGB history is
+limited to 24 frames, and worker waits use condition/version notifications
+instead of busy polling. The HUD reports camera/depth/normals/temporal/hands
+rates plus XYZ fresh/degraded age. CUDA normals use edge-aware radii 1/2 and
+unit-vector normalization without per-frame synchronization or peak-memory
+resets.
+
+============================================================
+
 # P123 MODE-BY-MODE LIVE REMEDIATION REPORT
 
 Starting commit: `e5b1fec`
 
-Ending commit (code): `5b882a9`; report finalization follows in the report-only commit
+Ending commit (historical section): `5b882a9` (superseded by the authoritative run above)
 
 Branch: `bug-fixes/live-p123-physical-camera-remediation`
 

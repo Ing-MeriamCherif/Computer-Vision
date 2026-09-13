@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import threading
 import time
+import subprocess
 from typing import Any
 
 import numpy as np
@@ -100,12 +101,14 @@ class CameraCaptureWorker:
         height: int = 480,
         fps: int = 30,
         backend: int | None = None,
+        fourcc: str = "auto",
     ) -> None:
         self.device = device
         self.requested_width = width
         self.requested_height = height
         self.requested_fps = fps
         self.backend = backend
+        self.requested_fourcc = str(fourcc).upper()
 
         self.slot = LatestFrameSlot()
         self._thread: threading.Thread | None = None
@@ -115,6 +118,7 @@ class CameraCaptureWorker:
         self.actual_width: int = width
         self.actual_height: int = height
         self.actual_fps: float = float(fps)
+        self.actual_fourcc: int = 0
         self.capture_sequence_id: int = 0
         self.latest_exception: Exception | None = None
         self.last_capture_time: float = 0.0
@@ -139,10 +143,29 @@ class CameraCaptureWorker:
         if not self._cap.isOpened():
             raise RuntimeError(f"Unable to open physical camera: {self.device}")
 
+        # Prefer compressed MJPG only when the V4L2 device advertises it. This
+        # avoids forcing an unsupported format while keeping USB capture at
+        # the requested 30 FPS on cameras that expose both MJPG and YUYV.
+        if self.requested_fourcc in {"AUTO", "MJPG", "YUYV"}:
+            chosen = self.requested_fourcc
+            if chosen == "AUTO" and str(self.device).startswith("/dev/"):
+                try:
+                    probe = subprocess.run(
+                        ["v4l2-ctl", "--device", str(self.device), "--list-formats-ext"],
+                        capture_output=True, text=True, timeout=2.0, check=False,
+                    ).stdout
+                    chosen = "MJPG" if "'MJPG'" in probe else "YUYV" if "'YUYV'" in probe else ""
+                except (OSError, subprocess.SubprocessError):
+                    chosen = ""
+            if chosen:
+                code = cv2.VideoWriter_fourcc(*chosen)
+                self._cap.set(cv2.CAP_PROP_FOURCC, code)
+
         # Set requested capture properties
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.requested_width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height)
         self._cap.set(cv2.CAP_PROP_FPS, self.requested_fps)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         # Query actual negotiated properties
         act_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -154,6 +177,7 @@ class CameraCaptureWorker:
             self.actual_height = act_h
         if act_fps > 0:
             self.actual_fps = act_fps
+        self.actual_fourcc = int(self._cap.get(cv2.CAP_PROP_FOURCC) or 0)
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="CameraCaptureWorker")

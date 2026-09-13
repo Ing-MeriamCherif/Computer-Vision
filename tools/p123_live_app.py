@@ -16,6 +16,21 @@ def _fit(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return cv2.resize(image, size, interpolation=cv2.INTER_AREA)
 
 
+def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
+    text = str(value).lower().strip()
+    if text == "native":
+        return native
+    if "x" in text:
+        h, w = (int(part) for part in text.split("x", 1))
+        if min(h, w) < 14:
+            raise ValueError("--depth-size dimensions must be >= 14")
+        return h, w
+    size = int(text)
+    if size < 14:
+        raise ValueError("--depth-size must be >= 14")
+    return size, size
+
+
 def _overlay(image: np.ndarray, title: str, lines: list[str]) -> np.ndarray:
     out = image.copy()
     cv2.rectangle(out, (0, 0), (out.shape[1], 28 + 17 * len(lines)), (12, 14, 18), -1)
@@ -130,9 +145,12 @@ def _panel(
     if display_size is not None and (image.shape[1], image.shape[0]) != display_size:
         image = _fit(image, display_size)
     metrics = snapshot.metrics
+    xyz_age = max((item.age_ms for item in snapshot.xyz), default=None)
+    xyz_state = "fresh" if snapshot.xyz and (xyz_age or 9999) <= 220 else "degraded"
     lines = [
-        f"capture {snapshot.rgb_capture_id} | capture Hz {metrics.capture_hz or 0:.1f} | overwritten {metrics.overwritten_before_consumption}",
-        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz | temporal {metrics.temporal_hz or 0:.1f} Hz | hand {metrics.hand_hz or 0:.1f} Hz",
+        f"capture {snapshot.rgb_capture_id} | CAM {metrics.capture_hz or 0:.1f} Hz | overwritten {metrics.overwritten_before_consumption}",
+        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz/{metrics.normal_age_p95_ms or 0:.0f}ms | temp {metrics.temporal_hz or 0:.1f} Hz",
+        f"hands {metrics.hand_hz or 0:.1f} Hz/{0 if snapshot.hand_state is None else len(snapshot.hand_state.hands)} | XYZ {xyz_state} {xyz_age or 0:.0f}ms",
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")
@@ -157,6 +175,8 @@ def parse_args() -> argparse.Namespace:
         "--depth-size", default="native",
         help="Model input size in pixels, or 'native' for the camera's HxW (default: native)",
     )
+    parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
+    parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--duration", type=float, default=None)
@@ -167,12 +187,14 @@ def main() -> int:
     args = parse_args()
     try:
         camera = int(args.camera) if str(args.camera).isdigit() else args.camera
-        depth_size = (args.height, args.width) if str(args.depth_size).lower() == "native" else int(args.depth_size)
+        depth_size = _parse_depth_size(args.depth_size, (args.height, args.width))
         runtime = P123LiveRuntime(
             camera_device=camera, width=args.width, height=args.height, fps=args.fps,
             depth_model=args.depth_model, depth_size=depth_size, depth_backend=args.depth_backend,
             use_fp16=args.fp16, hand_backend=args.hand_backend,
+            full_temporal=args.full_temporal,
         )
+        runtime.camera_worker.requested_fourcc = args.fourcc.upper()
         runtime.start()
     except Exception as exc:
         print(f"P123 STARTUP FAILED: {type(exc).__name__}: {exc}")

@@ -96,6 +96,14 @@ down, +Z forward) in the upper-left corner beside each hand annotation. Depth,
 normals, temporal confidence, hand positions, and XYZ all use the postprocessed
 live states rather than raw worker buffers.
 
+For the GTX 1650 Ti, the measured physical-camera sweet spot is FP32 at
+`--depth-size 336x448` (rectangular HxW syntax). The default runtime keeps the
+slower full CPU temporal reference disabled; enable it explicitly with
+`--full-temporal`. The HUD shows CAM/DEPTH/NORMALS/TEMP/HANDS rates and XYZ
+fresh/degraded age. V4L2 format negotiation prefers advertised MJPG and uses a
+capacity-one capture buffer; override with `--fourcc MJPG` or `--fourcc YUYV`
+when required by a specific camera.
+
 ---
 
 ## Tests

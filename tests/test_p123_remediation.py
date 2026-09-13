@@ -146,3 +146,26 @@ def test_fast_temporal_confidence_is_native_and_scale_invariant():
     changed[0, 0] = 8.0
     confidence = _fast_temporal_confidence(previous, changed, None, None)
     assert confidence[0, 0] < confidence[1, 1]
+
+
+def test_latest_buffers_wait_for_versions_without_polling():
+    from geometry.async_pipeline import LatestFrameBuffer, LatestDepthBuffer
+    from geometry import DepthState
+
+    frames = LatestFrameBuffer()
+    packet, version = frames.wait_for_new(timeout=0.0)
+    assert packet is None and version == 0
+    frames.put(np.zeros((2, 2, 3), np.uint8), 7, 1.0)
+    packet, version = frames.wait_for_new(version, timeout=0.01)
+    assert packet is not None and packet.frame_id == 7 and version == 1
+    depths = LatestDepthBuffer()
+    depths.put(DepthState(np.ones((2, 2), np.float32), 1.0, 7, "relative"))
+    state, version = depths.wait_for_new(timeout=0.01)
+    assert state is not None and state.source_frame_id == 7 and version == 1
+
+
+def test_depth_size_parser_accepts_rectangular_inputs():
+    from tools.p123_live_app import _parse_depth_size
+
+    assert _parse_depth_size("336x448", (480, 640)) == (336, 448)
+    assert _parse_depth_size("native", (480, 640)) == (480, 640)

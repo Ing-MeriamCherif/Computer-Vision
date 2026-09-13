@@ -43,6 +43,7 @@ class DepthAnythingProvider:
         self.device = None
         self.last_diagnostics: DepthInferenceDiagnostics | None = None
         self._session_scale: float | None = None
+        self._compute_count = 0
 
     def load(self) -> None:
         if self.model is not None:
@@ -102,13 +103,10 @@ class DepthAnythingProvider:
         inputs = {key: value.to(self.device) for key, value in inputs.items()}
         if self.device.type == "cuda" and self.use_fp16:
             inputs = {key: value.half() if value.is_floating_point() else value for key, value in inputs.items()}
-            torch.cuda.reset_peak_memory_stats(self.device)
         start = time.perf_counter()
         with torch.inference_mode():
             output = self.model(**inputs).predicted_depth
             resized = functional.interpolate(output.unsqueeze(1), size=frame.shape[:2], mode="bicubic", align_corners=False).squeeze(1)[0]
-        if self.device.type == "cuda":
-            torch.cuda.synchronize(self.device)
         elapsed = (time.perf_counter() - start) * 1000.0
         model_output = resized.float().detach().cpu().numpy()
         finite = np.isfinite(model_output) & (model_output > 1e-6)
@@ -132,6 +130,7 @@ class DepthAnythingProvider:
         reference = max(float(np.percentile(gradient[finite], 90)), 1e-6)
         reliability = np.exp(-np.clip(gradient / reference, 0.0, 4.0)).astype(np.float32)
         confidence = np.where(finite, reliability, 0.0).astype(np.float32)
-        peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.device.type == "cuda" else None
+        self._compute_count += 1
+        peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.device.type == "cuda" and self._compute_count % 30 == 0 else None
         self.last_diagnostics = DepthInferenceDiagnostics(str(self.device), elapsed, float(depth[finite].min()), float(depth[finite].max()), peak, float(self._session_scale))
         return DepthState(depth, timestamp, source_frame_id, "relative", valid_mask=finite, confidence=confidence)

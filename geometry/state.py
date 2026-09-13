@@ -18,6 +18,7 @@ class DepthState:
     scale_mode: DepthScaleMode | str
     valid_mask: np.ndarray | None = None
     confidence: np.ndarray | None = None
+    completed_timestamp: float | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)
@@ -62,6 +63,7 @@ class GeometryState:
     history_rejection_mask: np.ndarray | None = None
     disocclusion_mask: np.ndarray | None = None
     processing_frame_id: int | str | None = None
+    completed_timestamp: float | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)

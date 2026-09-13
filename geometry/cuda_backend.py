@@ -44,6 +44,7 @@ class TorchGeometryBackend:
         self.discontinuity_threshold = float(discontinuity_threshold)
         self.last_diagnostics: CudaGeometryDiagnostics | None = None
         self._grid_cache: dict[tuple[int, int, float, float, float, float, str], tuple] = {}
+        self._call_count = 0
 
     @property
     def is_cuda(self) -> bool:
@@ -71,8 +72,6 @@ class TorchGeometryBackend:
 
     def process_depth(self, depth: np.ndarray, camera: CameraModel, *, frame_id: int | str = 0, timestamp: float = 0.0, scale_mode: DepthScaleMode | str = DepthScaleMode.RELATIVE, valid_mask: np.ndarray | None = None, input_confidence: np.ndarray | None = None) -> GeometryState:
         torch = self.torch
-        if self.is_cuda:
-            torch.cuda.reset_peak_memory_stats(self.device)
         z = torch.as_tensor(np.asarray(depth, dtype=np.float32), device=self.device)
         if z.shape != (camera.height, camera.width):
             raise ValueError("depth shape must match camera resolution")
@@ -82,27 +81,36 @@ class TorchGeometryBackend:
             if mask.shape != z.shape:
                 raise ValueError("valid_mask must match depth")
             valid &= mask
-        self._sync(); start = time.perf_counter()
+        start = time.perf_counter()
         ray_x, ray_y = self._rays(camera)
         points = torch.stack((ray_x * z, ray_y * z, z), dim=-1)
         points = torch.where(valid[..., None], points, torch.full_like(points, float("nan")))
-        self._sync(); backprojection_ms = (time.perf_counter() - start) * 1000.0
+        backprojection_ms = (time.perf_counter() - start) * 1000.0
 
         start = time.perf_counter()
-        left, right = torch.roll(points, 1, 1), torch.roll(points, -1, 1)
-        up, down = torch.roll(points, 1, 0), torch.roll(points, -1, 0)
-        left_v, right_v = torch.roll(valid, 1, 1), torch.roll(valid, -1, 1)
-        up_v, down_v = torch.roll(valid, 1, 0), torch.roll(valid, -1, 0)
-        left_v[:, 0] = False; right_v[:, -1] = False; up_v[0, :] = False; down_v[-1, :] = False
-        def compatible(other_z, other_valid):
-            relative = torch.abs(z - other_z) / torch.clamp(torch.minimum(torch.abs(z), torch.abs(other_z)), min=1e-6)
-            return other_valid & torch.isfinite(relative) & (relative <= self.discontinuity_threshold)
-        normal_valid = valid & compatible(left[..., 2], left_v) & compatible(right[..., 2], right_v) & compatible(up[..., 2], up_v) & compatible(down[..., 2], down_v)
-        tangent_x, tangent_y = right - left, down - up
-        normals = torch.linalg.cross(tangent_y, tangent_x, dim=-1)
-        lengths = torch.linalg.vector_norm(normals, dim=-1)
-        normal_valid &= torch.isfinite(lengths) & (lengths > 1e-8)
-        normals = normals / torch.where(normal_valid, lengths, torch.ones_like(lengths))[..., None]
+        def estimate(radius: int):
+            left, right = torch.roll(points, radius, 1), torch.roll(points, -radius, 1)
+            up, down = torch.roll(points, radius, 0), torch.roll(points, -radius, 0)
+            left_v, right_v = torch.roll(valid, radius, 1), torch.roll(valid, -radius, 1)
+            up_v, down_v = torch.roll(valid, radius, 0), torch.roll(valid, -radius, 0)
+            left_v[:, :radius] = False; right_v[:, -radius:] = False; up_v[:radius, :] = False; down_v[-radius:, :] = False
+            def compatible(other_z, other_valid):
+                relative = torch.abs(z - other_z) / torch.clamp(torch.minimum(torch.abs(z), torch.abs(other_z)), min=1e-6)
+                return other_valid & torch.isfinite(relative) & (relative <= self.discontinuity_threshold * (1.0 + 0.15 * radius))
+            nvalid = valid & compatible(left[..., 2], left_v) & compatible(right[..., 2], right_v) & compatible(up[..., 2], up_v) & compatible(down[..., 2], down_v)
+            n = torch.linalg.cross(down - up, right - left, dim=-1)
+            lengths = torch.linalg.vector_norm(n, dim=-1)
+            nvalid &= torch.isfinite(lengths) & (lengths > 1e-8)
+            n = n / torch.where(nvalid, lengths, torch.ones_like(lengths))[..., None]
+            return n, nvalid
+
+        normals1, valid1 = estimate(1)
+        normals2, valid2 = estimate(2)
+        # Multi-scale edge-aware selection: use radius 2 only where the
+        # immediate neighborhood is incomplete, retaining radius 1 at edges.
+        use2 = (~valid1) & valid2
+        normals = torch.where(use2[..., None], normals2, normals1)
+        normal_valid = valid1 | valid2
         flip = torch.sum(normals * points, dim=-1) > 0
         normals = torch.where(flip[..., None], -normals, normals)
         normals = torch.where(normal_valid[..., None], normals, torch.full_like(normals, float("nan")))
@@ -112,20 +120,21 @@ class TorchGeometryBackend:
             if supplied.shape != z.shape:
                 raise ValueError("input_confidence must match depth")
             confidence *= torch.nan_to_num(supplied, nan=0.0).clamp(0, 1)
-        self._sync(); normals_ms = (time.perf_counter() - start) * 1000.0
+        normals_ms = (time.perf_counter() - start) * 1000.0
 
         start = time.perf_counter()
         arrays = [z, points, valid, normals, confidence, normal_valid]
         depth_np, points_np, valid_np, normals_np, confidence_np, normal_valid_np = [item.detach().cpu().numpy() for item in arrays]
-        self._sync(); transfer_ms = (time.perf_counter() - start) * 1000.0
-        peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.is_cuda else None
+        transfer_ms = (time.perf_counter() - start) * 1000.0
+        self._call_count += 1
+        peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.is_cuda and self._call_count % 30 == 0 else None
         self.last_diagnostics = CudaGeometryDiagnostics(str(self.device), torch.cuda.is_available(), backprojection_ms, normals_ms, transfer_ms, peak)
         confidence_np = np.where(valid_np, confidence_np, 0.0).astype(np.float32)
         return GeometryState(
             timestamp, frame_id, depth_np.astype(np.float32), points_np.astype(np.float32), valid_np,
             camera, scale_mode, normals=normals_np.astype(np.float32), confidence=confidence_np,
             normal_valid_mask=normal_valid_np, normal_confidence=confidence_np,
-            selected_radius=np.where(normal_valid_np, 1, 0).astype(np.int16), spatial_confidence=confidence_np,
+            selected_radius=np.where(valid1.detach().cpu().numpy(), 1, np.where(valid2.detach().cpu().numpy(), 2, 0)).astype(np.int16), spatial_confidence=confidence_np,
         )
 
 

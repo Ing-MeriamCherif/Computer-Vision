@@ -44,6 +44,7 @@ class P123Metrics:
     overwritten_before_consumption: int
     depth_errors: int
     normal_hz: float | None = None
+    normal_age_p95_ms: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,14 +61,14 @@ class P123Snapshot:
     fast_geometry_state: GeometryState | None = None
 
 
-def _rate(timestamps: list[float]) -> float | None:
+def _rate(timestamps) -> float | None:
     if len(timestamps) < 2:
         return None
     elapsed = timestamps[-1] - timestamps[0]
     return float((len(timestamps) - 1) / elapsed) if elapsed > 0 else None
 
 
-def _percentile(values: list[float], p: float) -> float | None:
+def _percentile(values, p: float) -> float | None:
     return float(np.percentile(values, p)) if values else None
 
 
@@ -108,7 +109,7 @@ def _smooth_depth(
     current_valid: np.ndarray | None,
     alpha: float = 0.30,
 ) -> np.ndarray:
-    """EMA-smooth native depth after aligning monocular frame scale."""
+    """Adaptive robust temporal depth: preserve edges and reject invalid history."""
     current = np.asarray(current_depth, dtype=np.float32)
     valid = np.isfinite(current) & (current > 1e-6)
     if current_valid is not None:
@@ -121,7 +122,11 @@ def _smooth_depth(
         return np.where(valid, current, np.nan).astype(np.float32)
     ratio = float(np.median(previous[overlap])) / max(float(np.median(current[overlap])), 1e-6)
     aligned = current * ratio
-    smoothed = np.where(overlap, (1.0 - alpha) * previous + alpha * aligned, aligned)
+    relative_delta = np.abs(aligned - previous) / np.maximum(np.abs(previous), 1e-6)
+    # Responsive on motion/edges, smooth only where the two estimates agree.
+    local_alpha = np.clip(alpha + 0.55 * np.clip(relative_delta / 0.20, 0.0, 1.0), alpha, 0.9)
+    agree = relative_delta <= 0.28
+    smoothed = np.where(overlap & agree, (1.0 - local_alpha) * previous + local_alpha * aligned, aligned)
     return np.where(valid, smoothed, np.nan).astype(np.float32)
 
 
@@ -142,9 +147,11 @@ class P123LiveRuntime:
         use_fp16: bool = False,
         hand_backend: str = "auto",
         calibration: CameraModel | None = None,
-        max_state_age_ms: float = 300.0,
+        max_state_age_ms: float = 200.0,
+        full_temporal: bool = False,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
+        self._explicit_calibration = calibration is not None
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
         if depth_provider is not None:
             self.depth_provider = depth_provider
@@ -172,6 +179,7 @@ class P123LiveRuntime:
             OpenCVFlowProvider(method="farneback", flow_scale=0.5),
         )
         self.max_state_age_ms = float(max_state_age_ms)
+        self.full_temporal = bool(full_temporal)
         self._depth_frames = LatestFrameBuffer()
         self._hand_frames = LatestFrameBuffer()
         self._depth_states = LatestDepthBuffer()
@@ -198,17 +206,10 @@ class P123LiveRuntime:
         self._last_geometry_depth_id: int | str | None = None
         self._processing_id = 0
         self._depth_errors = 0
-        self._capture_times: list[float] = []
-        self._depth_times: list[float] = []
-        self._geometry_times: list[float] = []
-        self._normal_times: list[float] = []
-        self._fast_temporal_times: list[float] = []
-        self._hand_times: list[float] = []
-        self._xyz_times: list[float] = []
-        self._depth_ages: list[float] = []
-        self._geometry_ages: list[float] = []
-        self._hand_ages: list[float] = []
-        self._xyz_ages: list[float] = []
+        metric = lambda: deque(maxlen=256)
+        self._capture_times = metric(); self._depth_times = metric(); self._geometry_times = metric()
+        self._normal_times = metric(); self._fast_temporal_times = metric(); self._hand_times = metric(); self._xyz_times = metric()
+        self._depth_ages = metric(); self._geometry_ages = metric(); self._hand_ages = metric(); self._xyz_ages = metric(); self._normal_ages = metric()
         self._xyz: tuple[HandXYZ, ...] = ()
         self._xyz_smooth: dict[int, np.ndarray] = {}
 
@@ -229,8 +230,22 @@ class P123LiveRuntime:
         if self.hand_engine.backend_name in {"unavailable", "mock"}:
             raise RuntimeError(f"hand backend unavailable: {self.hand_engine.backend_name}")
         self.camera_worker.start()
+        if not self._explicit_calibration:
+            self.camera = CameraModel(
+                self.camera_worker.actual_width, self.camera_worker.actual_height,
+                self.camera_worker.actual_width * 0.82, self.camera_worker.actual_width * 0.82,
+                self.camera_worker.actual_width / 2.0, self.camera_worker.actual_height / 2.0,
+            )
+        elif (self.camera.width, self.camera.height) != (self.camera_worker.actual_width, self.camera_worker.actual_height):
+            self.camera_worker.stop()
+            raise RuntimeError(
+                f"explicit calibration {self.camera.width}x{self.camera.height} mismatches negotiated camera "
+                f"{self.camera_worker.actual_width}x{self.camera_worker.actual_height}"
+            )
         self._running = True
-        targets = [self._dispatch_loop, self._depth_loop, self._geometry_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
+        targets = [self._dispatch_loop, self._depth_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
+        if self.full_temporal:
+            targets.insert(2, self._geometry_loop)
         self._threads = [threading.Thread(target=target, name=target.__name__, daemon=True) for target in targets]
         for thread in self._threads:
             thread.start()
@@ -247,21 +262,22 @@ class P123LiveRuntime:
                 self._rgb = (frame, capture_id, timestamp)
                 self._rgb_history[capture_id] = (frame, timestamp)
                 self._rgb_order.append(capture_id)
-                while len(self._rgb_history) > 128:
+                while len(self._rgb_history) > 24:
                     self._rgb_history.pop(self._rgb_order.popleft(), None)
             self._depth_frames.put(frame, capture_id, timestamp)
             self._hand_frames.put(frame, capture_id, timestamp)
 
     def _depth_loop(self) -> None:
+        version = 0
         while self._running:
-            packet = self._depth_frames.get()
+            packet, version = self._depth_frames.wait_for_new(version, timeout=0.2)
             if packet is None:
-                time.sleep(0.001)
                 continue
             try:
                 state = self.depth_provider.compute(packet.frame, packet.frame_id, packet.timestamp)
                 self._depth_states.put(state)
                 completed = time.monotonic()
+                state.completed_timestamp = completed
                 with self._state_lock:
                     self._depth = state
                 self._depth_times.append(completed)
@@ -270,10 +286,10 @@ class P123LiveRuntime:
                 self._depth_errors += 1
 
     def _geometry_loop(self) -> None:
+        version = 0
         while self._running:
-            state = self._depth_states.get()
-            if state is None or state.source_frame_id == self._last_geometry_depth_id:
-                time.sleep(0.002)
+            state, version = self._depth_states.wait_for_new(version, timeout=0.2)
+            if state is None:
                 continue
             with self._rgb_lock:
                 source = self._rgb_history.get(state.source_frame_id)
@@ -294,6 +310,7 @@ class P123LiveRuntime:
                 continue
             self._last_geometry_depth_id = state.source_frame_id
             completed = time.monotonic()
+            geometry.completed_timestamp = completed
             with self._state_lock:
                 self._geometry = geometry
             self._geometry_times.append(completed)
@@ -304,12 +321,12 @@ class P123LiveRuntime:
         if self._normal_backend is None:
             return
         last_depth_id: int | str | None = None
+        version = 0
         previous_depth: np.ndarray | None = None
         smoothed_depth: np.ndarray | None = None
         while self._running:
-            state = self._depth_states.get()
-            if state is None or state.source_frame_id == last_depth_id:
-                time.sleep(0.002)
+            state, version = self._depth_states.wait_for_new(version, timeout=0.2)
+            if state is None:
                 continue
             try:
                 smoothed_depth = _smooth_depth(smoothed_depth, state.depth, state.valid_mask)
@@ -323,12 +340,14 @@ class P123LiveRuntime:
                     input_confidence=state.confidence,
                 )
                 fast.processing_frame_id = state.source_frame_id
+                fast.completed_timestamp = time.monotonic()
                 fast.temporal_confidence = _fast_temporal_confidence(
                     previous_depth, smoothed_depth, state.valid_mask, state.confidence
                 )
                 with self._state_lock:
                     self._fast_geometry = fast
                 self._normal_times.append(time.monotonic())
+                self._normal_ages.append(max(0.0, (time.monotonic() - state.timestamp) * 1000.0))
                 self._fast_temporal_times.append(time.monotonic())
                 previous_depth = smoothed_depth.copy()
                 last_depth_id = state.source_frame_id
@@ -337,10 +356,10 @@ class P123LiveRuntime:
                 last_depth_id = state.source_frame_id
 
     def _hand_loop(self) -> None:
+        version = 0
         while self._running:
-            packet = self._hand_frames.get()
+            packet, version = self._hand_frames.wait_for_new(version, timeout=0.2)
             if packet is None:
-                time.sleep(0.001)
                 continue
             try:
                 state = self.hand_engine.update(packet.frame, packet.timestamp, packet.frame_id)
@@ -361,16 +380,20 @@ class P123LiveRuntime:
                 # for interactive XYZ on this hardware.
                 geometry, hands = self._fast_geometry or self._geometry, self._hands
             if geometry is None or hands is None:
-                time.sleep(0.005)
+                time.sleep(0.01)
                 continue
             key = (geometry.source_frame_id, hands.source_frame_id)
             if key == last_key:
-                time.sleep(0.005)
+                time.sleep(0.01)
                 continue
             last_key = key
             age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
-            if age_ms > self.max_state_age_ms:
+            depth_hz = self._depth_times and _rate(self._depth_times) or 8.0
+            freshness_limit = min(self.max_state_age_ms, max(180.0, 1.75 * (1000.0 / max(depth_hz, 1.0))))
+            if age_ms > freshness_limit:
                 self._xyz = ()
+                for stale_id in tuple(self._xyz_smooth):
+                    self._xyz_smooth.pop(stale_id, None)
                 continue
             values: list[HandXYZ] = []
             with self._state_lock:
@@ -386,7 +409,9 @@ class P123LiveRuntime:
                     reliability = 0.0 if prior_xyz is None else reliability * 0.5
                 else:
                     prior_xyz = self._xyz_smooth.get(hand.hand_id)
-                    smooth_xyz = raw_xyz if prior_xyz is None else 0.35 * raw_xyz + 0.65 * prior_xyz
+                    motion = float(np.linalg.norm(raw_xyz - prior_xyz)) if prior_xyz is not None else 1.0
+                    blend = float(np.clip(0.25 + motion * 0.45, 0.25, 0.75))
+                    smooth_xyz = raw_xyz if prior_xyz is None else blend * raw_xyz + (1.0 - blend) * prior_xyz
                     self._xyz_smooth[hand.hand_id] = smooth_xyz
                     xyz = tuple(float(v) for v in smooth_xyz)
                 values.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence * reliability), hand.timestamp, hands.source_frame_id, age_ms, hand.handedness))
@@ -400,18 +425,19 @@ class P123LiveRuntime:
             rgb = self._rgb
         with self._state_lock:
             depth, geometry, hands, fast_geometry = self._depth, self._geometry, self._hands, self._fast_geometry
+        canonical_geometry = fast_geometry or geometry
         xyz = tuple(self._xyz)
         contract = None
-        if rgb is not None and geometry is not None:
+        if rgb is not None and canonical_geometry is not None:
             contract = P4InputState(
                 rgb_frame=rgb[0], rgb_capture_id=rgb[1], rgb_timestamp=rgb[2],
-                camera_model=self.camera, geometry_state=geometry, hand_states=xyz,
+                camera_model=self.camera, geometry_state=canonical_geometry, hand_states=xyz,
                 data_age_metrics={
-                    "depth_age_ms": max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0),
+                    "depth_age_ms": max(0.0, (time.monotonic() - canonical_geometry.timestamp) * 1000.0),
                     "hand_age_ms": None if hands is None else max(0.0, (time.monotonic() - hands.timestamp) * 1000.0),
                 },
-                geometry_target_capture_id=geometry.source_frame_id,
-                source_depth_capture_id=geometry.source_frame_id,
+                geometry_target_capture_id=canonical_geometry.source_frame_id,
+                source_depth_capture_id=canonical_geometry.source_frame_id,
                 confidence_metadata={"depth_reliability": None if depth is None else float(np.nanmean(depth.confidence)) if depth.confidence is not None else None},
             )
         now = time.monotonic()
@@ -419,9 +445,9 @@ class P123LiveRuntime:
             self.camera_worker.actual_fps if self.camera_worker.captured_frames > 1 else _rate(self._capture_times), _rate(self._depth_times), _rate(self._geometry_times), _rate(self._fast_temporal_times), _rate(self._hand_times), _rate(self._xyz_times),
             _percentile(self._depth_ages, 50), _percentile(self._depth_ages, 95), _percentile(self._geometry_ages, 95), _percentile(self._hand_ages, 95), _percentile(self._xyz_ages, 95),
             self.camera_worker.captured_frames, self.camera_worker.overwritten_before_consumption, self._depth_errors,
-            _rate(self._normal_times),
+            _rate(self._normal_times), _percentile(self._normal_ages, 95),
         )
-        return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, geometry, hands, xyz, contract, metrics, fast_geometry)
+        return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, canonical_geometry, hands, xyz, contract, metrics, fast_geometry)
 
     def stop(self) -> None:
         self._running = False
