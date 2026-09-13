@@ -102,6 +102,29 @@ def _fast_temporal_confidence(
     return np.where(valid, np.clip(confidence, 0.0, 1.0), 0.0).astype(np.float32)
 
 
+def _smooth_depth(
+    previous_depth: np.ndarray | None,
+    current_depth: np.ndarray,
+    current_valid: np.ndarray | None,
+    alpha: float = 0.30,
+) -> np.ndarray:
+    """EMA-smooth native depth after aligning monocular frame scale."""
+    current = np.asarray(current_depth, dtype=np.float32)
+    valid = np.isfinite(current) & (current > 1e-6)
+    if current_valid is not None:
+        valid &= np.asarray(current_valid, dtype=bool)
+    if previous_depth is None or np.asarray(previous_depth).shape != current.shape:
+        return np.where(valid, current, np.nan).astype(np.float32)
+    previous = np.asarray(previous_depth, dtype=np.float32)
+    overlap = valid & np.isfinite(previous) & (previous > 1e-6)
+    if not overlap.any():
+        return np.where(valid, current, np.nan).astype(np.float32)
+    ratio = float(np.median(previous[overlap])) / max(float(np.median(current[overlap])), 1e-6)
+    aligned = current * ratio
+    smoothed = np.where(overlap, (1.0 - alpha) * previous + alpha * aligned, aligned)
+    return np.where(valid, smoothed, np.nan).astype(np.float32)
+
+
 class P123LiveRuntime:
     """Run camera, depth, geometry/temporal, and hands on independent workers."""
 
@@ -119,7 +142,7 @@ class P123LiveRuntime:
         use_fp16: bool = False,
         hand_backend: str = "auto",
         calibration: CameraModel | None = None,
-        max_state_age_ms: float = 120.0,
+        max_state_age_ms: float = 300.0,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
@@ -187,6 +210,7 @@ class P123LiveRuntime:
         self._hand_ages: list[float] = []
         self._xyz_ages: list[float] = []
         self._xyz: tuple[HandXYZ, ...] = ()
+        self._xyz_smooth: dict[int, np.ndarray] = {}
 
     def start(self) -> None:
         if self._running:
@@ -281,14 +305,16 @@ class P123LiveRuntime:
             return
         last_depth_id: int | str | None = None
         previous_depth: np.ndarray | None = None
+        smoothed_depth: np.ndarray | None = None
         while self._running:
             state = self._depth_states.get()
             if state is None or state.source_frame_id == last_depth_id:
                 time.sleep(0.002)
                 continue
             try:
+                smoothed_depth = _smooth_depth(smoothed_depth, state.depth, state.valid_mask)
                 fast = self._normal_backend.process_depth(
-                    state.depth,
+                    smoothed_depth,
                     self.camera,
                     frame_id=state.source_frame_id,
                     timestamp=state.timestamp,
@@ -298,13 +324,13 @@ class P123LiveRuntime:
                 )
                 fast.processing_frame_id = state.source_frame_id
                 fast.temporal_confidence = _fast_temporal_confidence(
-                    previous_depth, state.depth, state.valid_mask, state.confidence
+                    previous_depth, smoothed_depth, state.valid_mask, state.confidence
                 )
                 with self._state_lock:
                     self._fast_geometry = fast
                 self._normal_times.append(time.monotonic())
                 self._fast_temporal_times.append(time.monotonic())
-                previous_depth = np.asarray(state.depth, dtype=np.float32).copy()
+                previous_depth = smoothed_depth.copy()
                 last_depth_id = state.source_frame_id
             except Exception:
                 # Keep the temporal worker/UI alive if CUDA geometry rejects a frame.
@@ -349,7 +375,15 @@ class P123LiveRuntime:
             values: list[HandXYZ] = []
             for hand in hands.hands:
                 z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
-                xyz = None if z <= 0 else tuple(float(v) for v in geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z))
+                raw_xyz = None if z <= 0 else np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
+                if raw_xyz is None:
+                    xyz = None
+                    self._xyz_smooth.pop(hand.hand_id, None)
+                else:
+                    prior_xyz = self._xyz_smooth.get(hand.hand_id)
+                    smooth_xyz = raw_xyz if prior_xyz is None else 0.35 * raw_xyz + 0.65 * prior_xyz
+                    self._xyz_smooth[hand.hand_id] = smooth_xyz
+                    xyz = tuple(float(v) for v in smooth_xyz)
                 values.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence * reliability), hand.timestamp, hands.source_frame_id, age_ms, hand.handedness))
             self._xyz = tuple(values)
             now = time.monotonic()

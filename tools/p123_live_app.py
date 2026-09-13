@@ -91,6 +91,15 @@ def _panel(
     else:
         image = rgb.copy()
         title = "MODE 6 — XYZ CONTRACT"
+        camera = snapshot.contract.camera_model if snapshot.contract is not None else None
+        origin = (
+            int(round(camera.cx)), int(round(camera.cy))
+        ) if camera is not None else (image.shape[1] // 2, image.shape[0] // 2)
+        cv2.arrowedLine(image, origin, (min(image.shape[1] - 8, origin[0] + 70), origin[1]), (255, 70, 70), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.arrowedLine(image, origin, (origin[0], min(image.shape[0] - 8, origin[1] + 70)), (70, 255, 70), 2, cv2.LINE_AA, tipLength=0.18)
+        cv2.putText(image, "+X right", (min(image.shape[1] - 90, origin[0] + 72), origin[1] + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 90, 90), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Y down", (origin[0] + 5, min(image.shape[0] - 10, origin[1] + 86)), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (90, 255, 90), 1, cv2.LINE_AA)
+        cv2.putText(image, "+Z forward", (8, image.shape[0] - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (90, 150, 255), 1, cv2.LINE_AA)
         xyz_by_id = {item.hand_id: item for item in snapshot.xyz}
         visible_hands = () if snapshot.hand_state is None else snapshot.hand_state.hands
         if not visible_hands:

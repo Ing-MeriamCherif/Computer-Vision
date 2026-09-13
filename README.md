@@ -90,7 +90,9 @@ physical-camera smoke measurement. Native normals use the CUDA geometry stream
 independently of the slower temporal CPU diagnostics; mode 4 uses a lightweight
 native temporal-consistency map at the same live cadence.
 XYZ mode samples the same fresh CUDA geometry state and reports “Waiting for a
-detected hand...” when MediaPipe has no hand in view.
+detected hand...” when MediaPipe has no hand in view. Native depth and XYZ are
+EMA-smoothed, and mode 6 displays the camera coordinate axes (+X right, +Y
+down, +Z forward) beside each hand annotation.
 
 ---
 

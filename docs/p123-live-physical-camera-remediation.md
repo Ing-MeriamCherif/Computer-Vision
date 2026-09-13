@@ -25,7 +25,9 @@ independent fast stream; full temporal diagnostics remain available for the
 P4 contract without blocking them. The camera/display cadence is independent
 from all slower workers; each worker publishes only its newest completed state.
 XYZ now samples that same fast geometry stream instead of stale full-temporal
-geometry; it remains empty by design when no physical hand is detected.
+geometry; it remains empty by design when no physical hand is detected. Native
+depth and XYZ use EMA smoothing, and mode 6 overlays the fixed camera frame
+(+X right, +Y down, +Z forward) with each hand's coordinates.
 
 ============================================================
 SCOPE GUARD
