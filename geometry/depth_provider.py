@@ -67,6 +67,42 @@ class DepthAnythingProvider:
         self._trt_context = None
         self._trt_output = None
         self._trt_stream = None
+        self._trt_engine_path: Path | None = None
+
+    def _load_torch_model(self) -> None:
+        """Load the quality-reference model only when no exact TRT engine exists."""
+        if self.model is not None:
+            return
+        from transformers import AutoModelForDepthEstimation
+
+        self.model = AutoModelForDepthEstimation.from_pretrained(
+            self.model_path, local_files_only=True
+        ).to(self.device).eval()
+        if self.device.type == "cuda" and self.use_fp16:
+            self.model = self.model.half()
+
+    def _load_trt_engine(self, candidate: Path) -> bool:
+        """Load one exact-shape FP32 TensorRT engine, returning False on failure."""
+        try:
+            import tensorrt as trt
+            import torch
+
+            runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+            engine = runtime.deserialize_cuda_engine(candidate.read_bytes())
+            if engine is None:
+                return False
+            context = engine.create_execution_context()
+            output_shape = tuple(engine.get_tensor_shape("predicted_depth"))
+            self._trt_runtime = runtime
+            self._trt_engine = engine
+            self._trt_context = context
+            self._trt_output = torch.empty(output_shape, dtype=torch.float32, device=self.device)
+            self._trt_stream = torch.cuda.Stream(device=self.device)
+            self._trt_engine_path = candidate
+            self.backend_name = "depth-anything-v2-small-tensorrt-fp32"
+            return True
+        except (ImportError, RuntimeError, OSError):
+            return False
 
     def load(self) -> None:
         if self._loaded:
@@ -94,36 +130,29 @@ class DepthAnythingProvider:
         elif self.engine_path not in (None, ""):
             candidate = Path(self.engine_path)
         if candidate is not None and candidate.exists() and self.device.type == "cuda" and not self.use_fp16:
-            try:
-                import tensorrt as trt
-
-                self._trt_runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
-                self._trt_engine = self._trt_runtime.deserialize_cuda_engine(candidate.read_bytes())
-                if self._trt_engine is None:
-                    raise RuntimeError("TensorRT could not deserialize the engine")
-                self._trt_context = self._trt_engine.create_execution_context()
-                output_shape = tuple(self._trt_engine.get_tensor_shape("predicted_depth"))
-                self._trt_output = torch.empty(output_shape, dtype=torch.float32, device=self.device)
-                self._trt_stream = torch.cuda.Stream(device=self.device)
-                self.backend_name = "depth-anything-v2-small-tensorrt-fp32"
-            except (ImportError, RuntimeError):
-                self._trt_runtime = self._trt_engine = self._trt_context = self._trt_output = self._trt_stream = None
+            self._load_trt_engine(candidate)
         if self._trt_context is None:
-            self.model = AutoModelForDepthEstimation.from_pretrained(path, local_files_only=True).to(device).eval()
-            if device.startswith("cuda") and self.use_fp16:
-                self.model = self.model.half()
+            self._load_torch_model()
         self._loaded = True
 
     def _infer(self, inputs):
         """Run the numerically equivalent fixed-shape TensorRT or PyTorch model."""
         import torch
 
-        if self._trt_context is None:
-            return self.model(**inputs).predicted_depth
         values = inputs["pixel_values"].contiguous()
-        expected = tuple(self._trt_engine.get_tensor_shape("pixel_values"))
-        if tuple(values.shape) != expected:
-            raise RuntimeError(f"TensorRT engine expects {expected}, got {tuple(values.shape)}")
+        actual = tuple(values.shape)
+        if self._trt_context is not None:
+            expected = tuple(self._trt_engine.get_tensor_shape("pixel_values"))
+            if actual != expected:
+                height, width = actual[-2:]
+                exact = Path(self.model_path) / f"depth_{height}x{width}_fp32.engine"
+                if not (exact.exists() and self._load_trt_engine(exact)):
+                    self._trt_context = None
+                    self.backend_name = "depth-anything-v2-small"
+                    self._load_torch_model()
+        if self._trt_context is None:
+            self._load_torch_model()
+            return self.model(**inputs).predicted_depth
         self._trt_context.set_tensor_address("pixel_values", values.data_ptr())
         self._trt_context.set_tensor_address("predicted_depth", self._trt_output.data_ptr())
         current = torch.cuda.current_stream(self.device)

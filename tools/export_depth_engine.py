@@ -1,4 +1,4 @@
-"""Build the exact 336x448 FP32 Depth Anything TensorRT engine."""
+"""Build an exact-shape FP32 Depth Anything TensorRT engine."""
 
 from __future__ import annotations
 
