@@ -467,6 +467,30 @@ class PoseEstimator:
             min_motion_confidence=min_motion_confidence,
         )
 
+    def estimate_pose(
+        self,
+        previous_geometry,
+        current_geometry=None,
+        motion=None,
+        *,
+        min_geometry_confidence: float | None = None,
+        min_motion_confidence: float | None = None,
+    ) -> PoseEstimateResult:
+        """Estimate relative pose between previous and current state, with or without explicit motion."""
+        if motion is None and hasattr(current_geometry, "forward_flow"):
+            motion = current_geometry
+            current_geometry = None
+        if motion is not None:
+            return self.estimate_from_states(
+                previous_geometry,
+                motion,
+                min_geometry_confidence=min_geometry_confidence,
+                min_motion_confidence=min_motion_confidence,
+            )
+        source_id = getattr(previous_geometry, "source_frame_id", None)
+        target_id = getattr(current_geometry, "source_frame_id", None) if current_geometry is not None else None
+        return _invalid(0, "no_motion_or_correspondences", source_frame_id=source_id, target_frame_id=target_id)
+
 
 def compose_world_pose(previous_world_from_camera: np.ndarray, current_from_previous: np.ndarray) -> np.ndarray:
     """Compose poses using ``T_world_from_current = T_world_from_previous @ inv(T_current_from_previous)``."""

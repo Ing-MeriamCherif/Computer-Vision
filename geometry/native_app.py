@@ -28,6 +28,7 @@ from .depth_provider import DepthAnythingProvider
 from .colleague_depth import ColleagueDepthProvider
 from .hand_control import GestureState, HandControlEngine, TrackedHand, create_hand_tracker
 from .lighting import LightState, render_volumetric_scattering, sample_depth, shade_geometry
+from .motion import OpenCVFlowProvider
 from .native_window import NativeOpenGLWindow
 from .normals import normals_to_rgb
 from .persistent import PersistentGeometryConfig, PersistentGeometryMapper, PersistentGeometryState, SurfelMap
@@ -761,7 +762,8 @@ class NativeLiveApp:
             # Query persistent map snapshot
             p_snapshot = self.persistent_worker.get_latest_snapshot() if self.persistent_worker else None
             if p_snapshot is not None and p_snapshot.surfel_count > 50:
-                p_depth, p_pos, p_norm, p_conf = p_snapshot.reproject_to_camera(self.camera, CameraPoseState.identity())
+                p_depth = p_snapshot.projected_depth
+                p_conf = p_snapshot.projected_confidence
                 has_p = np.isfinite(p_depth) & (p_conf > 0.1)
                 rendered = frame_rgb.copy()
                 # Tint persistent reconstructed surfels green/cyan
