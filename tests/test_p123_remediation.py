@@ -30,6 +30,23 @@ def test_geometry_preserves_depth_source_identity():
     assert geometry.timestamp == 12.5
 
 
+def test_source_discontinuity_resets_geometry_history_before_new_depth():
+    from geometry.p123_live_runtime import _reset_history_on_source_discontinuity
+
+    class FakeBackend:
+        def __init__(self):
+            self.reset_calls = 0
+
+        def reset_history(self):
+            self.reset_calls += 1
+
+    backend = FakeBackend()
+    assert not _reset_history_on_source_discontinuity(backend, 50, 51)
+    assert backend.reset_calls == 0
+    assert _reset_history_on_source_discontinuity(backend, 51, 3)
+    assert backend.reset_calls == 1
+
+
 def test_detector_skip_uses_lk_motion_update():
     from geometry.hand_control import HandControlEngine, TrackedHand
 

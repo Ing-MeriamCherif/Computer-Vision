@@ -74,6 +74,21 @@ def _percentile(values, p: float) -> float | None:
     return float(np.percentile(values, p)) if values else None
 
 
+def _reset_history_on_source_discontinuity(backend: Any, previous_id: int | str | None, current_id: int | str) -> bool:
+    """Reset temporal geometry state when a camera/source sequence jumps."""
+    if previous_id is None:
+        return False
+    discontinuity = type(previous_id) is not type(current_id)
+    if isinstance(previous_id, int) and isinstance(current_id, int):
+        discontinuity = current_id < previous_id
+    if discontinuity:
+        reset = getattr(backend, "reset_history", None)
+        if callable(reset):
+            reset()
+        return True
+    return False
+
+
 def _fast_temporal_confidence(
     previous_depth: np.ndarray | None,
     current_depth: np.ndarray,
@@ -330,17 +345,20 @@ class P123LiveRuntime:
                     state, device_state = result
                 else:
                     state, device_state = result, None
-                self._depth_states.put(state)
                 completed = time.monotonic()
                 state.completed_timestamp = completed
                 if device_state is not None:
                     device_state.completed_timestamp = completed
+                self._depth_states.put(state)
                 with self._state_lock:
                     self._depth = state
                     self._device_depth = device_state
                 self._depth_times.append(completed)
-                self._depth_ages.append(max(0.0, (completed - packet.timestamp) * 1000.0))
-                self._depth_completion_ages.append(0.0)
+                # Primary freshness is physical source age, not time since
+                # inference completed. Keep completion age separate.
+                observed = time.monotonic()
+                self._depth_ages.append(max(0.0, (observed - state.timestamp) * 1000.0))
+                self._depth_completion_ages.append(max(0.0, (observed - completed) * 1000.0))
             except Exception:
                 self._depth_errors += 1
 
@@ -390,6 +408,12 @@ class P123LiveRuntime:
             if state is None:
                 continue
             try:
+                source_discontinuity = _reset_history_on_source_discontinuity(
+                    self._normal_backend, last_depth_id, state.source_frame_id
+                )
+                if source_discontinuity:
+                    previous_device_depth = None
+                    smoothed_depth = None
                 with self._state_lock:
                     device_state = self._device_depth if self._device_depth is not None and self._device_depth.source_frame_id == state.source_frame_id else None
                 if device_state is not None:
