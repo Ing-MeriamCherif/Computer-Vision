@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 import cv2
 import numpy as np
@@ -15,6 +16,15 @@ HAND_BONES = (
     (0, 17), (17, 18), (18, 19), (19, 20), # Pinky
     (5, 9), (9, 13), (13, 17),             # Palm knuckles
 )
+
+
+def _live_source_age_ms(xyz: Any) -> float:
+    """Compute current physical age without mutating the immutable contract."""
+    timestamp = float(getattr(xyz, "timestamp", 0.0) or 0.0)
+    stored = float(getattr(xyz, "source_age_ms", getattr(xyz, "age_ms", 0.0)) or 0.0)
+    if timestamp <= 0.0:
+        return max(0.0, stored)
+    return max(stored, max(0.0, (time.monotonic() - timestamp) * 1000.0))
 
 
 def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
@@ -34,7 +44,7 @@ def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
     cv2.rectangle(image, (card_x, card_y), (card_x + card_w, card_y + card_h), (22, 26, 32), -1)
     cv2.rectangle(image, (card_x, card_y), (card_x + card_w, card_y + card_h), (58, 70, 88), 1)
 
-    cv2.putText(image, "METRIC CAMERA AXES (m)", (card_x + 10, card_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (138, 180, 248), 1, cv2.LINE_AA)
+    cv2.putText(image, "CAMERA-SPACE XYZ (m, hand-scale)", (card_x + 10, card_y + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (138, 180, 248), 1, cv2.LINE_AA)
 
     origin = (card_x + 36, card_y + 48)
     cv2.circle(image, origin, 3, (242, 244, 246), -1, cv2.LINE_AA)
@@ -91,13 +101,13 @@ def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
         xyz = xyz_by_id.get(tracked.hand_id)
         if xyz is not None and xyz.xyz_camera is not None:
             cx, cy_pos, cz = xyz.xyz_camera
-            is_estimated = getattr(xyz, "estimated", False)
-            is_fresh = (xyz.age_ms <= 220.0 and not is_estimated)
-            status_tag = f"Fresh {xyz.age_ms:.0f}ms" if is_fresh else (f"Degraded {xyz.age_ms:.0f}ms" if not is_estimated else "Estimated")
-            status_col = (129, 201, 149) if is_fresh else ((253, 214, 99) if not is_estimated else (138, 180, 248))
+            live_age = _live_source_age_ms(xyz)
+            is_fresh = live_age <= 220.0 and xyz.confidence >= 0.45
+            status_tag = f"Fresh {live_age:.0f}ms" if is_fresh else f"Degraded {live_age:.0f}ms"
+            status_col = (129, 201, 149) if is_fresh else (253, 214, 99)
             coord_line = f"H{tracked.hand_id} XYZ: ({cx:+.2f}, {cy_pos:+.2f}, {cz:.2f})m"
         else:
-            coord_line = f"H{tracked.hand_id} XYZ: Depth Pending"
+            coord_line = f"H{tracked.hand_id} XYZ: Palm Scale Pending"
             status_tag = "Pending"
             status_col = (253, 214, 99)
 
@@ -112,4 +122,4 @@ def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
         cv2.circle(image, (tx - 1, ty - 5), 3, status_col, -1, cv2.LINE_AA)
         cv2.putText(image, full_label, (tx + 6, ty - 2), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (242, 244, 246), 1, cv2.LINE_AA)
 
-    return image, "MODE 6 — XYZ CONTRACT (Camera Metric XYZ)", None
+    return image, "MODE 6 — CAMERA-SPACE XYZ (Palm-Scale Z)", None

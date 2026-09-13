@@ -52,7 +52,7 @@ from .persistent import (
 )
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DeviceDepthState, DepthAnythingProvider, DepthInferenceDiagnostics
-from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv
+from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv, palm_center, choose_tracker_size
 from .colleague_depth import ColleagueDepthProvider
 from .lighting import (
     DEFAULT_AMBIENT,
@@ -140,6 +140,8 @@ __all__ = [
     "transform_hand_uv",
     "GestureState",
     "HandControlEngine",
+    "palm_center",
+    "choose_tracker_size",
     "create_hand_tracker",
     "ColleagueDepthProvider",
     "LightState",

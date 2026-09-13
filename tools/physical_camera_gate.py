@@ -209,7 +209,7 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         if gate == "temporal":
             temporal = TemporalGeometryEngine(camera, TemporalConfig(diagnostics_level="timing"), OpenCVFlowProvider(method="farneback", flow_scale=0.5))
         if gate in {"hands", "xyz"}:
-            hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=args.hand_backend, detect_every_n=2, max_coast_frames=8)
+            hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=args.hand_backend, detect_every_n=1, max_coast_frames=8)
             if hand_engine.backend_name in {"unavailable", "mock"}:
                 raise RuntimeError(f"hand backend unavailable: {hand_engine.backend_name}")
 
