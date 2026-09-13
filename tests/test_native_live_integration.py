@@ -498,6 +498,91 @@ class TestQualityProfiles:
         high_px = high.depth_size[0] * high.depth_size[1]
         assert low_px <= high_px
 
+    def test_production_depth_shape_follows_capture_aspect_not_quality(self):
+        from geometry.native_app import NativeLiveApp, QualityProfile, choose_production_depth_size
+
+        assert choose_production_depth_size(1920, 1080) == (378, 672)
+        assert choose_production_depth_size(640, 480) == (336, 448)
+        app = NativeLiveApp(headless=True, use_synthetic_camera=True, quality_profile=QualityProfile.LOW)
+        app.start()
+        try:
+            selected = app.production_depth_size
+            app.cycle_quality_profile()
+            assert app.production_depth_size == selected
+        finally:
+            app.stop()
+
+
+class TestL1GeometrySourceContract:
+    def test_geometry_is_cached_per_depth_source_and_receives_confidence(self):
+        from geometry.native_app import NativeLiveApp
+        from geometry.state import DepthState, GeometryState
+
+        class FakeBackend:
+            def __init__(self):
+                self.calls = []
+
+            def process_depth(self, depth, camera, **kwargs):
+                self.calls.append((depth, kwargs))
+                h, w = camera.height, camera.width
+                return GeometryState(
+                    kwargs["timestamp"], kwargs["frame_id"], np.asarray(depth),
+                    np.zeros((h, w, 3), np.float32),
+                    np.ones((h, w), bool), camera, "relative",
+                )
+
+        app = NativeLiveApp(headless=True, use_synthetic_camera=True)
+        fake = FakeBackend()
+        app.geometry_backend = fake
+        h, w = app.camera.height, app.camera.width
+        depth = np.ones((h, w), np.float32)
+        valid = np.ones((h, w), bool)
+        confidence = np.full((h, w), 0.7, np.float32)
+        state = DepthState(depth, 12.5, 42, "relative", valid_mask=valid, confidence=confidence)
+        state.device_depth = depth
+        state.device_valid_mask = valid
+        state.device_confidence = confidence
+
+        first = app._geometry_for_depth(state, depth, valid, 100, 13.0)
+        second = app._geometry_for_depth(state, depth, valid, 101, 13.1)
+        assert first is second
+        assert len(fake.calls) == 1
+        assert fake.calls[0][1]["frame_id"] == 42
+        np.testing.assert_array_equal(fake.calls[0][1]["input_confidence"], confidence)
+
+    def test_first_live_frame_does_not_fabricate_geometry(self):
+        from geometry.native_app import AppMode, NativeLiveApp
+
+        app = NativeLiveApp(headless=True, use_synthetic_camera=True, initial_mode=AppMode.NORMALS)
+        try:
+            app.start()
+            frame = app.step()
+            assert frame is not None
+            assert app._latest_geometry is None
+        finally:
+            app.stop()
+
+    def test_depth_worker_receives_native_capture_shape(self):
+        from geometry.native_app import NativeLiveApp
+
+        class SpyBuffer:
+            def __init__(self):
+                self.frames = []
+
+            def put(self, frame, frame_id, timestamp):
+                self.frames.append((frame, frame_id, timestamp))
+
+        app = NativeLiveApp(headless=True, use_synthetic_camera=True)
+        try:
+            app.start()
+            spy = SpyBuffer()
+            app.depth_frame_buffer = spy
+            app.step()
+            assert spy.frames
+            assert spy.frames[-1][0].shape[:2] == (app.camera.height, app.camera.width)
+        finally:
+            app.stop()
+
 
 # ---------------------------------------------------------------------------
 # NativeLiveApp headless smoke (synthetic)

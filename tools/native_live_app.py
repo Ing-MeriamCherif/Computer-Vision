@@ -167,12 +167,14 @@ def main() -> int:
         if args.calibration and Path(args.calibration).exists():
             model = _load_calibration(args.calibration, app.camera_width, app.camera_height)
             if model is not None:
-                app.camera = model
+                app.set_camera_calibration(model)
                 print(f"  Calibration loaded: {args.calibration}")
             else:
                 print("  INTRINSICS: APPROXIMATE (no calibration file)")
         else:
             print("  INTRINSICS: APPROXIMATE (run python tools/calibrate_camera.py to calibrate)")
+
+        print(f"  Depth input : {app.production_depth_size[1]}×{app.production_depth_size[0]} FP32, full-frame dispatch")
 
         app.run(
             max_frames=args.frames,
