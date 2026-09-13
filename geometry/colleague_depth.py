@@ -38,6 +38,14 @@ class ColleagueDepthProvider:
         self.last_diagnostics: DepthInferenceDiagnostics | None = None
         self._session_scale: float | None = None
 
+    def load(self) -> None:
+        """Satisfy the common provider lifecycle contract.
+
+        The preserved colleague model constructs its backend eagerly, so load
+        is intentionally an idempotent no-op rather than a second warmup.
+        """
+        return None
+
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
         import cv2
 
@@ -83,7 +91,7 @@ class ColleagueDepthProvider:
 
         return DepthState(
             depth_arr,
-            timestamp if timestamp is not None else time.time(),
+            time.monotonic() if timestamp is None else float(timestamp),
             source_frame_id,
             upstream.scale_mode,
             valid_mask=valid,

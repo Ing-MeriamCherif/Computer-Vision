@@ -90,3 +90,44 @@ def test_physical_gate_has_no_synthetic_flag(capsys):
         assert "--synthetic" not in capsys.readouterr().out
     finally:
         sys.argv = old
+
+
+def test_temporal_processing_ids_survive_skipped_capture_ids():
+    from geometry import CameraModel, DepthState
+    from geometry.temporal import TemporalGeometryEngine
+
+    cam = CameraModel(8, 6, 7, 7, 3.5, 2.5)
+    depth = np.ones((6, 8), np.float32)
+    engine = TemporalGeometryEngine(cam)
+    first = engine.update(np.zeros((6, 8, 3), np.uint8), cam, 100, 1.0, DepthState(depth, 1.0, 100, "relative"), processing_frame_id=0)
+    second = engine.update(np.zeros((6, 8, 3), np.uint8), cam, 104, 1.033, DepthState(depth, 1.033, 104, "relative"), processing_frame_id=1)
+    assert first.processing_frame_id == 0
+    assert second.processing_frame_id == 1
+    assert engine.last_diagnostics is None or engine.last_diagnostics.reset_reason != "frame_discontinuity"
+
+
+def test_depth_uv_mapping_and_warm_near_palette():
+    from geometry.depth_sampling import camera_uv_to_depth_uv
+    from geometry.visualization import depth_to_rgb
+
+    assert camera_uv_to_depth_uv((0.0, 0.0), (640, 480), (256, 192)) == (0.0, 0.0)
+    assert camera_uv_to_depth_uv((320.0, 240.0), (640, 480), (256, 192)) == (128.0, 96.0)
+    image = depth_to_rgb(np.asarray([[1.0, 3.0]], np.float32))
+    assert tuple(image[0, 0])[:2] > tuple(image[0, 1])[:2]
+
+
+def test_depth_gate_rejects_reversed_forward_z():
+    from tools.physical_camera_gate import _depth_results
+    from geometry import DepthState
+
+    records = [(DepthState(np.ones((2, 2), np.float32), 1.0, 0, "relative"), 1.0)] * 4
+    result = _depth_results(records, [1.0, 2.0], [1.0], [2.0], [3.0, 3.0, 2.0, 2.0])
+    assert result["convention_physically_verified"] is False
+    assert result["result"] == "FAIL"
+
+
+def test_hand_control_has_no_p4_depth_sampling_dependency():
+    from pathlib import Path
+
+    source = Path("geometry/hand_control.py").read_text(encoding="utf-8")
+    assert "from .lighting import sample_depth" not in source

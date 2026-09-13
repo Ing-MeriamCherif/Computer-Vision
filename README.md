@@ -70,6 +70,20 @@ PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate hands --camer
 PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate xyz --camera /dev/video0
 ```
 
+## P1/P2/P3 Asynchronous Live Diagnostics
+
+This diagnostic UI is the live P123 path. It uses a physical camera, separate
+latest-only depth/geometry/hand workers, and stops at `P4InputState`; it does
+not render lighting, shadows, volumetrics, or any other Person 4 output:
+
+```bash
+PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
+```
+
+Use keys `1`–`6` for RGB, depth, normals, temporal confidence, hands, and XYZ
+contract diagnostics; press `q` to exit. Add `--headless --duration 10` for a
+bounded runtime smoke measurement.
+
 ---
 
 ## Tests

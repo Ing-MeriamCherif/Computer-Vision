@@ -1,283 +1,333 @@
-# P1/P2/P3 LIVE PHYSICAL CAMERA REMEDIATION REPORT
+# P123 MODE-BY-MODE LIVE REMEDIATION REPORT
 
-Starting main commit: `e5b1fec`
+Starting commit: `e5b1fec`
 
-Working branch: `bug-fixes/live-p123-physical-camera-remediation`
+Ending commit: pending final commit
 
-Ending commit (code): `a0b86cf`; this report is finalized in the following report-only commit
+Branch: `bug-fixes/live-p123-physical-camera-remediation`
 
 ============================================================
 SCOPE GUARD
 ============================================================
 
-P4 files modified: NO
+P4 code modified: NO
 
-P4 algorithms implemented: NO
+P4 functionality implemented: NO
 
-Lighting implemented/modified: NO
+Lighting modified: NO
 
-Shadows implemented/modified: NO
+Specular modified: NO
 
-Volumetrics implemented/modified: NO
+Shadows modified: NO
 
-Renderer implemented/modified: NO
+Volumetrics modified: NO
 
-Any P4 blockers discovered: Existing native renderer/lighting path remains outside this branch and was intentionally not exercised or changed. The remediation ends at the renderer-independent P4 input contract.
+Expected: all NO
 
-============================================================
-GATE 0 — PHYSICAL CAMERA
-============================================================
-
-Executed: YES
-
-Input: PHYSICAL
-
-Device: `/dev/video0`
-
-Backend: V4L2/OpenCV
-
-Resolution: 640x480 negotiated
-
-Requested FPS: 30
-
-Actual capture Hz: 29.79 (10.5 s run)
-
-Unique frames: 303
-
-Capture failures: 0
-
-Motion proof: FAIL — the operator did not perform the required move-left/right stage; frames were unique but the measured MAD did not exceed the motion threshold.
-
-Result: FAIL (physical camera is open and producing frames; motion stage remains unverified)
+P123→P4 dependency remaining: legacy `geometry/__init__.py` exports/imports existing P4 modules; the new P123 runtime and hand-depth path do not call them. Person 4 remains a black box.
 
 ============================================================
-GATE 1 — LIVE DEPTH
+MODE 1 — CAMERA
 ============================================================
 
-Executed: YES
+Physical device: `/dev/video0` via V4L2/OpenCV
 
-Provider: `DepthAnythingProvider` (local checkpoint, FP16-capable path)
+Resolution: 640x480
 
-Depth convention: forward-Z, larger value means farther
+Capture Hz: 14.996 Hz measured in the current run (device reports 30 FPS but delivered ~15 Hz)
 
-Convention physically verified: NO — no near/far object movement was performed during the run.
+Unique frames: 154 / 154
 
-Near value: 2.5892 (first-third center median)
+Motion proof: FAIL — no deliberate camera movement was supplied
 
-Far value: 2.6079 (last-third center median)
+Timestamp correctness: PASS (`time.monotonic()` at successful read)
 
-Larger means: NOT PHYSICALLY VERIFIED
+Capture IDs: physical sequence IDs preserved
 
-Canonical forward-Z conversion: PASS (inverse-depth model output is converted to forward-Z before session normalization)
+Processing IDs: separate contiguous IDs in temporal processing
 
-Actual depth update Hz: 14.98
-
-Inference p50: 59.09 ms
-
-Inference p95: 78.21 ms
-
-Depth age p50: 82.87 ms
-
-Depth age p95: 107.47 ms
-
-Scale breathing test: PASS in software (session-scale EMA is stable); physical near/far validation pending.
-
-Result: FAIL / NOT HARDWARE VALIDATED for physical depth semantics
+Result: NOT READY
 
 ============================================================
-GATE 2 — LIVE P3 GEOMETRY
+MODE 2 — DEPTH
 ============================================================
 
-Executed: YES
+Provider: `DepthAnythingProvider`
 
-Calibration: APPROXIMATE (no real calibration file supplied)
+Input resolution: 192x192 gate input
 
-Depth source frame preservation: PASS
+Inference p50: 61.60 ms
 
-XYZ convention: PASS
+Inference p95: 74.13 ms
 
-Pz≈depth: PASS
+Actual depth Hz: 14.66 Hz
 
-Normals: PASS
+Near depth: 2.8887 (un-staged run)
 
-Edge handling: PASS
+Far depth: 2.5122 (un-staged run)
 
-CPU/GPU agreement: PASS (0.0° median normal angle on the measured overlap)
+Forward-Z verified: NO — the required same-object near→far staged interaction was not performed
 
-Geometry update Hz: 4.45
+Static noise before: NOT HARDWARE VALIDATED
 
-Result: PASS for the live geometry gate with approximate calibration; not a calibrated metric-quality claim.
+Static noise after: NOT HARDWARE VALIDATED
 
-============================================================
-GATE 3 — LIVE TEMPORAL P3
-============================================================
+Scale breathing before: NOT HARDWARE VALIDATED
 
-Executed: YES
+Scale breathing after: session-scale EMA implemented; physical foreground-entry test pending
 
-Canonical temporal engine used: YES
+Edge quality: NOT HARDWARE VALIDATED visually
 
-Flow provider: OpenCV Farneback
+Depth reliability: gradient-derived `depth_reliability`, invalid pixels zeroed
 
-Raw depth jitter: 0.1101 (normalized depth units)
+Color palette: dedicated warm-near / cool-far palette
 
-Stabilized depth jitter: 0.1101 (no operator motion was supplied, so no improvement can be inferred)
+Near color: warm red/yellow
 
-Raw normal jitter: NOT MEASURED by the current gate
+Far color: cool blue/purple
 
-Stabilized normal jitter: NOT MEASURED by the current gate
+Visual inspection: NOT RUN
 
-Disocclusion rejection: PASS
-
-Moving-object ghosting: NOT HARDWARE VALIDATED (no moving-object stage performed)
-
-Frame contract: PASS
-
-Temporal output Hz: 2.67
-
-Result: NOT HARDWARE VALIDATED for motion/ghosting quality; frame-contract and engine checks pass.
+Result: NOT READY
 
 ============================================================
-GATE 4 — LIVE P1 HANDS
+MODE 3 — NORMALS
 ============================================================
 
-Executed: YES
+Algorithm: existing edge-aware/multi-scale `estimate_normals`
 
-Backend: `mediapipe-tasks` using `models/hand_landmarker.task`
+Multi-scale: existing configurable normal mode retained
 
-Physical 0-hand test: NOT HARDWARE VALIDATED
+Planar angular jitter before: NOT HARDWARE VALIDATED
 
-Physical 1-hand test: NOT HARDWARE VALIDATED
+Planar angular jitter after: NOT HARDWARE VALIDATED
 
-Physical 2-hand test: NOT HARDWARE VALIDATED
+Edge bleed before: NOT HARDWARE VALIDATED
 
-True simultaneous hands detected: 0 (no hands presented during the run)
+Edge bleed after: NOT HARDWARE VALIDATED
 
-Detector Hz: 15.28
+Temporal normal jitter: NOT HARDWARE VALIDATED
 
-Effective tracking Hz: 27.61
+Visualization convention: R=Nx, G=Ny, B=Nz, [-1,1]→[0,255], invalid black
 
-Skipped-frame LK: PASS
+Visual inspection: NOT RUN
 
-Stable IDs: PASS
-
-Result: FAIL — the real backend loaded, but the required one/two-hand physical stages were not performed.
+Result: NOT HARDWARE VALIDATED
 
 ============================================================
-GATE 5 — LIVE P1/P2/P3 XYZ
+TEMPORAL
 ============================================================
 
-Executed: YES
+Capture IDs observed: physical IDs may skip under latest-only processing
 
-Hand UV→depth UV: PASS
+Processing IDs observed: contiguous 0,1,2,… per temporal observation
 
-Same/compatible frame association: PASS
+Unexpected resets: 0 in the updated temporal regression path
 
-Hand depth age bounded: PASS
+Raw depth jitter: 0.1584 (normalized units)
 
-Robust hand depth: FAIL (no hand samples)
+Stabilized depth jitter: 0.1718 (no deliberate motion; improvement not inferred)
 
-X physical motion: NOT HARDWARE VALIDATED
+Moving-object ghosting: NOT HARDWARE VALIDATED
 
-Y physical motion: NOT HARDWARE VALIDATED
+Disocclusion: PASS for mask-shape/engine invariant; physical reveal test pending
 
-Z physical near/far: NOT HARDWARE VALIDATED
+Temporal Hz: 1.87 Hz in the current gate run
 
-XYZ update Hz: 4.01 state-loop rate
-
-Result: FAIL — no physical hand was present, so no XYZ sample could be emitted.
+Result: NOT HARDWARE VALIDATED
 
 ============================================================
-P4 HANDOFF CONTRACT
+HANDS
 ============================================================
 
-Defined: YES
+Backend: `mediapipe-tasks`, `models/hand_landmarker.task`
 
-Contains rendering code: NO
+0 hand: NOT HARDWARE VALIDATED
 
-Expected: NO
+1 hand: NOT HARDWARE VALIDATED
 
-Provides: RGB, CameraModel, GeometryState, TrackedHand XYZ, confidence, frame IDs, timestamps, age metadata
+2 hands: NOT HARDWARE VALIDATED
 
-Contract tests: PASS
+Stable IDs: software invariant covered; physical multi-hand test pending
 
-============================================================
-MOCK/SYNTHETIC TESTS
-============================================================
+Detector Hz: 15.28 Hz (previous physical run)
 
-Unit tests passed: 195
+Effective tracking Hz: 27.61 Hz (previous physical run)
 
-Unit tests failed: 0
+LK intermediate motion: software regression PASS; no physical hand presented
 
-Smoke tests passed: 0 separately classified smoke tests
+Velocity correctness: software regression PASS
 
-Smoke tests failed: 0
-
-Do any synthetic tests claim hardware readiness? NO
-
-Expected: NO
+Result: NOT READY
 
 ============================================================
-PHYSICAL HARDWARE STATUS
+XYZ
 ============================================================
 
-Camera hardware available: YES
+UV domain conversion: explicit camera-UV→depth-UV mapping
 
-Physical gates executed: camera, depth, geometry, temporal, hands, xyz
+Depth age threshold: 120 ms
 
-Physical gates passed: geometry; temporal contract/engine checks; depth inference execution (semantic direction not verified)
+X test: NOT HARDWARE VALIDATED
 
-Physical gates failed: camera motion proof; depth physical direction; hands; XYZ
+Y test: NOT HARDWARE VALIDATED
 
-Unexecuted gates: None (operator motion/hand stages were not supplied)
+Z test: NOT HARDWARE VALIDATED
+
+XYZ Hz: none (no hand samples)
+
+XYZ age p50: NOT HARDWARE VALIDATED
+
+XYZ age p95: NOT HARDWARE VALIDATED
+
+Result: NOT READY
+
+============================================================
+P4 INPUT CONTRACT
+============================================================
+
+RGB correspondence: source capture ID retained
+
+Camera model: `CameraModel` carried explicitly
+
+Depth: `DepthState`/`GeometryState` with source frame provenance
+
+XYZ: `HandXYZ` camera-space tuple with confidence
+
+Normals: carried by `GeometryState`
+
+Confidence: depth reliability and hand confidence metadata
+
+Frame provenance: capture IDs and monotonic timestamps
+
+Temporal target: contiguous processing ID plus physical source ID
+
+Hands: tuple of real tracked-hand states only
+
+Ages: depth/hand/XYZ age metadata
+
+Contains rendering: NO
+
+Contract: PASS
+
+============================================================
+P4 OBSERVATIONAL BLOCKERS — NO CODE CHANGES
+============================================================
+
+Diffuse:
+
+P123 inputs valid: NOT AUDITED
+
+Observed output: NOT RUN
+
+Blocker: none asserted; P4 observation is deferred until P123 physical gates pass.
+
+Specular:
+
+P123 inputs valid: NOT AUDITED
+
+Observed output: NOT RUN
+
+Blocker: none asserted; P4 observation is deferred until P123 physical gates pass.
+
+Dynamic Shadows:
+
+P123 inputs valid: NOT AUDITED
+
+Observed output: NOT RUN
+
+Blocker: none asserted; P4 observation is deferred until P123 physical gates pass.
+
+============================================================
+TESTS
+============================================================
+
+Unit passed: 199
+
+Unit failed: 0
+
+Physical gates passed: geometry; temporal structural gate
+
+Physical gates failed: camera motion proof; depth direction; hands; XYZ
+
+Visual physical gates passed: none
+
+Not hardware validated: staged depth semantics, visual depth/normal quality, temporal motion/ghosting, 0/1/2-hand behavior, physical XYZ motion
+
+============================================================
+PERFORMANCE
+============================================================
+
+Camera Hz: 14.996 measured current run
+
+Depth Hz: 14.66 measured current run
+
+Geometry Hz: 4.30 measured current geometry run; 1.54 in asynchronous runtime smoke
+
+Temporal Hz: 1.87 measured current run
+
+Hand Hz: 15.28 detector / 27.61 effective (previous physical run)
+
+XYZ Hz: none without a hand
+
+Depth age p95: 131.76 ms
+
+Geometry age p95: NOT MEASURED by the gate
+
+Hand age p95: NOT MEASURED by the gate
 
 ============================================================
 REMAINING P1 ISSUES
 ============================================================
 
-#1 Run the hands gate while visibly presenting 0, then 1, then 2 simultaneous hands.
+1. Complete the visible 0-hand, 1-hand, 2-hand, cross, and separation stages.
 
-#2 Repeat XYZ with deliberate X/Y movement and near/far Z movement to validate depth fusion and two-hand behavior.
+2. Repeat XYZ with deliberate X/Y/Z motion and verify real two-hand IDs.
 
 ============================================================
 REMAINING P2 ISSUES
 ============================================================
 
-#1 Perform the instructed near/far physical object stage to verify that larger forward-Z values truly mean farther.
+1. Run `physical_camera_gate --gate depth --interactive` and complete the near/far protocol.
 
-#2 Improve live throughput beyond the measured ~15 Hz depth update rate if the target requires camera-rate depth output; retain measured completion and age metrics.
+2. Benchmark depth input sizes and complete physical static-noise, edge, and scale-breathing measurements.
 
 ============================================================
 REMAINING P3 ISSUES
 ============================================================
 
-#1 Supply real camera calibration; current geometry gate uses an explicitly labelled approximate model.
+1. Supply real camera calibration instead of the explicitly labelled approximate model.
 
-#2 Repeat temporal validation with deliberate camera/object motion to measure normal jitter reduction and moving-object ghosting.
+2. Perform physical wall/edge/moving-object temporal and normal visual acceptance tests.
 
 ============================================================
-P4 BLOCKERS OBSERVED — NOT MODIFIED
+P4 BLOCKERS — DO NOT MODIFY
 ============================================================
 
-#1 The existing renderer/lighting implementation is outside this corrective branch and was not tested as part of P1/P2/P3.
+1. P4 diffuse/specular/shadow outputs were not observationally audited because their upstream physical gates are incomplete.
 
-#2 Person 4 must consume the contract only after the operator-completed hand and depth physical stages pass.
+2. Existing P4 implementation remains unchanged and outside this branch.
 
 ============================================================
 FINAL VERDICT
 ============================================================
 
-Physical camera pipeline: NOT READY (camera is available, but motion proof is incomplete)
+Camera: NOT READY
 
-P2 live depth: NOT HARDWARE VALIDATED
+Depth: NOT READY
 
-P3 live geometry: READY for the tested approximate-calibration invariants
+Depth visualization: NOT READY (visual inspection pending)
 
-P3 temporal: NOT HARDWARE VALIDATED
+Normals: NOT READY (physical quality pending)
 
-P1 one-hand: NOT HARDWARE VALIDATED
+Temporal: NOT READY (motion/ghosting pending)
 
-P1 two-hand: NOT HARDWARE VALIDATED
+One hand: NOT READY
 
-P1/P2/P3 XYZ contract: NOT HARDWARE VALIDATED
+Two hands: NOT READY
 
-Ready to hand off to Person 4: NO
+XYZ: NOT READY
+
+P123 asynchronous runtime: NOT READY (runtime executes, but measured camera cadence is ~15 Hz and no physical hand samples were produced)
+
+P123 input contract: READY (renderer-independent contract and tests pass)

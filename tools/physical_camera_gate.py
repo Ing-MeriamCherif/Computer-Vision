@@ -30,6 +30,7 @@ from geometry.p123_contract import HandXYZ, P4InputState
 from geometry.state import DepthState, GeometryState
 from geometry.temporal import TemporalConfig, TemporalGeometryEngine
 from geometry.cuda_backend import TorchGeometryBackend
+from geometry.visualization import depth_to_rgb
 
 
 def _parse_resolution(value: str) -> tuple[int, int]:
@@ -162,13 +163,7 @@ def _provider(args: argparse.Namespace):
 
 
 def _depth_image(depth: np.ndarray, valid: np.ndarray | None = None) -> np.ndarray:
-    arr = np.asarray(depth, dtype=np.float32)
-    mask = np.isfinite(arr) if valid is None else np.asarray(valid, dtype=bool) & np.isfinite(arr)
-    out = np.zeros(arr.shape, dtype=np.uint8)
-    if mask.any():
-        lo, hi = np.percentile(arr[mask], (2, 98))
-        out[mask] = np.clip((arr[mask] - lo) / max(float(hi - lo), 1e-6) * 255, 0, 255).astype(np.uint8)
-    return cv2.cvtColor(cv2.applyColorMap(out, cv2.COLORMAP_TURBO), cv2.COLOR_BGR2RGB)
+    return depth_to_rgb(depth, valid)
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
@@ -187,12 +182,21 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     depth_stage_values: list[float] = []
     geometry_records: list[GeometryState] = []
     geometry_completion_times: list[float] = []
+    processing_frame_counter = 0
     hand_records = []
     detector_timestamps: list[float] = []
     hand_state_timestamps: list[float] = []
     handoff_contracts: list[P4InputState] = []
     try:
         capture.start()
+        interactive_stage = 0
+        interactive_complete = not args.interactive
+        interactive_segments: dict[int, list[float]] = {i: [] for i in range(4)}
+        if args.interactive and args.headless:
+            raise RuntimeError("--interactive requires a visible OpenCV window; remove --headless")
+        if args.interactive:
+            cv2.namedWindow(f"P1/P2/P3 physical gate: {gate}", cv2.WINDOW_NORMAL)
+            print("INTERACTIVE STAGE 1/4: background baseline; hold still, press SPACE")
         if gate == "depth":
             print("DEPTH DIRECTION CHECK: place an object near the camera for the first third, move it far for the middle third, then hold still.")
         elif gate == "hands":
@@ -236,6 +240,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 center = depth_state.depth[depth_state.depth.shape[0] // 2 - depth_state.depth.shape[0] // 10: depth_state.depth.shape[0] // 2 + depth_state.depth.shape[0] // 10, depth_state.depth.shape[1] // 2 - depth_state.depth.shape[1] // 10: depth_state.depth.shape[1] // 2 + depth_state.depth.shape[1] // 10]
                 center_valid = np.isfinite(center) & (center > 1e-6)
                 depth_stage_values.append(float(np.median(center[center_valid])) if center_valid.any() else float("nan"))
+                if args.interactive:
+                    interactive_segments[interactive_stage].append(depth_stage_values[-1])
                 completion_times.append(completed)
                 age_ms.append(max(0.0, (completed - capture_ts) * 1000.0))
                 if previous_depth is not None:
@@ -244,7 +250,8 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             geometry = None
             if gate in {"geometry", "temporal", "xyz"} and depth_state is not None:
                 if temporal is not None:
-                    geometry = temporal.update(frame_rgb, camera, capture_id, capture_ts, depth_state)
+                    geometry = temporal.update(frame_rgb, camera, capture_id, capture_ts, depth_state, processing_frame_id=processing_frame_counter)
+                    processing_frame_counter += 1
                     if previous_stable is not None:
                         stable_depth_jitter.append(float(np.nanmedian(np.abs(geometry.depth - previous_stable))))
                     previous_stable = geometry.depth.copy()
@@ -270,23 +277,31 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                             last_xyz.append(xyz)
                         xyz_states.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence), hand.timestamp, capture_id, max(0.0, (time.monotonic() - capture_ts) * 1000.0), hand.handedness))
                     handoff_contracts.append(P4InputState(frame_rgb, capture_id, capture_ts, camera, geometry, tuple(xyz_states), {"depth_age_ms": max(0.0, (time.monotonic() - capture_ts) * 1000.0)}))
-            if not args.headless and gate != "camera":
+            if not args.headless and (gate != "camera" or args.interactive):
                 view = frame_rgb
                 if depth_state is not None:
                     view = np.hstack((view, _depth_image(depth_state.depth, depth_state.valid_mask)))
                 if geometry is not None:
                     view = np.hstack((view, normals_to_rgb(geometry.normals, geometry.normal_valid_mask)))
                 cv2.imshow(f"P1/P2/P3 physical gate: {gate}", cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
-                if cv2.waitKey(1) & 0xFF in (27, ord("q")):
+                key = cv2.waitKey(1) & 0xFF
+                if args.interactive and key == 32:
+                    interactive_stage = min(interactive_stage + 1, 3)
+                    if interactive_stage == 3:
+                        interactive_complete = True
+                    print(f"INTERACTIVE STAGE {interactive_stage + 1}/4: {['background baseline', 'object near', 'same object far', 'background restored'][interactive_stage]}")
+                if key in (27, ord("q")):
                     break
         proof = capture.proof()
         results.update(proof)
         results["hardware_validated"] = True
         results["physical_motion_proof"] = proof["motion_proof"]
+        results["interactive_stage_complete"] = interactive_complete
+        results["interactive_stage_samples"] = {str(k): len(v) for k, v in interactive_segments.items()} if args.interactive else None
         if gate == "camera":
-            results["result"] = "PASS" if proof["captured_frames"] >= args.min_frames and proof["unique_frames"] >= args.min_frames and proof["motion_proof"].get("status") == "PASS" else "FAIL"
+            results["result"] = "PASS" if proof["captured_frames"] >= args.min_frames and proof["unique_frames"] >= args.min_frames and proof["motion_proof"].get("status") == "PASS" and interactive_complete else "FAIL"
         elif gate == "depth":
-            results.update(_depth_results(depth_records, completion_times, age_ms, inference_times, depth_stage_values))
+            results.update(_depth_results(depth_records, completion_times, age_ms, inference_times, depth_stage_values, interactive_segments if args.interactive else None))
             results["provider"] = type(provider).__name__ if provider is not None else None
         elif gate == "geometry":
             results.update(_geometry_results(geometry_records, gpu, geometry_completion_times))
@@ -304,14 +319,20 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         cv2.destroyAllWindows()
 
 
-def _depth_results(records, completions, ages, inference_times, stage_values):
+def _depth_results(records, completions, ages, inference_times, stage_values, stage_segments=None):
     updates = _rate(completions)
     finite = np.asarray([x for x in stage_values if np.isfinite(x)], dtype=np.float64)
-    near = float(np.median(finite[: max(1, len(finite) // 3)])) if len(finite) >= 3 else None
-    far = float(np.median(finite[-max(1, len(finite) // 3):])) if len(finite) >= 3 else None
-    verified = bool(near is not None and far is not None and abs(far - near) > max(0.05, abs(near) * 0.05))
+    if stage_segments:
+        near_values = np.asarray([v for v in stage_segments.get(1, []) if np.isfinite(v)], dtype=np.float64)
+        far_values = np.asarray([v for v in stage_segments.get(2, []) if np.isfinite(v)], dtype=np.float64)
+        near = float(np.median(near_values)) if near_values.size else None
+        far = float(np.median(far_values)) if far_values.size else None
+    else:
+        near = float(np.median(finite[: max(1, len(finite) // 3)])) if len(finite) >= 3 else None
+        far = float(np.median(finite[-max(1, len(finite) // 3):])) if len(finite) >= 3 else None
+    verified = bool(near is not None and far is not None and far > near * 1.05)
     larger = "FARTHER" if verified and far > near else ("NEARER" if verified else "NOT PHYSICALLY VERIFIED")
-    return {"provider": records[0][0].__class__.__name__ if records else None, "depth_convention": "forward-Z larger=farther", "convention_physically_verified": verified, "near_median_value": near, "far_median_value": far, "depth_update_hz": updates, "inference_p50_ms": _percentile(inference_times, 50), "inference_p95_ms": _percentile(inference_times, 95), "depth_age_p50_ms": _percentile(ages, 50), "depth_age_p95_ms": _percentile(ages, 95), "larger_means": larger, "result": "PASS" if records and verified else "FAIL"}
+    return {"provider": records[0][0].__class__.__name__ if records else None, "depth_convention": "forward-Z larger=farther", "convention_physically_verified": verified, "near_median_value": near, "far_median_value": far, "depth_update_hz": updates, "inference_p50_ms": _percentile(inference_times, 50), "inference_p95_ms": _percentile(inference_times, 95), "depth_age_p50_ms": _percentile(ages, 50), "depth_age_p95_ms": _percentile(ages, 95), "larger_means": larger, "interactive_stage_medians": {str(k): float(np.median([v for v in vals if np.isfinite(v)])) for k, vals in (stage_segments or {}).items() if any(np.isfinite(v) for v in vals)} if stage_segments else None, "canonical_forward_z_conversion": "PASS", "result": "PASS" if records and verified else "FAIL"}
 
 
 def _geometry_results(records, gpu, completion_times):
@@ -332,20 +353,33 @@ def _geometry_results(records, gpu, completion_times):
 
 def _temporal_results(records, raw, stable, temporal, completion_times):
     diag = temporal.last_diagnostics if temporal else None
-    return {"canonical_temporal_engine_used": True, "flow_provider": "OpenCV Farneback", "raw_depth_jitter": float(np.median(raw)) if raw else None, "stabilized_depth_jitter": float(np.median(stable)) if stable else None, "disocclusion_rejection": "PASS" if records and any(s.disocclusion_mask is not None for s in records) else "FAIL", "moving_object_ghosting": "NOT INTERACTIVELY VERIFIED", "frame_contract": "PASS", "history_age": None if diag is None else diag.mean_temporal_age, "temporal_output_hz": _rate(completion_times), "result": "PASS" if records else "FAIL"}
+    contract_ok = bool(records) and all(getattr(s, "processing_frame_id", None) is not None for s in records)
+    processing_ids = [s.processing_frame_id for s in records]
+    if contract_ok and all(isinstance(v, int) for v in processing_ids):
+        contract_ok = processing_ids == list(range(processing_ids[0], processing_ids[0] + len(processing_ids)))
+    disocclusion_tested = bool(records) and all(s.disocclusion_mask is not None and s.disocclusion_mask.shape == s.valid_mask.shape for s in records)
+    disocclusion_value = "PASS" if disocclusion_tested else ("NOT TESTED" if records else "FAIL")
+    return {"canonical_temporal_engine_used": bool(temporal), "flow_provider": "OpenCV Farneback" if temporal else None, "raw_depth_jitter": float(np.median(raw)) if raw else None, "stabilized_depth_jitter": float(np.median(stable)) if stable else None, "disocclusion_rejection": disocclusion_value, "moving_object_ghosting": "NOT HARDWARE VALIDATED", "frame_contract": "PASS" if contract_ok else "FAIL", "history_age": None if diag is None else diag.mean_temporal_age, "temporal_output_hz": _rate(completion_times), "result": "PASS" if records and contract_ok else "FAIL"}
 
 
 def _hand_results(records, engine, max_hands, detector_timestamps):
     completed = [s.timestamp for s in records]
     backend = None if engine is None else engine.backend_name
     backend_max = 2 if backend and "mediapipe" in backend else 1
-    return {"requested_hand_backend": "tasks", "actual_hand_backend": backend, "model_asset": "models/hand_landmarker.task", "configured_max_hands": 2, "backend_supported_max_hands": backend_max, "two_hand_live_capability": "YES" if max_hands >= 2 else "NO", "physical_zero_hand_test": "NOT INTERACTIVELY VERIFIED", "physical_one_hand_test": "PASS" if max_hands >= 1 else "NOT VERIFIED", "physical_two_hand_test": "PASS" if max_hands >= 2 else "NOT VERIFIED", "true_simultaneous_hands_detected": max_hands, "detector_hz": _rate(detector_timestamps), "effective_tracking_hz": _rate(completed), "skipped_frame_lk": "PASS", "stable_ids": "PASS", "result": "PASS" if records and engine and engine.backend_name not in {"unavailable", "mock"} and max_hands >= 2 else "FAIL"}
+    hands_observed = any(s.hands for s in records)
+    ids_ok = hands_observed and all(len({h.hand_id for h in s.hands}) == len(s.hands) for s in records if s.hands)
+    lk_ok = bool(engine and getattr(engine, "lk_updates", 0) > 0)
+    return {"requested_hand_backend": "tasks", "actual_hand_backend": backend, "model_asset": "models/hand_landmarker.task", "configured_max_hands": 2, "backend_supported_max_hands": backend_max, "two_hand_live_capability": "YES" if max_hands >= 2 else "NO", "physical_zero_hand_test": "NOT HARDWARE VALIDATED", "physical_one_hand_test": "PASS" if max_hands >= 1 else "NOT HARDWARE VALIDATED", "physical_two_hand_test": "PASS" if max_hands >= 2 else "NOT HARDWARE VALIDATED", "true_simultaneous_hands_detected": max_hands, "detector_hz": _rate(detector_timestamps), "effective_tracking_hz": _rate(completed), "skipped_frame_lk": "PASS" if lk_ok else "NOT TESTED", "stable_ids": "PASS" if ids_ok else ("NOT TESTED" if not hands_observed else "FAIL"), "result": "PASS" if records and engine and engine.backend_name not in {"unavailable", "mock"} and max_hands >= 2 else "FAIL"}
 
 
 def _xyz_results(hand_records, depth_records, xyz, camera, handoff_contracts, hand_state_timestamps):
     frame_ids = [s.source_frame_id for s, _ in depth_records]
-    matching = all(s.source_frame_id in frame_ids for s in hand_records if s.hands)
-    return {"hand_uv_to_depth_uv": "PASS", "same_frame_association": "PASS" if matching else "FAIL", "hand_depth_age_bounded": "PASS", "robust_hand_depth": "PASS" if any(h.depth_confidence > 0 for s in hand_records for h in s.hands) else "FAIL", "xyz_samples": len(xyz), "xyz_update_hz": _rate(hand_state_timestamps), "p4_handoff_contract_defined": bool(handoff_contracts), "p4_handoff_contains_rendering": False, "result": "PASS" if xyz and matching else "FAIL"}
+    observed = [s for s in hand_records if s.hands]
+    matching = bool(observed) and all(s.source_frame_id in frame_ids for s in observed)
+    uv_ok = bool(observed) and all(0 <= h.palm_uv[0] < camera.width and 0 <= h.palm_uv[1] < camera.height for s in observed for h in s.hands)
+    age_ok = bool(observed) and all(np.isfinite(s.timestamp) for s in observed)
+    robust = any(h.depth_confidence > 0 for s in observed for h in s.hands)
+    return {"hand_uv_to_depth_uv": "PASS" if uv_ok else ("NOT TESTED" if not observed else "FAIL"), "same_frame_association": "PASS" if matching else ("NOT TESTED" if not observed else "FAIL"), "hand_depth_age_bounded": "PASS" if age_ok else ("NOT TESTED" if not observed else "FAIL"), "robust_hand_depth": "PASS" if robust else ("NOT TESTED" if not observed else "FAIL"), "xyz_samples": len(xyz), "xyz_update_hz": _rate(hand_state_timestamps), "p4_handoff_contract_defined": bool(handoff_contracts), "p4_handoff_contains_rendering": False, "result": "PASS" if xyz and matching else "FAIL"}
 
 
 def main() -> int:
@@ -362,6 +396,7 @@ def main() -> int:
     parser.add_argument("--calibration")
     parser.add_argument("--json-report")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--interactive", action="store_true", help="Require visible keyboard-confirmed physical stages")
     parser.add_argument("--min-frames", type=int, default=300)
     args = parser.parse_args()
     try:

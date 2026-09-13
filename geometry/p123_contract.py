@@ -34,3 +34,6 @@ class P4InputState:
     geometry_state: GeometryState
     hand_states: tuple[HandXYZ, ...]
     data_age_metrics: dict[str, Any]
+    geometry_target_capture_id: int | str | None = None
+    source_depth_capture_id: int | str | None = None
+    confidence_metadata: dict[str, Any] | None = None

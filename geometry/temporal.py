@@ -117,6 +117,7 @@ class TemporalGeometryEngine:
         self.previous_rgb: np.ndarray | None = None
         self.previous_timestamp: float | None = None
         self.previous_frame_id: int | str | None = None
+        self.previous_processing_frame_id: int | str | None = None
         self.motion_state: MotionState | None = None
         self.last_alignment: DepthAlignmentResult | None = None
         self.last_diagnostics: GeometryDiagnostics | None = None
@@ -132,6 +133,7 @@ class TemporalGeometryEngine:
         self.previous_rgb = None
         self.previous_timestamp = None
         self.previous_frame_id = None
+        self.previous_processing_frame_id = None
         self.motion_state = None
         self.last_alignment = None
         self._pending_reset_reason = reason
@@ -142,12 +144,15 @@ class TemporalGeometryEngine:
         frame_id: int | str,
         timestamp: float,
         scale_mode: DepthScaleMode | None,
+        processing_frame_id: int | str | None = None,
     ) -> str | None:
         if self.previous_state is None:
             return None
         if not _camera_compatible(self.camera, camera):
             return "camera_changed"
-        if isinstance(frame_id, int) and isinstance(self.previous_frame_id, int) and frame_id != self.previous_frame_id + 1:
+        current_processing = frame_id if processing_frame_id is None else processing_frame_id
+        previous_processing = self.previous_processing_frame_id
+        if isinstance(current_processing, int) and isinstance(previous_processing, int) and current_processing != previous_processing + 1:
             return "frame_discontinuity"
         if self.previous_timestamp is not None and (
             timestamp <= self.previous_timestamp or timestamp - self.previous_timestamp > self.config.timestamp_gap_reset
@@ -163,6 +168,7 @@ class TemporalGeometryEngine:
         timestamp: float,
         camera: CameraModel,
         scale_mode: DepthScaleMode,
+        processing_frame_id: int | str | None = None,
     ) -> GeometryState:
         shape = (camera.height, camera.width)
         depth = np.full(shape, np.nan, dtype=np.float32)
@@ -190,6 +196,7 @@ class TemporalGeometryEngine:
             depth_alignment_residual=np.full(shape, np.inf, dtype=np.float32),
             history_rejection_mask=np.zeros(shape, dtype=bool),
             disocclusion_mask=np.zeros(shape, dtype=bool),
+            processing_frame_id=frame_id if processing_frame_id is None else processing_frame_id,
         )
 
     def _get_motion(
@@ -288,9 +295,11 @@ class TemporalGeometryEngine:
         timestamp: float,
         depth_state: DepthState | None = None,
         motion_state: MotionState | None = None,
+        processing_frame_id: int | str | None = None,
     ) -> GeometryState:
         """Process one camera frame; ``depth_state=None`` propagates valid history."""
         timing_enabled = self.config.diagnostics_level == "timing"
+        processing_id = frame_id if processing_frame_id is None else processing_frame_id
         total_start = time.perf_counter() if timing_enabled else 0.0
         stage_ms: dict[str, float] = {}
         if not np.isfinite(timestamp):
@@ -307,7 +316,7 @@ class TemporalGeometryEngine:
         current_mode = None if depth_state is None else DepthScaleMode(depth_state.scale_mode)
         had_previous = self.previous_state is not None
         previous_mode = None if self.previous_state is None else self.previous_state.scale_mode
-        reset_reason = self._needs_reset(camera, frame_id, timestamp, current_mode)
+        reset_reason = self._needs_reset(camera, frame_id, timestamp, current_mode, processing_id)
         if reset_reason is not None:
             self.reset(reset_reason)
         elif self.previous_state is None:
@@ -316,11 +325,12 @@ class TemporalGeometryEngine:
         if depth_state is None and self.previous_state is None:
             if not had_previous:
                 raise ValueError("first temporal update requires a DepthState")
-            state = self._empty_state(frame_id, timestamp, camera, previous_mode or DepthScaleMode.RELATIVE)
+            state = self._empty_state(frame_id, timestamp, camera, previous_mode or DepthScaleMode.RELATIVE, processing_id)
             self.previous_state = state
             self.previous_rgb = None if rgb_frame is None else np.asarray(rgb_frame).copy()
             self.previous_timestamp = timestamp
             self.previous_frame_id = frame_id
+            self.previous_processing_frame_id = processing_id
             self.last_diagnostics = GeometryDiagnostics(
                 total_ms=(time.perf_counter() - total_start) * 1000.0 if timing_enabled else None,
                 valid_geometry_percent=0.0,
@@ -334,7 +344,7 @@ class TemporalGeometryEngine:
             return state
 
         motion_start = time.perf_counter() if timing_enabled else 0.0
-        motion = self._get_motion(rgb_frame, frame_id, timestamp, motion_state)
+        motion = self._get_motion(rgb_frame, processing_id, timestamp, motion_state)
         if timing_enabled:
             stage_ms["flow_ms"] = (time.perf_counter() - motion_start) * 1000.0
         self.motion_state = motion
@@ -491,11 +501,13 @@ class TemporalGeometryEngine:
             depth_alignment_residual=alignment_map,
             history_rejection_mask=history_rejection,
             disocclusion_mask=disocclusion,
+            processing_frame_id=processing_id,
         )
         self.previous_state = return_state
         self.previous_rgb = None if rgb_frame is None else np.asarray(rgb_frame).copy()
         self.previous_timestamp = timestamp
         self.previous_frame_id = frame_id
+        self.previous_processing_frame_id = processing_id
         self.last_alignment = alignment
         if self.config.diagnostics_level != "none":
             total = float(final_valid.size)

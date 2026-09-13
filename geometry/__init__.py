@@ -59,6 +59,8 @@ from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestF
 from .camera_worker import CameraCaptureWorker, LatestFrameSlot
 from .persistent_worker import PersistentMapWorker
 from .p123_contract import HandXYZ, P4InputState
+from .p123_live_runtime import P123LiveRuntime, P123Metrics, P123Snapshot
+from .depth_sampling import camera_uv_to_depth_uv, sample_depth
 from .native_app import AppMode, NativeLiveApp, QualityProfile
 from .native_window import NativeOpenGLWindow
 
@@ -149,4 +151,9 @@ __all__ = [
     "NativeOpenGLWindow",
     "HandXYZ",
     "P4InputState",
+    "P123LiveRuntime",
+    "P123Metrics",
+    "P123Snapshot",
+    "camera_uv_to_depth_uv",
+    "sample_depth",
 ]

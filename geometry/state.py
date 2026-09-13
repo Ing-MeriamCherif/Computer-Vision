@@ -61,6 +61,7 @@ class GeometryState:
     depth_alignment_residual: np.ndarray | None = None
     history_rejection_mask: np.ndarray | None = None
     disocclusion_mask: np.ndarray | None = None
+    processing_frame_id: int | str | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)
