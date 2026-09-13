@@ -180,6 +180,19 @@ def test_p123_live_cli_defaults_to_local_production(monkeypatch):
     assert args.depth_size == "336x448"
 
 
+def test_explicit_calibration_validates_dimensions_before_mirror_adjustment():
+    import pytest
+    from geometry.camera import CameraModel
+    from geometry.p123_live_runtime import _camera_for_capture
+
+    calibration = CameraModel(640, 480, 500.0, 501.0, 280.0, 240.0)
+    mirrored = _camera_for_capture(calibration, 640, 480, mirror=True)
+    assert mirrored.cx == 359.0
+    assert mirrored.cy == calibration.cy
+    with pytest.raises(RuntimeError, match="mismatches negotiated camera"):
+        _camera_for_capture(calibration, 1280, 720, mirror=True)
+
+
 def test_p123_views_are_separate_display_modules():
     import importlib
 

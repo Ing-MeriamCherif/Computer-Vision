@@ -1,4 +1,4 @@
-"""Independent live display views for P123 modes 1–6."""
+"""Independent live display views for P123 modes 1–7."""
 
 from __future__ import annotations
 

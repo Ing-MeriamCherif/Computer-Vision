@@ -25,6 +25,7 @@ class LightState:
     light_id: int | str = 0
     position_camera_m: np.ndarray | None = None
     range_m: float = 1.0
+    source_radius_m: float = 0.025
 
     def __post_init__(self) -> None:
         if self.position_camera is not None:
@@ -88,7 +89,7 @@ def project_light_orb(
     camera: CameraModel,
     light: LightState,
     *,
-    source_radius_m: float = 0.010,
+    source_radius_m: float | None = None,
 ) -> tuple[float, float, float] | None:
     """Return the pinhole projection and screen radius for a rendered light."""
     position = light.position_camera
@@ -97,7 +98,8 @@ def project_light_orb(
     uv = camera.project(position)
     if not np.isfinite(uv).all():
         return None
-    radius_px = float(np.clip(camera.fx * source_radius_m / float(position[2]), 3.5, 14.0))
+    radius_m = light.source_radius_m if source_radius_m is None else float(source_radius_m)
+    radius_px = float(np.clip(camera.fx * radius_m / float(position[2]), 3.5, 14.0))
     return float(uv[0]), float(uv[1]), radius_px
 
 
@@ -211,26 +213,39 @@ def light_from_palm(
     )
 
 
-def _shadow_factor(geometry: GeometryState, light: LightState, *, steps: int = 4) -> np.ndarray:
-    """Screen-space visibility test with scale-adaptive depth bias."""
+def _shadow_factor(geometry: GeometryState, light: LightState, *, steps: int = 6) -> np.ndarray:
+    """Camera-space screen-ray visibility; out-of-frame samples stay unknown."""
     h, w = geometry.depth.shape
-    yy, xx = np.indices((h, w), dtype=np.float32)
     pos = light.position_camera if light.position_camera is not None else light.position_camera_m
-    light_uv = geometry.camera.project(pos).astype(np.float32)
-    depth = geometry.depth.astype(np.float32)
-    visible = np.ones((h, w), dtype=np.float32)
-    # Scale-adaptive bias depending on light distance and local geometry
-    light_z = max(float(pos[2]), 0.1)
-    bias = max(0.005, 0.015 * light_z)
+    depth = np.asarray(geometry.depth, dtype=np.float32)
+    valid = np.asarray(geometry.valid_mask, dtype=bool) & np.isfinite(depth) & (depth > 1e-5)
+    points = np.asarray(geometry.positions_3d, dtype=np.float32)
+    finite = np.isfinite(points).all(axis=-1) & (points[..., 2] > 1e-4)
+    radius = max(float(getattr(light, "source_radius_m", 0.025)), 0.0)
+    offsets = ((-0.65, -0.65), (0.65, -0.65), (-0.65, 0.65), (0.65, 0.65))
+    visibility_sum = np.zeros((h, w), dtype=np.float32)
 
-    for fraction in np.linspace(0.2, 0.8, max(1, steps), dtype=np.float32):
-        su = np.rint(xx + (light_uv[0] - xx) * fraction).astype(np.int32).clip(0, w - 1)
-        sv = np.rint(yy + (light_uv[1] - yy) * fraction).astype(np.int32).clip(0, h - 1)
-        sampled = depth[sv, su]
-        expected = depth + (light_z - depth) * fraction
-        occluded = np.isfinite(sampled) & (sampled + bias < expected)
-        visible[occluded] *= 0.70
-    return visible
+    for ox, oy in offsets:
+        emitter = np.asarray(pos, dtype=np.float32).copy()
+        emitter[0] += ox * radius
+        emitter[1] += oy * radius
+        ray = emitter.reshape(1, 1, 3) - points
+        visibility = np.ones((h, w), dtype=np.float32)
+        for fraction in np.linspace(0.07, 0.94, max(1, int(steps)), dtype=np.float32):
+            sample = points + ray * fraction
+            sample_z = sample[..., 2]
+            safe_z = np.maximum(sample_z, 1e-4)
+            sample_u = geometry.camera.fx * sample[..., 0] / safe_z + geometry.camera.cx
+            sample_v = geometry.camera.fy * sample[..., 1] / safe_z + geometry.camera.cy
+            inside = finite & (sample_z > 1e-4) & (sample_u >= 0.0) & (sample_u < w) & (sample_v >= 0.0) & (sample_v < h)
+            ix = np.rint(np.nan_to_num(sample_u, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, w - 1)
+            iy = np.rint(np.nan_to_num(sample_v, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, h - 1)
+            scene_z = depth[iy, ix]
+            bias = np.maximum(0.005, 0.012 * sample_z)
+            blocked = inside & valid[iy, ix] & (scene_z < sample_z - bias)
+            visibility[blocked] = np.minimum(visibility[blocked], 0.20)
+        visibility_sum += visibility
+    return visibility_sum / float(len(offsets))
 
 
 def render_volumetric_scattering(
@@ -300,11 +315,22 @@ def render_volumetric_scattering(
             source_falloff = np.exp(-0.5 * dist_sq / (range_m * range_m))
             in_scatter = intensity / dist_sq * source_falloff
 
-            # Screen-space shadow test for sample point
-            su = np.rint(cx_low + fx_low * px / np.maximum(pz, 1e-4)).astype(np.int32).clip(0, w - 1)
-            sv = np.rint(cy_low + fy_low * py / np.maximum(pz, 1e-4)).astype(np.int32).clip(0, h - 1)
-            blocker = depth_low[sv, su]
-            visible = np.where(np.isfinite(blocker) & (blocker + 0.02 < pz), 0.3, 1.0)
+            # March from each haze sample toward its emitter. Off-screen
+            # projections are unknown, not clamped to a border depth texel.
+            visible = np.ones((h, w), dtype=np.float32)
+            for shadow_t in np.linspace(0.12, 0.90, max(1, min(6, num_steps)), dtype=np.float32):
+                sx = px + (light_pos[0] - px) * shadow_t
+                sy = py + (light_pos[1] - py) * shadow_t
+                sz = pz + (light_pos[2] - pz) * shadow_t
+                safe_sz = np.maximum(sz, 1e-4)
+                su = fx_low * sx / safe_sz + cx_low
+                sv = fy_low * sy / safe_sz + cy_low
+                inside = (sz > 1e-4) & (su >= 0.0) & (su < w) & (sv >= 0.0) & (sv < h)
+                ix = np.rint(np.nan_to_num(su, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, w - 1)
+                iy = np.rint(np.nan_to_num(sv, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, h - 1)
+                blocker = depth_low[iy, ix]
+                blocked = inside & valid_low[iy, ix] & (blocker < sz - np.maximum(0.008, 0.014 * sz))
+                visible[blocked] = np.minimum(visible[blocked], 0.18)
 
             contribution = in_scatter * visible * density
             haze[..., 0] += contribution * color[0]

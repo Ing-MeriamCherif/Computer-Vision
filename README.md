@@ -212,3 +212,4 @@ See [`docs/team-integration.md`](docs/team-integration.md) for integration contr
 | [`docs/geometry-phase3.md`](docs/geometry-phase3.md) | Temporal fusion contracts |
 | [`docs/geometry-phase5.md`](docs/geometry-phase5.md) | Persistent geometry, surfel map |
 | [`docs/geometry-performance.md`](docs/geometry-performance.md) | Benchmark guidance |
+| [`docs/gpu-hand-relighting.md`](docs/gpu-hand-relighting.md) | Mode 7 OpenGL install, run, profiles, and presentation paths |

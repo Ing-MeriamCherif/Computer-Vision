@@ -9,8 +9,10 @@ from collections import deque
 import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
+from p123.views import relight as relight_view
 from p123.views import render as _panel
 from p123.views.common import hit_test_navigation
+from p123.views.relight import configure as configure_relight
 
 
 def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
@@ -55,6 +57,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-size", default="336x448", help="Local production input HxW (default: 336x448); use 'native' explicitly, or a square side for teammate providers")
     parser.add_argument("--display-size", default="1920x1080", help="UI display resolution (default: 1920x1080 FHD; or 'native', 'auto', WxH)")
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
+    parser.add_argument("--mode", type=int, choices=range(1, 8), default=1, help="Starting view: 1 RGB through 7 hand relight")
+    parser.add_argument("--lighting-quality", choices=["low", "balanced", "high"], default="balanced")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=True, help="Mirror the live camera left-to-right (default: True)")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
@@ -66,6 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    configure_relight(args.lighting_quality)
     try:
         cam_str = str(args.camera).strip()
         if cam_str.isdigit():
@@ -106,11 +111,12 @@ def main() -> int:
     normal_backend = getattr(runtime, "_normal_backend", None)
     normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"
     print(f"  CUDA Devices:      depth={depth_device or 'unknown'} | normals={normal_device}")
-    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ")
+    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ  [7] Relight")
+    print(f"  Relight Quality:   {args.lighting_quality}")
     print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
     print("============================================================")
 
-    mode = 1
+    mode = int(args.mode)
     ui_state = {"mode": mode, "show_debug": False}
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics (Material 3)"
@@ -153,7 +159,7 @@ def main() -> int:
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):
                     break
-                if ord("1") <= key <= ord("6"):
+                if ord("1") <= key <= ord("7"):
                     ui_state["mode"] = key - ord("0")
                 elif key in (ord("d"), ord("D")):
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
@@ -169,7 +175,17 @@ def main() -> int:
         final = runtime.snapshot()
         runtime.stop()
         cv2.destroyAllWindows()
+        relight_view._renderer.close()
         print(f"Session summary: frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
+        relight_stats = relight_view._renderer.last_lighting_stats
+        if relight_stats:
+            print(
+                "Relight summary: "
+                f"renderer={relight_stats.get('renderer')} "
+                f"quality={relight_stats.get('quality')} lights={relight_stats.get('lights')} "
+                f"gpu_render_ms={relight_stats.get('gpu_render_ms', relight_stats.get('lighting_ms'))} "
+                f"shadows={relight_stats.get('shadow_quality')} volumes={relight_stats.get('volumetric_quality')}"
+            )
     return 0
 
 
