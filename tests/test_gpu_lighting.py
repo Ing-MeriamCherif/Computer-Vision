@@ -63,6 +63,9 @@ def test_shader_path_reconstructs_position_without_positions_3d_upload():
     assert "uDepth" in shader and "uCamera" in shader
     assert "positions_3d" not in shader
     assert "uCamera.x * s.x / s.z" in shader
+    assert "uLightShadowBias" in _SURFACE_SHADER
+    assert "ownerSelfHit" not in shader
+    assert "uLightVisualMeta" in _COMPOSITE_SHADER
     assert "lessThan(uv, vec2(0.0))" in shader
     assert "uShadowSteps" in _SURFACE_SHADER
     assert "uVolShadowSteps" in _VOLUME_SHADER
@@ -148,6 +151,74 @@ def test_quality_profiles_keep_volume_exposure_consistent():
             target_sizes.append((renderer._volume_width, renderer._volume_height))
         assert max(means) - min(means) < 2.0
         assert target_sizes == [(6, 4), (8, 6), (11, 8)]
+    finally:
+        renderer.close()
+
+
+def test_gpu_hidden_orb_keeps_emitter_active_and_disabled_light_is_filtered():
+    rgb, geometry = _geometry()
+    try:
+        renderer = GPURelightRenderer("low")
+    except Exception as exc:
+        pytest.skip(f"OpenGL 3.3 context unavailable: {exc}")
+    try:
+        light = LightState(
+            position_camera=geometry.camera.unproject(16.0, 12.0, 0.55).astype(np.float32),
+            intensity=0.7,
+            confidence=1.0,
+            is_palm_attached=True,
+            orb_visibility=0.0,
+            palm_center_camera=np.array([0.0, 0.0, 0.56], dtype=np.float32),
+            palm_normal_camera=np.array([0.0, 0.0, -1.0], dtype=np.float32),
+            self_intersection_epsilon_m=0.002,
+        )
+        hidden_orb, hidden_stats = renderer.render(rgb, geometry, [light])
+        assert hidden_stats["lights"] == 1.0
+        assert np.isfinite(hidden_orb).all()
+        assert hidden_stats["shadow_submit_ms"] >= 0.0
+        assert hidden_stats["volumetric_submit_ms"] >= 0.0
+
+        light.orb_visibility = 1.0
+        visible_orb, visible_stats = renderer.render(rgb, geometry, [light])
+        assert visible_stats["lights"] == 1.0
+        assert not np.array_equal(visible_orb[12, 16], hidden_orb[12, 16])
+
+        light.enabled = False
+        inactive, inactive_stats = renderer.render(rgb, geometry, [light])
+        assert inactive_stats["lights"] == 0.0
+        np.testing.assert_allclose(inactive, rgb, atol=1)
+    finally:
+        renderer.close()
+
+
+def test_gpu_hidden_palm_emitter_still_shadows_from_its_owner_hand():
+    rgb, geometry = _geometry()
+    geometry.depth[:] = 1.2
+    geometry.depth[12, 6] = 0.5
+    geometry.depth[10:15, 14:19] = 0.82
+    geometry.normals[:] = (0.0, 0.0, 1.0)
+    try:
+        renderer = GPURelightRenderer("low")
+    except Exception as exc:
+        pytest.skip(f"OpenGL 3.3 context unavailable: {exc}")
+    light = LightState(
+        position_camera=np.array([0.0, 0.0, 0.85], dtype=np.float32),
+        intensity=1.0,
+        confidence=1.0,
+        is_palm_attached=True,
+        orb_visibility=1.0,
+        palm_center_camera=np.array([0.0, 0.0, 0.82], dtype=np.float32),
+        source_radius_m=0.001,
+        range_m=1.0,
+    )
+    try:
+        blocked, blocked_stats = renderer.render(rgb, geometry, [light])
+        assert blocked_stats["lights"] == 1.0
+
+        geometry.depth[10:15, 14:19] = 1.2
+        geometry.source_frame_id = 2
+        clear, _ = renderer.render(rgb, geometry, [light])
+        assert clear[12, 6].mean() > blocked[12, 6].mean()
     finally:
         renderer.close()
 

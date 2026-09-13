@@ -25,6 +25,7 @@ class HandResult:
     confidence: float
     backend: str
     palm_px: float | None = None             # palm width (5-17) in px -> depth proxy
+    handedness: str | None = None
 
 
 class HandTrackerBase:
@@ -91,12 +92,14 @@ class LegacyMPTracker(HandTrackerBase):
         pts = np.array([[p.x * w, p.y * h] for p in lm.landmark], dtype=np.float64)
         palm = (float(pts[config.PALM_IDX, 0]), float(pts[config.PALM_IDX, 1]))
         conf = 1.0
+        handedness = None
         if res.multi_handedness:
             try:
                 conf = float(res.multi_handedness[0].classification[0].score)
+                handedness = str(res.multi_handedness[0].classification[0].label or "") or None
             except Exception:
                 pass
-        return HandResult(True, palm, pts, conf, self.backend_name, palm_width_px(pts))
+        return HandResult(True, palm, pts, conf, self.backend_name, palm_width_px(pts), handedness)
 
     def close(self) -> None:
         try:
@@ -139,12 +142,14 @@ def _try_tasks_tracker(max_hands: int) -> HandTrackerBase | None:
                 )
                 palm = (float(pts[config.PALM_IDX, 0]), float(pts[config.PALM_IDX, 1]))
                 conf = 1.0
+                handedness = None
                 try:
                     conf = float(res.handedness[0][0].score)
+                    handedness = str(res.handedness[0][0].category_name or "") or None
                 except Exception:
                     pass
                 return HandResult(True, palm, pts, conf, self.backend_name,
-                                  palm_width_px(pts))
+                                  palm_width_px(pts), handedness)
 
             def close(self) -> None:
                 try:

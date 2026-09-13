@@ -627,7 +627,7 @@ def draw_debug_overlay(
         return
 
     card_w = min(560, vw - 32) if is_fhd else min(460, vw - 24)
-    card_h = (232 if is_fhd else 196) if mode == 7 else (190 if is_fhd else 160)
+    card_h = (316 if is_fhd else 252) if mode == 7 else (190 if is_fhd else 160)
     cx = vx + (16 if is_fhd else 12)
     cy = vy + (54 if is_fhd else 44)
 
@@ -663,7 +663,16 @@ def draw_debug_overlay(
         lines.extend([
             f"Relight: {stats.get('renderer', 'GPU ...')} | {renderer.last_light_count} lights | {renderer.last_render_ms:.2f} ms | {renderer.lighting_quality}",
             f"Shadows {stats.get('shadow_quality', '--')} | Volumes {stats.get('volumetric_quality', '--')} | Geometry source age {renderer.last_geometry_age_ms or 0:.1f} ms | XYZ source age {renderer.last_xyz_source_age_ms or 0:.1f} ms",
+            f"Hand tracking: Y {stats.get('hand_luminance', 0):.0f} | low light {'ON' if stats.get('low_light_active', 0) else 'off'} CLAHE {'ON' if stats.get('clahe_active', 0) else 'off'} gamma {stats.get('low_light_gamma', 1):.2f} | prep {stats.get('low_light_preprocess_ms', 0):.2f} ms",
+            f"Tracking: detect {stats.get('mediapipe_ms', 0):.1f} ms avg {stats.get('mediapipe_avg_ms', 0):.1f} | palm {stats.get('palm_pose_ms', 0):.2f} ms | filter {stats.get('hand_filtering_ms', 0) + stats.get('palm_filtering_ms', 0):.2f} ms | dropout {stats.get('dropout_age_ms', 0):.0f} ms",
+            f"Pose confidence: hand {stats.get('tracking_confidence', 0):.2f} | palm {stats.get('orientation_confidence', 0):.2f} | orb {stats.get('orb_visibility', 0):.2f}",
         ])
+        raw_xyz = stats.get("raw_light_xyz")
+        filtered_xyz = stats.get("filtered_light_xyz")
+        if raw_xyz is not None and filtered_xyz is not None:
+            raw_text = ",".join(f"{float(v):+.2f}" for v in raw_xyz)
+            filtered_text = ",".join(f"{float(v):+.2f}" for v in filtered_xyz)
+            lines.append(f"Light XYZ raw [{raw_text}] -> filtered [{filtered_text}]")
     line_font = 0.36 if is_fhd else 0.32
     step_y = 20 if is_fhd else 16
     start_y = 52 if is_fhd else 40
@@ -792,6 +801,11 @@ def finish(
     # Draw Header & Sidebar
     draw_header(canvas, snapshot, layout, display_fps=display_fps, camera_source=camera_source)
     draw_sidebar(canvas, mode, layout)
+
+    if mode == 7:
+        from . import relight
+
+        relight.draw_controls(canvas, (vx, vy, vw, vh))
 
     # Debug HUD Overlay if enabled
     if show_debug:

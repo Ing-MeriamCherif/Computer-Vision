@@ -33,17 +33,36 @@ def _snapshot(hand_count: int = 1) -> P123Snapshot:
         normals=normals,
         confidence=np.ones((height, width), dtype=np.float32),
     )
-    hands = tuple(
-        TrackedHand(
+    hands = []
+    for index in range(hand_count):
+        cx, cy = 58.0 + index * 44.0, 60.0
+        right_hand = index == 0
+        points = np.zeros((21, 2), dtype=np.float32)
+        points[:] = (cx, cy)
+        points[0] = (cx, cy + 30)
+        points[5] = (cx + (11 if right_hand else -11), cy)
+        points[9] = (cx, cy - 12)
+        points[13] = (cx, cy - 9)
+        points[17] = (cx - (11 if right_hand else -11), cy)
+        for base, pip, dip, tip, offset in (
+            (5, 6, 7, 8, -8), (9, 10, 11, 12, -3),
+            (13, 14, 15, 16, 3), (17, 18, 19, 20, 8),
+        ):
+            x = points[base, 0] + offset
+            points[pip] = (x, cy - 8)
+            points[dip] = (x, cy - 17)
+            points[tip] = (x, cy - 27)
+        points[1:5] = ((cx + (15 if right_hand else -15), cy + 8), (cx + (24 if right_hand else -24), cy + 2), (cx + (28 if right_hand else -28), cy - 5), (cx + (31 if right_hand else -31), cy - 12))
+        hands.append(TrackedHand(
             hand_id=index,
-            landmarks_uv=None,
-            palm_uv=(58.0 + index * 44.0, 60.0),
+            landmarks_uv=points,
+            palm_uv=(cx, cy),
             confidence=0.95,
+            handedness="Right" if right_hand else "Left",
             stale=False,
             depth_z=0.8,
-        )
-        for index in range(hand_count)
-    )
+        ))
+    hands = tuple(hands)
     hand_state = GestureState(timestamp=captured_at, source_frame_id=1, hands=hands, backend="test", tracker_ms=0.1)
     metrics = P123Metrics(30.0, 20.0, 30.0, 30.0, 30.0, 30.0, 20.0, 30.0, 20.0, 20.0, 20.0, 1, 0, 0)
     frame = np.full((height, width, 3), 90, dtype=np.uint8)
@@ -267,7 +286,7 @@ def test_brief_two_hand_dropout_keeps_recent_light_then_expires(monkeypatch):
     renderer.render(opened)
     assert renderer.last_light_count == 2
 
-    clock[0] = captured_at + 0.10
+    clock[0] = captured_at + 0.05
     surviving_hand = replace(open_hands[0], timestamp=clock[0])
     surviving_xyz = replace(snapshot.xyz[0], timestamp=clock[0], source_age_ms=0.0, age_ms=0.0)
     one_hand = replace(

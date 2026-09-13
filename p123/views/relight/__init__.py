@@ -12,16 +12,33 @@ import cv2
 import numpy as np
 
 from geometry.lighting import LightState, project_light_orb, render_light_orbs, shade_geometry
+from geometry.palm_light import PalmLightController
 from geometry.state import GeometryState
 
 
 LIGHT_COLORS = ((0.44, 0.72, 0.82), (0.88, 0.63, 0.40))
+COLOR_PRESETS = (
+    ("CYAN", (0.18, 0.78, 1.00)),
+    ("AMBER", (1.00, 0.53, 0.14)),
+    ("MAGENTA", (0.95, 0.24, 0.70)),
+    ("VIOLET", (0.48, 0.30, 1.00)),
+    ("GREEN", (0.20, 0.92, 0.42)),
+    ("RED", (1.00, 0.20, 0.16)),
+    ("BLUE", (0.22, 0.42, 1.00)),
+    ("LIME", (0.78, 0.96, 0.16)),
+    ("PINK", (1.00, 0.38, 0.58)),
+    ("ICE", (0.72, 0.94, 1.00)),
+    ("GOLD", (1.00, 0.78, 0.18)),
+    ("WHITE", (1.00, 1.00, 0.92)),
+)
 DEFAULT_RANGE_M = 0.30
 DEFAULT_INTENSITY = 0.70
+MIN_INTENSITY, MAX_INTENSITY = 0.10, 2.00
+MIN_RANGE_M, MAX_RANGE_M = 0.12, 1.50
 FRESHNESS_LIMIT_MS = 250.0
 FADE_START_MS = 150.0
-HAND_LIGHT_HOLD_MS = 160.0
-HAND_LIGHT_FADE_START_MS = 80.0
+HAND_LIGHT_HOLD_MS = 80.0
+HAND_LIGHT_FADE_START_MS = 40.0
 
 
 def _open_palm_state(hand: Any) -> bool | None:
@@ -47,8 +64,11 @@ def lights_from_snapshot(
     snapshot: Any,
     *,
     freshness_limit_ms: float = FRESHNESS_LIMIT_MS,
+    geometry: GeometryState | None = None,
+    palm_controller: PalmLightController | None = None,
+    mirrored_input: bool = True,
 ) -> tuple[list[LightState], float | None]:
-    """Adapt current tracked-hand and HandXYZ records without resampling depth."""
+    """Adapt HandXYZ records, optionally attaching a depth-reconstructed palm pose."""
     tracked = {
         int(hand.hand_id): hand
         for hand in (snapshot.hand_state.hands if snapshot.hand_state is not None else ())
@@ -92,8 +112,23 @@ def lights_from_snapshot(
         if confidence < 0.04:
             continue
         hand_id = int(xyz.hand_id)
-        lights.append(
-            LightState(
+        if geometry is not None and palm_controller is not None:
+            light = palm_controller.update(
+                hand,
+                geometry,
+                fallback_position=position,
+                mirrored_input=mirrored_input,
+                intensity=DEFAULT_INTENSITY,
+                color_rgb=LIGHT_COLORS[hand_id % len(LIGHT_COLORS)],
+                range_m=DEFAULT_RANGE_M,
+                source_hand=hand_id,
+                light_id=hand_id,
+                timestamp=float(xyz.timestamp),
+            )
+            light.confidence = confidence
+            light.orb_visibility *= float(np.clip(confidence / max(float(hand.confidence), 1e-4), 0.0, 1.0))
+        else:
+            light = LightState(
                 position_camera=position,
                 intensity=DEFAULT_INTENSITY,
                 color_rgb=np.asarray(LIGHT_COLORS[hand_id % len(LIGHT_COLORS)], dtype=np.float32),
@@ -106,7 +141,7 @@ def lights_from_snapshot(
                 source_radius_m=0.018,
                 visual_radius_m=0.035,
             )
-        )
+        lights.append(light)
         if len(lights) == 2:
             break
     return lights, max(ages) if ages else None
@@ -168,6 +203,17 @@ class RelightRenderer:
         self._gesture_enabled: dict[int, bool] = {}
         self._gesture_last_seen: dict[int, float] = {}
         self._recent_lights: dict[int, LightState] = {}
+        self._palm_light_controller = PalmLightController()
+        self.light_intensity = DEFAULT_INTENSITY
+        self.light_range_m = DEFAULT_RANGE_M
+        self.light_color_index = 0
+
+    def controlled_lights(self, lights: list[LightState]) -> list[LightState]:
+        color = np.asarray(COLOR_PRESETS[self.light_color_index][1], dtype=np.float32)
+        return [
+            replace(light, intensity=self.light_intensity, range_m=self.light_range_m, color_rgb=color.copy())
+            for light in lights
+        ]
 
     def set_lighting_quality(self, quality: str) -> None:
         self.lighting_quality = str(quality).lower()
@@ -185,6 +231,7 @@ class RelightRenderer:
         self._gesture_enabled.clear()
         self._gesture_last_seen.clear()
         self._recent_lights.clear()
+        self._palm_light_controller.reset()
 
     def reset_for_source_change(self) -> None:
         """Drop camera-dependent caches and history while retaining GL allocations."""
@@ -197,6 +244,7 @@ class RelightRenderer:
         self._gesture_enabled.clear()
         self._gesture_last_seen.clear()
         self._recent_lights.clear()
+        self._palm_light_controller.reset()
         self.last_geometry_source_id = None
         self.last_geometry_age_ms = None
         self.last_xyz_source_age_ms = None
@@ -268,6 +316,24 @@ class RelightRenderer:
     def _geometry(self, snapshot: Any) -> GeometryState | None:
         return getattr(snapshot, "fast_geometry_state", None) or snapshot.geometry_state
 
+    def _attach_tracking_stats(self, snapshot: Any) -> None:
+        hand_state = getattr(snapshot, "hand_state", None)
+        if hand_state is not None:
+            self.last_lighting_stats.update({
+                "hand_luminance": float(getattr(hand_state, "frame_luminance", 255.0)),
+                "low_light_active": float(bool(getattr(hand_state, "low_light_active", False))),
+                "clahe_active": float(bool(getattr(hand_state, "low_light_active", False))),
+                "low_light_gamma": float(getattr(hand_state, "low_light_gamma", 1.0)),
+                "low_light_preprocess_ms": float(getattr(hand_state, "preprocess_ms", 0.0)),
+                "mediapipe_ms": float(getattr(hand_state, "detection_ms", 0.0)),
+                "mediapipe_avg_ms": float(getattr(hand_state, "detection_avg_ms", 0.0)),
+                "hand_filtering_ms": float(getattr(hand_state, "filtering_ms", 0.0)),
+                "dropout_age_ms": float(getattr(hand_state, "dropout_age_ms", 0.0)),
+                "hand_tracking_fps": float(getattr(getattr(snapshot, "metrics", None), "hand_hz", 0.0) or 0.0),
+            })
+        if self._palm_light_controller.last_stats:
+            self.last_lighting_stats.update(self._palm_light_controller.last_stats)
+
     def _low_geometry(self, geometry: GeometryState) -> GeometryState:
         full_h, full_w = geometry.depth.shape
         scale = min(1.0, self.max_width / full_w, self.max_height / full_h)
@@ -313,7 +379,7 @@ class RelightRenderer:
         return (
             snapshot.rgb_capture_id,
             geometry.source_frame_id,
-            tuple((light.light_id, tuple(np.round(light.position_camera, 3)), round(light.confidence, 2)) for light in lights),
+            tuple((light.light_id, tuple(np.round(light.position_camera, 3)), round(light.confidence, 2), round(light.orb_visibility, 2), light.enabled, round(light.intensity, 3), round(light.range_m, 3), tuple(np.round(light.color_rgb, 3))) for light in lights),
             int((self.last_xyz_source_age_ms or 0.0) // 25),
             self.lighting_quality,
         )
@@ -386,6 +452,8 @@ class RelightRenderer:
         frame = snapshot.rgb_frame
         title = "MODE 7 - HAND-HELD RELIGHT"
         if frame is None:
+            self.last_lighting_stats = {"renderer": "WAITING"}
+            self._attach_tracking_stats(snapshot)
             return None, title, "waiting for camera"
         frame = np.asarray(frame)[..., :3]
         geometry = self._geometry(snapshot)
@@ -393,14 +461,22 @@ class RelightRenderer:
             self.last_light_count = 0
             self.last_lighting_stats = {"renderer": "WAITING"}
             self._cache_image = frame.copy()
+            self._attach_tracking_stats(snapshot)
             return self._cache_image, title, "waiting for surface geometry"
 
         self.last_geometry_source_id = geometry.source_frame_id
         self.last_geometry_age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
-        lights, self.last_xyz_source_age_ms = lights_from_snapshot(snapshot)
+        lights, self.last_xyz_source_age_ms = lights_from_snapshot(
+            snapshot,
+            geometry=geometry,
+            palm_controller=self._palm_light_controller,
+            mirrored_input=bool(getattr(snapshot, "mirrored_input", True)),
+        )
         lights = self._gesture_gated_lights(snapshot, lights)
+        lights = self.controlled_lights(lights)
         key = self._cache_key_for(snapshot, geometry, lights)
         if key == self._cache_key and self._cache_image is not None:
+            self._attach_tracking_stats(snapshot)
             return self._cache_image, title, None
 
         if not lights:
@@ -416,6 +492,7 @@ class RelightRenderer:
             self.last_render_ms = (time.perf_counter() - started) * 1000.0
             self._cache_key = key
             self._cache_image = frame.copy()
+            self._attach_tracking_stats(snapshot)
             return self._cache_image, title, None
 
         started = time.perf_counter()
@@ -452,13 +529,18 @@ class RelightRenderer:
             "geometry_age_ms": float(self.last_geometry_age_ms),
             "xyz_source_age_ms": float(self.last_xyz_source_age_ms or 0.0),
         })
+        self._attach_tracking_stats(snapshot)
         for index, light in enumerate(lights):
-            projected = project_light_orb(geometry.camera, light)
-            if projected is None:
+            if not light.is_palm_attached and project_light_orb(geometry.camera, light) is None:
                 continue
-            u, v, _ = projected
             position = light.position_camera
-            label = f"H{light.source_hand} XYZ [{position[0]:+.2f}, {position[1]:+.2f}, {position[2]:.2f}]m"
+            state = "EMIT" if light.enabled and light.effective_intensity > 0.01 else "OFF"
+            label = (
+                f"H{light.source_hand} {state} Orb:{light.orb_visibility:.2f} "
+                f"F:{light.palm_facing_score:+.2f} XYZ[{position[0]:+.2f},{position[1]:+.2f},{position[2]:.2f}]"
+                if light.is_palm_attached
+                else f"H{light.source_hand} XYZ [{position[0]:+.2f}, {position[1]:+.2f}, {position[2]:.2f}]m"
+            )
             (text_w, text_h), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.36, 1)
             x = max(8, image.shape[1] - text_w - 18)
             y = 22 + 25 * index
@@ -470,6 +552,114 @@ class RelightRenderer:
 
 
 _renderer = RelightRenderer()
+_active_control: str | None = None
+
+
+def _control_layout(viewport: tuple[int, int, int, int]) -> dict[str, tuple[int, int, int, int]]:
+    vx, vy, vw, vh = viewport
+    width = min(vw - 20, max(420, min(560, int(vw * 0.72))))
+    if width < 300:
+        return {}
+    height = 66
+    x = vx + (vw - width) // 2
+    y = vy + vh - height - 12
+    scale = width / 560.0
+    return {
+        "panel": (x, y, width, height),
+        "intensity": (x + round(16 * scale), y + 46, round(148 * scale), 18),
+        "range": (x + round(190 * scale), y + 46, round(148 * scale), 18),
+        "color": (x + round(374 * scale), y + 12, round(170 * scale), 42),
+    }
+
+
+def _set_slider(control: str, x: int, rect: tuple[int, int, int, int]) -> None:
+    x0, _y, width, _height = rect
+    value = float(np.clip((x - x0) / max(width, 1), 0.0, 1.0))
+    if control == "intensity":
+        _renderer.light_intensity = MIN_INTENSITY + value * (MAX_INTENSITY - MIN_INTENSITY)
+    else:
+        _renderer.light_range_m = MIN_RANGE_M + value * (MAX_RANGE_M - MIN_RANGE_M)
+    _renderer._cache_key = None
+
+
+def handle_control_mouse(event: int, x: int, y: int, flags: int, display_size: tuple[int, int]) -> bool:
+    """Handle Mode 7 slider drags and color selection clicks."""
+    global _active_control
+    from ..common import compute_layout
+
+    layout = compute_layout(display_size)
+    controls = _control_layout((layout["vx"], layout["vy"], layout["vw"], layout["vh"]))
+    if not controls:
+        return False
+    cv = cv2
+    if event == cv.EVENT_LBUTTONDOWN:
+        for name in ("intensity", "range"):
+            rx, ry, rw, rh = controls[name]
+            if rx - 8 <= x <= rx + rw + 8 and ry - 12 <= y <= ry + rh + 6:
+                _active_control = name
+                _set_slider(name, x, controls[name])
+                return True
+        rx, ry, rw, rh = controls["color"]
+        if rx <= x <= rx + rw and ry <= y <= ry + rh:
+            _active_control = "color"
+            return True
+    elif event == cv.EVENT_MOUSEMOVE and flags & cv.EVENT_FLAG_LBUTTON:
+        if _active_control in ("intensity", "range"):
+            _set_slider(_active_control, x, controls[_active_control])
+            return True
+    elif event == cv.EVENT_LBUTTONUP:
+        previous = _active_control
+        _active_control = None
+        if previous in ("intensity", "range"):
+            _set_slider(previous, x, controls[previous])
+            return True
+        if previous == "color":
+            rx, ry, rw, rh = controls["color"]
+            if rx <= x <= rx + rw and ry <= y <= ry + rh:
+                _renderer.light_color_index = (_renderer.light_color_index + 1) % len(COLOR_PRESETS)
+                _renderer._cache_key = None
+            return True
+    return False
+
+
+def draw_controls(canvas: np.ndarray, viewport: tuple[int, int, int, int]) -> None:
+    """Paint the compact Mode 7 power, range, and color controls."""
+    from ..common import (
+        COLOR_BORDER_SUBTLE,
+        COLOR_CONTAINER_LOW,
+        COLOR_PRIMARY_ACCENT,
+        COLOR_TEXT_PRIMARY,
+        COLOR_TEXT_SECONDARY,
+        draw_rounded_rect_alpha,
+    )
+
+    controls = _control_layout(viewport)
+    if not controls:
+        return
+    panel = controls["panel"]
+    draw_rounded_rect_alpha(canvas, *panel, 10, COLOR_CONTAINER_LOW, 0.93, COLOR_BORDER_SUBTLE)
+    scale = panel[2] / 560.0
+    font = 0.34 * min(1.0, max(0.82, scale))
+    for name, value, low, high, label in (
+        ("intensity", _renderer.light_intensity, MIN_INTENSITY, MAX_INTENSITY,
+         f"INTENSITY {_renderer.light_intensity:.2f}"),
+        ("range", _renderer.light_range_m, MIN_RANGE_M, MAX_RANGE_M,
+         f"RANGE {_renderer.light_range_m:.2f}m"),
+    ):
+        rx, ry, rw, _rh = controls[name]
+        cv2.putText(canvas, label, (rx, ry - 14), cv2.FONT_HERSHEY_SIMPLEX, font, COLOR_TEXT_PRIMARY, 1, cv2.LINE_AA)
+        cy = ry + 1
+        cv2.line(canvas, (rx, cy), (rx + rw, cy), COLOR_BORDER_SUBTLE, 5, cv2.LINE_AA)
+        fraction = float(np.clip((value - low) / (high - low), 0.0, 1.0))
+        filled = rx + round(rw * fraction)
+        cv2.line(canvas, (rx, cy), (filled, cy), COLOR_PRIMARY_ACCENT, 5, cv2.LINE_AA)
+        cv2.circle(canvas, (filled, cy), max(5, round(6 * scale)), COLOR_TEXT_PRIMARY, -1, cv2.LINE_AA)
+    rx, ry, rw, rh = controls["color"]
+    name, color = COLOR_PRESETS[_renderer.light_color_index]
+    swatch = tuple(int(round(channel * 255)) for channel in color[::-1])
+    cv2.rectangle(canvas, (rx + 10, ry + 13), (rx + 27, ry + 30), swatch, -1)
+    cv2.putText(canvas, f"COLOR: {name}", (rx + 36, ry + 27), cv2.FONT_HERSHEY_SIMPLEX,
+                font, COLOR_TEXT_PRIMARY, 1, cv2.LINE_AA)
 
 
 def configure(lighting_quality: str = "balanced") -> None:

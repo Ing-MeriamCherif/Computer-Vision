@@ -30,6 +30,37 @@ def test_colleague_tracker_is_real_upstream_backend():
         tracker.close()
 
 
+def test_colleague_adapter_preserves_mediapipe_handedness(monkeypatch):
+    from integrations.colleague_hand import hand_tracker as upstream
+    from geometry.hand_control import _ColleagueBackend
+
+    class StubTracker:
+        backend_name = "mediapipe-tasks"
+
+        def process(self, _rgb):
+            return upstream.HandResult(
+                True,
+                (10.0, 12.0),
+                np.zeros((21, 2), dtype=np.float32),
+                0.95,
+                self.backend_name,
+                18.0,
+                "Left",
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(upstream, "create_tracker", lambda **_kwargs: StubTracker())
+    adapter = _ColleagueBackend(None, 1)
+    try:
+        hands = adapter.process(np.zeros((24, 32, 3), dtype=np.uint8))
+        assert len(hands) == 1
+        assert hands[0].handedness == "Left"
+    finally:
+        adapter.close()
+
+
 def test_sample_depth_uses_median_fallback_for_invalid_palm():
     depth = np.full((8, 8), 2.0, dtype=np.float32)
     valid = np.ones_like(depth, dtype=bool)

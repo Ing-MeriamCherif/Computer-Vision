@@ -35,6 +35,7 @@ from .lighting import (
     sample_depth,
     shade_geometry,
 )
+from .palm_light import PalmLightController
 from .motion import OpenCVFlowProvider
 from .native_window import NativeOpenGLWindow
 from .normals import normals_to_rgb
@@ -334,6 +335,7 @@ class NativeLiveApp:
             cx=float(camera_width) / 2.0,
             cy=float(camera_height) / 2.0,
         )
+        self.palm_light_controller = PalmLightController()
 
         # State cache
         self.previous_geometry: GeometryState | None = None
@@ -488,6 +490,29 @@ class NativeLiveApp:
             cy=float(self.camera_height) / 2.0,
         )
 
+    def _palm_light(
+        self,
+        hand: TrackedHand,
+        geometry: GeometryState,
+        *,
+        intensity: float,
+        color_rgb: tuple[float, float, float],
+        light_id: int,
+        range_m: float = 0.30,
+    ) -> LightState:
+        z_val = hand.depth_z if hand.depth_z and hand.depth_z > 0.1 else 0.7
+        fallback = self.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z_val).astype(np.float32)
+        return self.palm_light_controller.update(
+            hand,
+            geometry,
+            fallback_position=fallback,
+            mirrored_input=False,
+            intensity=intensity,
+            color_rgb=color_rgb,
+            range_m=range_m,
+            light_id=light_id,
+        )
+
     def step(self) -> np.ndarray | None:
         """Execute one complete live render step at native display cadence."""
         if not self._is_running:
@@ -612,17 +637,13 @@ class NativeLiveApp:
             # Single-hand or default interactive light
             if hands:
                 hand = hands[0]
-                z_val = hand.depth_z if hand.depth_z and hand.depth_z > 0.1 else 0.7
-                pu, pv = hand.palm_uv
-                pos = self.camera.unproject(pu, pv, z_val).astype(np.float32)
                 # Modulate intensity by confidence / openness
                 intensity = 0.78 if hand.palm_width_px and hand.palm_width_px > 50 else 0.64
-                lights.append(LightState(
-                    position_camera=pos,
+                lights.append(self._palm_light(
+                    hand,
+                    geometry,
                     intensity=intensity,
-                    color_rgb=np.array([1.0, 0.95, 0.88], dtype=np.float32),
-                    confidence=hand.confidence,
-                    source_hand=hand.hand_id,
+                    color_rgb=(1.0, 0.95, 0.88),
                     light_id=0,
                 ))
             else:
@@ -644,24 +665,18 @@ class NativeLiveApp:
             if len(hands) >= 2:
                 # True two-hand control
                 h0, h1 = hands[0], hands[1]
-                z0 = h0.depth_z if h0.depth_z and h0.depth_z > 0.1 else 0.7
-                z1 = h1.depth_z if h1.depth_z and h1.depth_z > 0.1 else 0.7
-                pos0 = self.camera.unproject(h0.palm_uv[0], h0.palm_uv[1], z0).astype(np.float32)
-                pos1 = self.camera.unproject(h1.palm_uv[0], h1.palm_uv[1], z1).astype(np.float32)
-                lights.append(LightState(
-                    position_camera=pos0,
+                lights.append(self._palm_light(
+                    h0,
+                    geometry,
                     intensity=0.72,
-                    color_rgb=np.array([0.2, 0.75, 1.0], dtype=np.float32),  # Cyan
-                    confidence=h0.confidence,
-                    source_hand=h0.hand_id,
+                    color_rgb=(0.2, 0.75, 1.0),
                     light_id=0,
                 ))
-                lights.append(LightState(
-                    position_camera=pos1,
+                lights.append(self._palm_light(
+                    h1,
+                    geometry,
                     intensity=0.72,
-                    color_rgb=np.array([1.0, 0.55, 0.15], dtype=np.float32),  # Amber
-                    confidence=h1.confidence,
-                    source_hand=h1.hand_id,
+                    color_rgb=(1.0, 0.55, 0.15),
                     light_id=1,
                 ))
             elif len(hands) == 1:
@@ -670,12 +685,11 @@ class NativeLiveApp:
                 z0 = h0.depth_z if h0.depth_z and h0.depth_z > 0.1 else 0.7
                 pos0 = self.camera.unproject(h0.palm_uv[0], h0.palm_uv[1], z0).astype(np.float32)
                 pos1 = np.array([-pos0[0], pos0[1], pos0[2]], dtype=np.float32)
-                lights.append(LightState(
-                    position_camera=pos0,
+                lights.append(self._palm_light(
+                    h0,
+                    geometry,
                     intensity=0.72,
-                    color_rgb=np.array([0.2, 0.75, 1.0], dtype=np.float32),  # Cyan
-                    confidence=h0.confidence,
-                    source_hand=h0.hand_id,
+                    color_rgb=(0.2, 0.75, 1.0),
                     light_id=0,
                 ))
                 lights.append(LightState(
@@ -892,7 +906,11 @@ class NativeLiveApp:
                 cv2.circle(canvas, (w - 295, ly - 4), 6, col_hex, -1, cv2.LINE_AA)
                 cv2.putText(canvas, f"Light {i} ({'H' + str(lt.source_hand) if lt.source_hand >= 0 else 'Virtual'})", (w - 282, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
                 cv2.putText(canvas, f"XYZ: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] m | {uv_text}", (w - 282, ly + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 190, 200), 1, cv2.LINE_AA)
-                cv2.putText(canvas, f"I: {lt.intensity:.2f} | Conf: {lt.confidence:.2f}", (w - 282, ly + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (160, 170, 180), 1, cv2.LINE_AA)
+                detail = (
+                    f"P:{lt.palm_facing_score:+.2f} | Emit {'ON' if lt.enabled else 'OFF'} | Orb {lt.orb_visibility:.2f}"
+                    if lt.is_palm_attached else f"I: {lt.intensity:.2f} | Conf: {lt.confidence:.2f}"
+                )
+                cv2.putText(canvas, detail, (w - 282, ly + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (160, 170, 180), 1, cv2.LINE_AA)
                 ly += 54
 
         # Bottom Shortcut Strip

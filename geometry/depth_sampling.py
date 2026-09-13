@@ -39,22 +39,26 @@ def sample_depth(
     h, w = depth_arr.shape
     if h == 0 or w == 0:
         return 0.0, 0.0
-    mask = np.isfinite(depth_arr) & (depth_arr > 1e-6)
-    if valid is not None:
-        valid_arr = np.asarray(valid, dtype=bool)
-        if valid_arr.shape != depth_arr.shape:
-            raise ValueError("valid mask must match depth shape")
-        mask &= valid_arr
+    valid_arr = None if valid is None else np.asarray(valid, dtype=bool)
+    if valid_arr is not None and valid_arr.shape != depth_arr.shape:
+        raise ValueError("valid mask must match depth shape")
     x = int(np.clip(round(float(u)), 0, w - 1))
     y = int(np.clip(round(float(v)), 0, h - 1))
-    if mask[y, x]:
+    center_valid = np.isfinite(depth_arr[y, x]) and depth_arr[y, x] > 1e-6
+    if valid_arr is not None:
+        center_valid = center_valid and bool(valid_arr[y, x])
+    if center_valid:
         z = _bilinear(depth_arr, u, v)
         if np.isfinite(z) and z > 1e-6:
             return z, 1.0
     radius = max(0, int(radius))
     y0, y1 = max(0, y - radius), min(h, y + radius + 1)
     x0, x1 = max(0, x - radius), min(w, x + radius + 1)
-    values = depth_arr[y0:y1, x0:x1][mask[y0:y1, x0:x1]]
+    patch = depth_arr[y0:y1, x0:x1]
+    mask = np.isfinite(patch) & (patch > 1e-6)
+    if valid_arr is not None:
+        mask &= valid_arr[y0:y1, x0:x1]
+    values = patch[mask]
     if values.size == 0:
         return 0.0, 0.0
     footprint = max((2 * radius + 1) ** 2, 1)

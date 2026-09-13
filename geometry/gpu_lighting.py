@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 import time
 import threading
 from typing import Any
 
 import numpy as np
 
-from .lighting import LightState
+from .lighting import LightState, active_lights
 from .state import GeometryState
 
 
@@ -51,15 +52,20 @@ uniform sampler2D uConfidence;
 uniform sampler2D uValid;
 uniform sampler2D uPrevShadow;
 uniform sampler2D uPrevDepth;
+uniform sampler2D uRtVisibility;
 uniform vec2 uResolution;
 uniform vec4 uCamera; // fx, fy, cx, cy
 uniform int uLightCount;
 uniform vec3 uLightPosition[2];
 uniform vec3 uLightColor[2];
-uniform vec4 uLightPower[2]; // intensity, confidence, range, source radius
+uniform vec4 uLightPower[2]; // effective intensity, confidence, range, source radius
+uniform vec4 uLightBeam[2]; // normalized palm direction xyz, directionality
+uniform vec2 uLightCone[2]; // outer and inner cosine
+uniform float uLightShadowBias[2];
 uniform int uShadowRays;
 uniform int uShadowSteps;
 uniform int uHistoryAllowed;
+uniform int uUseRtShadow;
 uniform float uHistoryWeight;
 uniform float uAmbient;
 
@@ -67,7 +73,7 @@ vec3 toLinear(vec3 c) {
     return mix(c / 12.92, pow((c + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), c));
 }
 
-float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius) {
+float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius, int lightIndex) {
     const vec2 offsets[6] = vec2[6](
         vec2(-0.65,-0.65), vec2(0.65,-0.65), vec2(-0.65,0.65),
         vec2(0.65,0.65), vec2(0.0,-0.75), vec2(0.0,0.75));
@@ -75,11 +81,12 @@ float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius) {
     for (int rayIndex=0; rayIndex<6; ++rayIndex) {
         if (rayIndex >= uShadowRays) break;
         vec3 emitter = lightPos + vec3(offsets[rayIndex] * radius, 0.0);
-        vec3 start = p + n * max(0.002, 0.004 * p.z);
+        vec3 start = p + n * max(uLightShadowBias[lightIndex], 0.0005);
         float rayVisible = 1.0;
         for (int stepIndex=0; stepIndex<10; ++stepIndex) {
             if (stepIndex >= uShadowSteps) break;
-            float t = mix(0.07, 0.94, (float(stepIndex) + 0.5) / float(max(uShadowSteps, 1)));
+            float t = stepIndex == uShadowSteps - 1 ? 0.98 :
+                mix(0.04, 0.82, (float(stepIndex) + 0.5) / float(max(uShadowSteps, 1)));
             vec3 s = mix(start, emitter, t);
             if (s.z <= 1e-4) continue;
             vec2 pixel = vec2(uCamera.x * s.x / s.z + uCamera.z,
@@ -88,7 +95,7 @@ float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius) {
             if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
             float sceneZ = texture(uDepth, uv).r;
             float bias = max(0.005, 0.012 * s.z);
-            if (sceneZ > 1e-5 && sceneZ < s.z - bias) {
+            if (sceneZ > min(start.z, emitter.z) + bias && sceneZ < s.z - bias) {
                 rayVisible = 0.20;
                 break;
             }
@@ -96,6 +103,11 @@ float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius) {
         visibility += rayVisible;
     }
     return visibility / float(max(uShadowRays, 1));
+}
+
+float rtVisibility(vec2 uv, int lightIndex) {
+    vec2 visibility = texture(uRtVisibility, uv).rg;
+    return lightIndex == 0 ? visibility.r : visibility.g;
 }
 
 void main() {
@@ -130,7 +142,12 @@ void main() {
         float specular = pow(max(dot(n, h), 0.0), 36.0);
         float rangeM = max(uLightPower[i].z, 0.01);
         float attenuation = uLightPower[i].x / (1.0 + pow(distanceToLight / rangeM, 2.0));
-        float visibility = rayVisibility(p, n, uLightPosition[i], uLightPower[i].w);
+        float beamCosine = dot(uLightBeam[i].xyz, -l);
+        float beamLobe = smoothstep(uLightCone[i].x, uLightCone[i].y, beamCosine);
+        attenuation *= mix(1.0, beamLobe, clamp(uLightBeam[i].w, 0.0, 1.0));
+        float visibility = uUseRtShadow != 0
+            ? rtVisibility(vUv, i)
+            : rayVisibility(p, n, uLightPosition[i], uLightPower[i].w, i);
         // The stored visibility texture is shared; only a single emitter can
         // safely reuse it. Multi-light frames keep independent current rays.
         if (uLightCount == 1 && uHistoryAllowed != 0 && uHistoryWeight > 0.0) {
@@ -169,18 +186,23 @@ uniform int uLightCount;
 uniform vec3 uLightPosition[2];
 uniform vec3 uLightColor[2];
 uniform vec4 uLightPower[2];
+uniform vec4 uLightBeam[2]; // normalized palm direction xyz, directionality
+uniform vec2 uLightCone[2]; // outer and inner cosine
+uniform float uLightShadowBias[2];
 uniform int uVolumeSteps;
 uniform int uVolShadowSteps;
 uniform int uHistoryAllowed;
 uniform float uHistoryWeight;
 uniform float uDensity;
 
-float lightVisibility(vec3 samplePos, vec3 lightPos) {
+float lightVisibility(vec3 samplePos, vec3 lightPos, int lightIndex) {
     float visible = 1.0;
-    vec3 start = samplePos + (lightPos - samplePos) * 0.05;
+    vec3 ray = lightPos - samplePos;
+    vec3 start = samplePos + normalize(ray) * max(uLightShadowBias[lightIndex], 0.0005);
     for (int i=0; i<6; ++i) {
         if (i >= uVolShadowSteps) break;
-        float t = mix(0.12, 0.92, (float(i) + 0.5) / float(max(uVolShadowSteps, 1)));
+        float t = i == uVolShadowSteps - 1 ? 0.98 :
+            mix(0.04, 0.82, (float(i) + 0.5) / float(max(uVolShadowSteps, 1)));
         vec3 s = mix(start, lightPos, t);
         if (s.z <= 1e-4) continue;
         vec2 pixel = vec2(uCamera.x * s.x / s.z + uCamera.z,
@@ -188,7 +210,8 @@ float lightVisibility(vec3 samplePos, vec3 lightPos) {
         vec2 uv = pixel / uResolution;
         if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
         float sceneZ = texture(uDepth, uv).r;
-        if (sceneZ > 1e-5 && sceneZ < s.z - max(0.008, 0.014 * s.z)) {
+        float bias = max(0.008, 0.014 * s.z);
+        if (sceneZ > min(start.z, lightPos.z) + bias && sceneZ < s.z - bias) {
             visible = 0.18;
             break;
         }
@@ -217,7 +240,10 @@ void main() {
             float distanceSq = max(dot(delta, delta), 0.0025);
             float rangeM = max(uLightPower[lightIndex].z * 0.78, 0.01);
             float rangeWeight = exp(-0.5 * distanceSq / (rangeM * rangeM));
-            float visibility = lightVisibility(s, uLightPosition[lightIndex]);
+            float beamCosine = dot(uLightBeam[lightIndex].xyz, normalize(-delta));
+            float beamLobe = smoothstep(uLightCone[lightIndex].x, uLightCone[lightIndex].y, beamCosine);
+            rangeWeight *= mix(1.0, beamLobe, clamp(uLightBeam[lightIndex].w, 0.0, 1.0));
+            float visibility = lightVisibility(s, uLightPosition[lightIndex], lightIndex);
             float scatter = uDensity * uLightPower[lightIndex].x * uLightPower[lightIndex].y;
             haze += uLightColor[lightIndex] * rangeWeight * visibility * scatter * stepLength;
         }
@@ -247,6 +273,7 @@ uniform vec3 uLightPosition[2];
 uniform vec3 uLightColor[2];
 uniform vec4 uLightPower[2];
 uniform float uLightVisualRadius[2];
+uniform vec2 uLightVisualMeta[2]; // orb visibility, palm-attached
 
 vec3 toSrgb(vec3 c) {
     c = max(c, vec3(0.0));
@@ -260,18 +287,30 @@ void main() {
         if (i >= uLightCount) break;
         vec3 p = uLightPosition[i];
         if (p.z <= 1e-4) continue;
+        float orbVisibility = clamp(uLightVisualMeta[i].x, 0.0, 1.0);
+        if (orbVisibility <= 0.001) continue;
+        bool palmAttached = uLightVisualMeta[i].y > 0.5;
         vec2 center = vec2(uCamera.x * p.x / p.z + uCamera.z,
                            uCamera.y * p.y / p.z + uCamera.w);
+        vec2 centerUv = center / uResolution;
+        float centerSceneZ = texture(uDepth, clamp(centerUv, vec2(0.0), vec2(1.0))).r;
+        float centerBias = palmAttached ? max(0.006, 0.01 * p.z) : max(0.025, 0.04 * p.z);
+        bool sourceOccluded = centerSceneZ > 1e-5 && centerSceneZ + centerBias < p.z;
+        if (palmAttached && sourceOccluded) continue;
         float radius = clamp(uCamera.x * max(uLightVisualRadius[i], 0.004) / p.z, 6.0, 32.0);
         float d = length(pixel - center);
         float normalized = d / radius;
         float outer = exp(-0.5 * pow(d / max(radius * 1.35, 1.0), 2.0));
         float inner = exp(-0.5 * pow(d / max(radius * 0.88, 1.0), 2.0));
-        float power = clamp(uLightPower[i].x * uLightPower[i].y, 0.0, 2.0);
+        float orbTrackingPower = palmAttached ? 1.0 : uLightPower[i].y;
+        float power = clamp(uLightPower[i].x * orbTrackingPower, 0.0, 2.0);
         float sceneZ = texture(uDepth, vUv).r;
-        float haloVisibility = sceneZ > 1e-5 && sceneZ + max(0.025, 0.04 * p.z) < p.z ? 0.28 : 1.0;
-        color += uLightColor[i] * max(outer-inner, 0.0) * 0.008 * power * haloVisibility;
-        color += uLightColor[i] * inner * 0.025 * power * mix(0.55, 1.0, haloVisibility);
+        float depthBias = palmAttached ? max(0.006, 0.01 * p.z) : max(0.025, 0.04 * p.z);
+        bool depthOccluded = sceneZ > 1e-5 && sceneZ + depthBias < p.z;
+        if (palmAttached && depthOccluded) continue;
+        float haloVisibility = depthOccluded ? 0.28 : 1.0;
+        color += uLightColor[i] * max(outer-inner, 0.0) * 0.008 * power * haloVisibility * orbVisibility;
+        color += uLightColor[i] * inner * 0.025 * power * mix(0.55, 1.0, haloVisibility) * orbVisibility;
         if (normalized < 1.0) {
             float sphereZ = sqrt(max(1.0 - normalized * normalized, 0.0));
             vec2 orbXY = (pixel - center) / radius;
@@ -282,7 +321,7 @@ void main() {
             float rim = pow(1.0 - sphereZ, 2.0) * 0.22;
             ballColor = mix(ballColor, uLightColor[i], rim);
             float edge = 1.0 - smoothstep(0.88, 1.0, normalized);
-            color = mix(color, ballColor, edge * 0.90);
+            color = mix(color, ballColor, edge * 0.90 * orbVisibility);
         }
     }
     oColor = vec4(clamp(toSrgb(color), 0.0, 1.0), 1.0);
@@ -311,6 +350,14 @@ class GPURelightRenderer:
         self._history_key: tuple[Any, ...] | None = None
         self._history_time = 0.0
         self._render_lock = threading.Lock()
+        self._rt_renderer = None
+        self._rt_init_error = "not initialized"
+        self._rt_mode = os.environ.get("NRW_RAY_BACKEND", "auto").strip().lower()
+        try:
+            self._rt_width = max(32, int(os.environ.get("NRW_RT_WIDTH", "96")))
+            self._rt_height = max(18, int(os.environ.get("NRW_RT_HEIGHT", "54")))
+        except ValueError:
+            self._rt_width, self._rt_height = 96, 54
         self.initialized = False
         self.gl_version = "unknown"
         self.last_stats: dict[str, float | str] = {}
@@ -369,6 +416,13 @@ class GPURelightRenderer:
                 self._programs[name] = self._link_program(_VERTEX_SHADER, shader)
             self._vao = int(gl.glGenVertexArrays(1))
             gl.glBindVertexArray(self._vao)
+            if self._rt_mode in {"auto", "optix", "rtx"}:
+                try:
+                    from .optix_relighting import create_optix_renderer
+
+                    self._rt_renderer, self._rt_init_error = create_optix_renderer(self._rt_width, self._rt_height)
+                except Exception as exc:
+                    self._rt_init_error = f"{type(exc).__name__}: {exc}"
             self.initialized = True
             glfw.make_context_current(None)
         except Exception:
@@ -456,6 +510,8 @@ class GPURelightRenderer:
         self._texture("valid", width, height, gl.GL_R8, gl.GL_RED, gl.GL_UNSIGNED_BYTE, filtering=nearest)
         self._texture("surface", width, height, gl.GL_RGBA16F, gl.GL_RGBA, gl.GL_FLOAT, filtering=linear)
         self._texture("output", width, height, gl.GL_RGBA8, gl.GL_RGBA, gl.GL_UNSIGNED_BYTE, filtering=linear)
+        self._texture("rt_visibility", self._rt_width, self._rt_height,
+                      gl.GL_RG32F, gl.GL_RG, gl.GL_FLOAT, filtering=linear)
         for i in range(2):
             self._texture(f"shadow{i}", width, height, gl.GL_R16F, gl.GL_RED, gl.GL_FLOAT, filtering=linear)
             self._texture(f"history_depth{i}", width, height, gl.GL_R32F, gl.GL_RED, gl.GL_FLOAT, filtering=nearest)
@@ -500,21 +556,52 @@ class GPURelightRenderer:
         positions = np.zeros((2, 3), dtype=np.float32)
         colors = np.zeros((2, 3), dtype=np.float32)
         powers = np.zeros((2, 4), dtype=np.float32)
+        beams = np.zeros((2, 4), dtype=np.float32)
+        cones = np.zeros((2, 2), dtype=np.float32)
+        visual_meta = np.zeros((2, 2), dtype=np.float32)
+        shadow_bias = np.full(2, 0.002, dtype=np.float32)
         visual_radii = np.zeros(2, dtype=np.float32)
         for i, light in enumerate(lights[:2]):
             positions[i] = np.asarray(light.position_camera, dtype=np.float32)
             colors[i] = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
             powers[i] = (
-                max(float(light.intensity), 0.0),
+                max(float(light.effective_intensity), 0.0),
                 float(np.clip(light.confidence, 0.0, 1.0)),
                 max(float(getattr(light, "range_m", 0.30)), 0.01),
                 max(float(getattr(light, "source_radius_m", 0.018)), 0.001),
             )
+            normal = getattr(light, "palm_normal_camera", None)
+            if light.is_palm_attached and normal is not None:
+                direction = np.asarray(normal, dtype=np.float32).reshape(3)
+                direction_norm = float(np.linalg.norm(direction))
+                if np.isfinite(direction).all() and direction_norm > 1e-6:
+                    beams[i, :3] = direction / direction_norm
+                    beams[i, 3] = float(np.clip(getattr(light, "directionality", 0.78), 0.0, 1.0))
+            inner_deg = float(np.clip(getattr(light, "beam_inner_angle_deg", 32.0), 1.0, 89.0))
+            outer_deg = float(np.clip(getattr(light, "beam_outer_angle_deg", 78.0), inner_deg + 1.0, 179.0))
+            cones[i] = (np.cos(np.deg2rad(outer_deg)), np.cos(np.deg2rad(inner_deg)))
+            visual_meta[i] = (
+                float(np.clip(light.orb_visibility, 0.0, 1.0)),
+                1.0 if light.is_palm_attached else 0.0,
+            )
+            shadow_bias[i] = float(np.clip(light.self_intersection_epsilon_m, 0.0001, 0.02))
             visual_radii[i] = max(float(getattr(light, "visual_radius_m", 0.035)), 0.004)
         gl.glUniform1i(gl.glGetUniformLocation(program, "uLightCount"), min(len(lights), 2))
         gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightPosition[0]"), 2, positions)
         gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightColor[0]"), 2, colors)
         gl.glUniform4fv(gl.glGetUniformLocation(program, "uLightPower[0]"), 2, powers)
+        beam_location = gl.glGetUniformLocation(program, "uLightBeam[0]")
+        if beam_location >= 0:
+            gl.glUniform4fv(beam_location, 2, beams)
+        cone_location = gl.glGetUniformLocation(program, "uLightCone[0]")
+        if cone_location >= 0:
+            gl.glUniform2fv(cone_location, 2, cones)
+        visual_meta_location = gl.glGetUniformLocation(program, "uLightVisualMeta[0]")
+        if visual_meta_location >= 0:
+            gl.glUniform2fv(visual_meta_location, 2, visual_meta)
+        shadow_bias_location = gl.glGetUniformLocation(program, "uLightShadowBias[0]")
+        if shadow_bias_location >= 0:
+            gl.glUniform1fv(shadow_bias_location, 2, shadow_bias)
         visual_radius_location = gl.glGetUniformLocation(program, "uLightVisualRadius[0]")
         if visual_radius_location >= 0:
             gl.glUniform1fv(visual_radius_location, 2, visual_radii)
@@ -618,7 +705,22 @@ class GPURelightRenderer:
         self._upload("normal", np.ascontiguousarray(normals), gl.GL_RGB, gl.GL_FLOAT)
         self._upload("confidence", np.ascontiguousarray(confidence), gl.GL_RED, gl.GL_FLOAT)
         self._upload("valid", np.ascontiguousarray(valid_tex), gl.GL_RED, gl.GL_UNSIGNED_BYTE)
-        active = [light for light in lights if light.enabled and light.confidence > 0 and np.isfinite(light.position_camera).all() and light.position_camera[2] > 0][:2]
+        active = active_lights(lights)[:2]
+        rt_trace_ms = 0.0
+        rt_active = self._rt_renderer is not None and self._rt_mode in {"auto", "optix", "rtx"}
+        if rt_active:
+            try:
+                rt_visibility, rt_trace_ms = self._rt_renderer.render(
+                    geometry.depth, valid, normals, geometry.camera, active
+                )
+                gl.glBindTexture(gl.GL_TEXTURE_2D, self._textures["rt_visibility"])
+                gl.glPixelStorei(gl.GL_UNPACK_ALIGNMENT, 1)
+                gl.glTexSubImage2D(gl.GL_TEXTURE_2D, 0, 0, 0, self._rt_width, self._rt_height,
+                                   gl.GL_RG, gl.GL_FLOAT, np.ascontiguousarray(rt_visibility))
+            except Exception as exc:
+                self._rt_init_error = f"{type(exc).__name__}: {exc}"
+                self._rt_renderer = None
+                rt_active = False
         now = time.monotonic()
         history_ok = self._history_compatible(geometry, active, now)
         previous_index = self._history_index
@@ -640,6 +742,7 @@ class GPURelightRenderer:
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowRays"), self.quality.shadow_rays)
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowSteps"), self.quality.shadow_steps)
         gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uHistoryAllowed"), int(history_ok))
+        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uUseRtShadow"), int(rt_active))
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uHistoryWeight"), self.quality.history_weight)
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uAmbient"), float(ambient))
         self._bind_texture(0, self._textures["rgb"], surface_program, "uRgb")
@@ -649,7 +752,10 @@ class GPURelightRenderer:
         self._bind_texture(4, self._textures["valid"], surface_program, "uValid")
         self._bind_texture(5, self._textures[f"shadow{previous_index}"], surface_program, "uPrevShadow")
         self._bind_texture(6, self._textures[f"history_depth{previous_index}"], surface_program, "uPrevDepth")
+        self._bind_texture(7, self._textures["rt_visibility"], surface_program, "uRtVisibility")
+        pass_started = time.perf_counter()
         self._draw(surface_program, width, height)
+        shadow_submit_ms = (time.perf_counter() - pass_started) * 1000.0
 
         volume_program = self._programs["volume"]
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["volume"])
@@ -670,7 +776,9 @@ class GPURelightRenderer:
         self._bind_texture(2, self._textures["valid"], volume_program, "uValid")
         self._bind_texture(5, self._textures[f"volume{previous_index}"], volume_program, "uPrevVolume")
         self._bind_texture(6, self._textures[f"history_depth{previous_index}"], volume_program, "uPrevDepth")
+        pass_started = time.perf_counter()
         self._draw(volume_program, self._volume_width, self._volume_height)
+        volumetric_submit_ms = (time.perf_counter() - pass_started) * 1000.0
 
         composite_program = self._programs["composite"]
         gl.glBindFramebuffer(gl.GL_FRAMEBUFFER, self._framebuffers["output"])
@@ -685,7 +793,9 @@ class GPURelightRenderer:
         self._bind_texture(0, self._textures["surface"], composite_program, "uSurface")
         self._bind_texture(1, self._textures[f"volume{write_index}"], composite_program, "uVolume")
         self._bind_texture(2, self._textures["depth"], composite_program, "uDepth")
+        pass_started = time.perf_counter()
         self._draw(composite_program, width, height)
+        composite_submit_ms = (time.perf_counter() - pass_started) * 1000.0
         gl.glPixelStorei(gl.GL_PACK_ALIGNMENT, 1)
         result = None
         if readback:
@@ -697,7 +807,13 @@ class GPURelightRenderer:
         total_ms = (time.perf_counter() - render_started) * 1000.0
         self.last_stats = {
             "renderer": "GPU",
+            "ray_backend": "NVIDIA_OPTIX_RT_CORES" if rt_active else "GLSL_SCREEN_SPACE_FALLBACK",
+            "rt_trace_ms": float(rt_trace_ms),
+            "rt_resolution": f"{self._rt_width}x{self._rt_height}",
             "gpu_render_ms": float(total_ms),
+            "shadow_submit_ms": float(shadow_submit_ms),
+            "volumetric_submit_ms": float(volumetric_submit_ms),
+            "composite_submit_ms": float(composite_submit_ms),
             "lights": float(len(active)),
             "quality": self.quality_name,
             "shadow_quality": f"{self.quality.shadow_rays}x{self.quality.shadow_steps}",
@@ -705,6 +821,8 @@ class GPURelightRenderer:
             "gl_version": self.gl_version,
             "volumetric_resolution": f"{self._volume_width}x{self._volume_height}",
         }
+        if not rt_active:
+            self.last_stats["ray_backend_note"] = self._rt_init_error
         return result, dict(self.last_stats)
 
     def render_to_texture(

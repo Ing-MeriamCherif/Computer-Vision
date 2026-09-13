@@ -14,6 +14,7 @@ from typing import Protocol
 import numpy as np
 
 from .depth_sampling import camera_uv_to_depth_uv, sample_depth
+from .low_light import AdaptiveLowLightPreprocessor
 
 
 @dataclass(slots=True)
@@ -47,6 +48,14 @@ class GestureState:
     backend: str
     tracker_ms: float
     stale: bool = False
+    frame_luminance: float = 255.0
+    low_light_active: bool = False
+    low_light_gamma: float = 1.0
+    preprocess_ms: float = 0.0
+    detection_ms: float = 0.0
+    filtering_ms: float = 0.0
+    dropout_age_ms: float = 0.0
+    detection_avg_ms: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -122,6 +131,7 @@ class _ColleagueBackend:
             palm_uv=(float(result.palm_uv[0]), float(result.palm_uv[1])),
             landmarks_uv=None if result.landmarks_uv is None else np.asarray(result.landmarks_uv, dtype=np.float64),
             confidence=float(result.confidence),
+            handedness=getattr(result, "handedness", None),
             palm_width_px=result.palm_px,
         )]
 
@@ -299,6 +309,7 @@ class HandControlEngine:
         max_coast_frames: int = 6,
         input_size: tuple[int, int] = (320, 240),
         filter_mode: str = "oneeuro",
+        dropout_grace_ms: float = 120.0,
     ) -> None:
         self.max_hands = max(1, int(max_hands))
         self.backend = create_hand_tracker(model_path=model_path, max_hands=self.max_hands, backend=backend)
@@ -306,12 +317,20 @@ class HandControlEngine:
         self.max_coast_frames = max(0, int(max_coast_frames))
         self.input_size = input_size
         self.filter_mode = str(filter_mode).lower()
+        self.dropout_grace_seconds = max(0.0, float(dropout_grace_ms)) / 1000.0
+        self.preprocessor = AdaptiveLowLightPreprocessor()
         self._last: list[TrackedHand] = []
         self._filters: dict[int, tuple[_OneEuro, _OneEuro, _OneEuro]] = {}
         self._ema_filters: dict[int, object] = {}
         self._previous_gray: np.ndarray | None = None
         self._coast = 0
         self._last_timestamp: float | None = None
+        self._last_detected_at: dict[int, float] = {}
+        self._reacquire_pending: set[int] = set()
+        self._reacquire_remaining: dict[int, int] = {}
+        self._last_detection_ms = 0.0
+        self._detection_ms_total = 0.0
+        self._detection_samples = 0
         self.last_detection_ran = False
         self.lk_updates = 0
         self.lk_motion_px = 0.0
@@ -375,15 +394,23 @@ class HandControlEngine:
         iw, ih = self.input_size
         scale_x, scale_y = width / iw, height / ih
         small = cv2.resize(source, (iw, ih), interpolation=cv2.INTER_AREA)
+        tracking = self.preprocessor.process(small)
+        tracker_frame = tracking.rgb
 
         should_detect = self._last_timestamp is None or (
             isinstance(frame_id, int) and frame_id % self.detect_every_n == 0
         )
         self.last_detection_ran = bool(should_detect)
         observations: list[TrackedHand] = []
+        detection_ms = 0.0
 
         if should_detect:
-            raw_observations = self.backend.process(small)
+            detection_started = time.perf_counter()
+            raw_observations = self.backend.process(tracker_frame)
+            detection_ms = (time.perf_counter() - detection_started) * 1000.0
+            self._last_detection_ms = detection_ms
+            self._detection_ms_total += detection_ms
+            self._detection_samples += 1
             for obs in raw_observations:
                 obs.palm_uv = (obs.palm_uv[0] * scale_x, obs.palm_uv[1] * scale_y)
                 if obs.landmarks_uv is not None:
@@ -391,13 +418,19 @@ class HandControlEngine:
                 if obs.palm_width_px is not None:
                     obs.palm_width_px *= (scale_x + scale_y) * 0.5
             observations = self._assign_stable_ids([obs for obs in raw_observations if obs.confidence >= 0.45])
+            for obs in observations:
+                if obs.hand_id in self._reacquire_pending:
+                    self._reacquire_remaining[obs.hand_id] = 3
+                    self._reacquire_pending.discard(obs.hand_id)
+                self._last_detected_at[obs.hand_id] = timestamp
         else:
+            detection_ms = self._last_detection_ms
             # Detector-skip frames still update coordinates using LK optical
             # flow. Reusing the previous UV was a false 30 Hz claim and made
             # fast hands appear frozen between detector passes.
             observations = []
             if self._last and self._previous_gray is not None:
-                gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+                gray = cv2.cvtColor(tracker_frame, cv2.COLOR_RGB2GRAY)
                 for prior in self._last:
                     point = np.asarray([[prior.palm_uv[0] / scale_x, prior.palm_uv[1] / scale_y]], dtype=np.float32)
                     nxt, status, _ = cv2.calcOpticalFlowPyrLK(self._previous_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
@@ -418,6 +451,7 @@ class HandControlEngine:
                                 depth_confidence=prior.depth_confidence,
                             ))
 
+        filtering_started = time.perf_counter()
         if observations:
             filtered: list[TrackedHand] = []
             for obs in observations:
@@ -453,6 +487,21 @@ class HandControlEngine:
                     smooth_uv = (fx(uv[0], timestamp), fy(uv[1], timestamp))
                     smooth_z = fz(hand_z, timestamp) if hand_z is not None else None
 
+                reacquire_remaining = self._reacquire_remaining.get(hid, 0)
+                if old is not None and reacquire_remaining > 0:
+                    alpha = (0.45, 0.62, 0.80)[3 - reacquire_remaining]
+                    smooth_uv = (
+                        old.palm_uv[0] + alpha * (smooth_uv[0] - old.palm_uv[0]),
+                        old.palm_uv[1] + alpha * (smooth_uv[1] - old.palm_uv[1]),
+                    )
+                    if smooth_z is not None and old.depth_z is not None:
+                        smooth_z = old.depth_z + alpha * (smooth_z - old.depth_z)
+                    reacquire_remaining -= 1
+                    if reacquire_remaining:
+                        self._reacquire_remaining[hid] = reacquire_remaining
+                    else:
+                        self._reacquire_remaining.pop(hid, None)
+
                 velocity = 0.0
                 if old is not None:
                     velocity = float(
@@ -470,10 +519,11 @@ class HandControlEngine:
             self._last = filtered
             self._coast = 0
         elif self._last and self._coast < self.max_coast_frames and self._previous_gray is not None:
-            gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+            previous_hands = tuple(self._last)
+            gray = cv2.cvtColor(tracker_frame, cv2.COLOR_RGB2GRAY)
             prior_gray = self._previous_gray
             coasted: list[TrackedHand] = []
-            for obs in self._last:
+            for obs in previous_hands:
                 point = np.asarray([[obs.palm_uv[0] / scale_x, obs.palm_uv[1] / scale_y]], dtype=np.float32)
                 nxt, status, _ = cv2.calcOpticalFlowPyrLK(prior_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
                 if status is not None and bool(status[0, 0]):
@@ -493,15 +543,26 @@ class HandControlEngine:
                             depth_confidence=obs.depth_confidence,
                         ))
             observations = coasted
-            self._last = coasted
-            self._coast += 1
+            if coasted:
+                self._last = coasted
+                self._coast += 1
+            else:
+                observations = self._hold_dropped(previous_hands, timestamp)
+                self._last = observations
+                self._coast = 0
         else:
-            self._last = []
+            observations = self._hold_dropped(tuple(self._last), timestamp)
+            self._last = observations
             self._coast = 0
 
-        self._previous_gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+        filtering_ms = (time.perf_counter() - filtering_started) * 1000.0
+        self._previous_gray = cv2.cvtColor(tracker_frame, cv2.COLOR_RGB2GRAY)
         self._last_timestamp = timestamp
         elapsed = (time.perf_counter() - started) * 1000.0
+        dropout_age_ms = max(
+            (max(0.0, timestamp - self._last_detected_at.get(hand.hand_id, timestamp)) * 1000.0 for hand in observations if hand.stale),
+            default=0.0,
+        )
         return GestureState(
             timestamp,
             frame_id,
@@ -509,7 +570,45 @@ class HandControlEngine:
             self.backend_name,
             elapsed,
             any(o.stale for o in observations),
+            tracking.luminance,
+            tracking.clahe_active,
+            tracking.gamma,
+            tracking.elapsed_ms,
+            detection_ms,
+            filtering_ms,
+            dropout_age_ms,
+            self._detection_ms_total / max(self._detection_samples, 1),
         )
+
+    def _hold_dropped(self, previous: tuple[TrackedHand, ...], timestamp: float) -> list[TrackedHand]:
+        held: list[TrackedHand] = []
+        grace = self.dropout_grace_seconds
+        for old in previous:
+            seen_at = self._last_detected_at.get(old.hand_id, old.timestamp)
+            age = max(0.0, timestamp - seen_at)
+            if grace <= 0.0 or age >= grace:
+                self._last_detected_at.pop(old.hand_id, None)
+                self._filters.pop(old.hand_id, None)
+                self._ema_filters.pop(old.hand_id, None)
+                self._reacquire_pending.discard(old.hand_id)
+                self._reacquire_remaining.pop(old.hand_id, None)
+                continue
+            fade = 1.0 - 0.45 * age / grace
+            held.append(TrackedHand(
+                hand_id=old.hand_id,
+                landmarks_uv=None if old.landmarks_uv is None else old.landmarks_uv.copy(),
+                palm_uv=old.palm_uv,
+                confidence=float(max(0.15, old.confidence * fade)),
+                depth_z=old.depth_z,
+                timestamp=timestamp,
+                velocity_px_s=0.0,
+                handedness=old.handedness,
+                palm_width_px=old.palm_width_px,
+                stale=True,
+                depth_confidence=old.depth_confidence,
+            ))
+            self._reacquire_pending.add(old.hand_id)
+        return held
 
     def reset(self) -> None:
         self._last = []
@@ -518,6 +617,12 @@ class HandControlEngine:
         self._previous_gray = None
         self._coast = 0
         self._last_timestamp = None
+        self._last_detected_at.clear()
+        self._reacquire_pending.clear()
+        self._reacquire_remaining.clear()
+        self._last_detection_ms = 0.0
+        self._detection_ms_total = 0.0
+        self._detection_samples = 0
         self.last_detection_ran = False
         self.lk_updates = 0
         self.lk_motion_px = 0.0
