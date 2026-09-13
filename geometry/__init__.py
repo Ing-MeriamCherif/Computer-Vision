@@ -51,7 +51,7 @@ from .persistent import (
     persistent_hole_fill,
 )
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
-from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
+from .depth_provider import DeviceDepthState, DepthAnythingProvider, DepthInferenceDiagnostics
 from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv
 from .colleague_depth import ColleagueDepthProvider
 from .lighting import LightState, light_from_palm, render_volumetric_scattering, shade_geometry

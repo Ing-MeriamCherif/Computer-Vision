@@ -1,5 +1,13 @@
 # P123 30 Hz quality/speed pass
 
+> **LATEST RAMI INTEGRATION NOTE — 2026-09-13**
+>
+> This historical report predates the final `rami` integration pass. Current
+> defaults restore local 336×448 FP32 while preserving colleague and Mariem
+> alternatives; the local CUDA depth path retains device tensors for normals,
+> and source/completion ages are reported separately. See
+> `p123-live-physical-camera-remediation.md` for the authoritative latest run.
+
 Base SHA: `343548df1d2485c5f409631e1ba864fc08a75812`
 
 Branch: `bug-fixes/p123-30hz-quality-speed`

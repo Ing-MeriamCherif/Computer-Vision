@@ -12,6 +12,7 @@ from typing import Any
 
 import cv2
 import numpy as np
+from functools import lru_cache
 
 # ============================================================================
 # Google Material 3 Dark Palette & Design Tokens (RGB)
@@ -40,7 +41,7 @@ COLOR_STATUS_PURPLE = (197, 138, 249)    # Google Purple (#c58af9)
 # Sidebar Navigation Items
 NAV_ITEMS: tuple[tuple[int, str, str], ...] = (
     (1, "RGB Camera", "Sensor Feed"),
-    (2, "Depth Map", "Mariem CUDA"),
+    (2, "Depth Map", "CUDA / local"),
     (3, "Surface Normals", "CUDA Multiscale"),
     (4, "Temporal Conf", "Frame Stability"),
     (5, "Hand Tracking", "Talel Landmarks"),
@@ -158,6 +159,7 @@ def draw_pill(
 # Responsive Layout Geometry
 # ============================================================================
 
+@lru_cache(maxsize=4)
 def compute_layout(display_size: tuple[int, int]) -> dict[str, Any]:
     """Compute responsive dimensions and bounds for header, sidebar, and viewport."""
     w, h = display_size
@@ -549,7 +551,7 @@ def draw_viewport_hud(
         desc = f"Sensor Frame #{fid} | Cadence {(metrics.capture_hz or 0):.1f} Hz | Overwritten {metrics.overwritten_before_consumption if metrics else 0}"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_TEXT_SECONDARY, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 2:
-        desc = "Scale: Warm Near (Yellow/Red) -> Cool Far (Blue/Purple) | Mariem CUDA Depth"
+        desc = "Scale: Warm Near (Yellow/Red) -> Cool Far (Blue/Purple) | CUDA depth"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 3:
         desc = "Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue) | Multiscale R=1..4"
@@ -685,7 +687,7 @@ def finish(
                 vy,
                 vw,
                 vh,
-                "Mariem CUDA Depth Pending",
+                "CUDA Depth Pending",
                 "Warming up TensorRT / CUDA depth estimation worker...",
                 "INITIALIZING",
                 COLOR_STATUS_CYAN,

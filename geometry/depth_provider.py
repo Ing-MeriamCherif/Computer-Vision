@@ -21,6 +21,19 @@ class DepthInferenceDiagnostics:
     session_scale: float | None = None
 
 
+@dataclass(slots=True)
+class DeviceDepthState:
+    """Internal device-resident depth tensors paired with one capture frame."""
+
+    depth: object
+    valid_mask: object
+    confidence: object
+    timestamp: float
+    source_frame_id: int | str
+    scale_mode: str = "relative"
+    completed_timestamp: float | None = None
+
+
 class DepthAnythingProvider:
     """Lazy local-checkpoint monocular relative-depth inference."""
 
@@ -43,6 +56,8 @@ class DepthAnythingProvider:
         self.device = None
         self.last_diagnostics: DepthInferenceDiagnostics | None = None
         self._session_scale: float | None = None
+        self._previous_device_depth = None
+        self._previous_device_valid = None
         self._compute_count = 0
 
     def load(self) -> None:
@@ -91,6 +106,11 @@ class DepthAnythingProvider:
             torch.cuda.synchronize(self.device)
 
     def compute(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> DepthState:
+        state, _device_state = self.compute_device(rgb_frame, source_frame_id, timestamp)
+        return state
+
+    def compute_device(self, rgb_frame: np.ndarray, source_frame_id: int | str, timestamp: float) -> tuple[DepthState, DeviceDepthState]:
+        """Compute depth while retaining postprocessing tensors on CUDA."""
         self.load()
         import torch
         import torch.nn.functional as functional
@@ -108,29 +128,43 @@ class DepthAnythingProvider:
             output = self.model(**inputs).predicted_depth
             resized = functional.interpolate(output.unsqueeze(1), size=frame.shape[:2], mode="bicubic", align_corners=False).squeeze(1)[0]
         elapsed = (time.perf_counter() - start) * 1000.0
-        model_output = resized.float().detach().cpu().numpy()
-        finite = np.isfinite(model_output) & (model_output > 1e-6)
-        if not finite.any():
+        model_output = resized.float()
+        finite_t = torch.isfinite(model_output) & (model_output > 1e-6)
+        if not bool(finite_t.any().item()):
             raise RuntimeError("depth model produced no finite positive depth")
         # Depth Anything's predicted_depth is inverse-depth-like (larger is
         # nearer). Convert explicitly to the project forward-Z convention:
         # larger Z means farther from the camera.
-        depth = np.where(finite, 1.0 / np.maximum(model_output, 1e-6), np.nan).astype(np.float32)
+        depth = torch.where(finite_t, 1.0 / torch.clamp(model_output, min=1e-6), torch.full_like(model_output, float("nan")))
         # Stable session-relative units: smooth the scale target across frames
         # so a hand entering the image cannot globally rescale the wall.
-        target_scale = 2.0 / max(float(np.median(depth[finite])), 1e-6)
+        raw_depth = depth.detach()
+        target_scale = 2.0 / max(float(torch.median(depth[finite_t]).item()), 1e-6)
+        # Robust scale tracking: use only stable overlapping pixels and cap
+        # per-frame correction so entering hands cannot rescale the scene.
+        if self._previous_device_depth is not None and self._previous_device_depth.shape == depth.shape:
+            overlap = finite_t & self._previous_device_valid & torch.isfinite(self._previous_device_depth)
+            if bool(overlap.any().item()):
+                ratio = torch.median(self._previous_device_depth[overlap]) / torch.clamp(torch.median(raw_depth[overlap]), min=1e-6)
+                target_scale *= float(torch.clamp(ratio, 0.90, 1.10).item())
         self._session_scale = target_scale if self._session_scale is None else 0.10 * target_scale + 0.90 * self._session_scale
-        depth = (depth * self._session_scale).astype(np.float32)
+        depth = depth * self._session_scale
         # This is geometry/depth reliability, not a neural confidence score:
         # finite validity is reduced near unstable depth discontinuities.
-        import cv2
-        gx = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=3)
-        gy = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=3)
-        gradient = np.hypot(gx, gy)
-        reference = max(float(np.percentile(gradient[finite], 90)), 1e-6)
-        reliability = np.exp(-np.clip(gradient / reference, 0.0, 4.0)).astype(np.float32)
-        confidence = np.where(finite, reliability, 0.0).astype(np.float32)
+        safe = torch.nan_to_num(depth, nan=0.0)
+        gx = torch.zeros_like(safe); gy = torch.zeros_like(safe)
+        gx[:, 1:-1] = (safe[:, 2:] - safe[:, :-2]) * 0.5
+        gy[1:-1, :] = (safe[2:, :] - safe[:-2, :]) * 0.5
+        gradient = torch.sqrt(gx.square() + gy.square())
+        reference = torch.quantile(gradient[finite_t], 0.90).clamp_min(1e-6)
+        confidence_t = torch.exp(-(gradient / reference).clamp(0.0, 4.0)) * finite_t.to(torch.float32)
+        self._previous_device_depth = raw_depth
+        self._previous_device_valid = finite_t.detach()
+        finite = finite_t.detach().cpu().numpy()
+        depth_np = depth.detach().cpu().numpy().astype(np.float32)
+        confidence = confidence_t.detach().cpu().numpy().astype(np.float32)
         self._compute_count += 1
         peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.device.type == "cuda" and self._compute_count % 30 == 0 else None
-        self.last_diagnostics = DepthInferenceDiagnostics(str(self.device), elapsed, float(depth[finite].min()), float(depth[finite].max()), peak, float(self._session_scale))
-        return DepthState(depth, timestamp, source_frame_id, "relative", valid_mask=finite, confidence=confidence)
+        self.last_diagnostics = DepthInferenceDiagnostics(str(self.device), elapsed, float(depth_np[finite].min()), float(depth_np[finite].max()), peak, float(self._session_scale))
+        state = DepthState(depth_np, timestamp, source_frame_id, "relative", valid_mask=finite, confidence=confidence)
+        return state, DeviceDepthState(depth, finite_t, confidence_t, timestamp, source_frame_id)
