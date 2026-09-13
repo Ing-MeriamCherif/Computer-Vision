@@ -44,8 +44,6 @@ def _panel(snapshot: P123Snapshot, mode: int) -> np.ndarray | None:
     rgb = snapshot.rgb_frame
     if rgb is None:
         return None
-    h, w = rgb.shape[:2]
-    target = (w, h)
     if mode == 1:
         image = rgb
         title = "MODE 1 — RGB CAMERA"

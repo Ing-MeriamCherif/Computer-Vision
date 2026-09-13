@@ -10,11 +10,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import statistics
-import sys
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import cv2
 import numpy as np
@@ -173,7 +171,6 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     gate = args.gate
     results: dict[str, Any] = {"gate": gate, "input_type": "physical_camera", "hardware_validated": False, "calibration": calibration_status}
     provider = None
-    engine = None
     hand_engine = None
     temporal = None
     gpu = None
