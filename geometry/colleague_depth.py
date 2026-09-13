@@ -52,6 +52,11 @@ class ColleagueDepthProvider:
         """
         return None
 
+    @property
+    def device(self):
+        """Resolved torch device for live HUD/diagnostics."""
+        return getattr(getattr(self._model, "_backend", None), "device", None)
+
     def warmup(self, iterations: int = 1) -> None:
         self._model.warmup(iterations=max(0, int(iterations)))
 
