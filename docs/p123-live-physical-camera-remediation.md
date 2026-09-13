@@ -2,7 +2,7 @@
 
 Starting commit: `e5b1fec`
 
-Ending commit: pending final commit
+Ending commit (code): `5b882a9`; report finalization follows in the report-only commit
 
 Branch: `bug-fixes/live-p123-physical-camera-remediation`
 
