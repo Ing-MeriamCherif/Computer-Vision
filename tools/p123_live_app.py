@@ -91,13 +91,32 @@ def _panel(
     else:
         image = rgb.copy()
         title = "MODE 6 — XYZ CONTRACT"
-        if not snapshot.xyz:
+        xyz_by_id = {item.hand_id: item for item in snapshot.xyz}
+        visible_hands = () if snapshot.hand_state is None else snapshot.hand_state.hands
+        if not visible_hands:
             cv2.putText(image, "Waiting for a detected hand...", (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 120), 1, cv2.LINE_AA)
-        y = 30
-        for hand in snapshot.xyz:
-            text = f"H{hand.hand_id} UV=({hand.palm_uv[0]:.0f},{hand.palm_uv[1]:.0f}) XYZ={hand.xyz_camera} conf={hand.confidence:.2f} age={hand.age_ms:.0f}ms"
-            cv2.putText(image, text, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 255, 210), 1, cv2.LINE_AA)
-            y += 18
+        for tracked in visible_hands:
+            u, v = map(int, tracked.palm_uv)
+            # Keep the XYZ annotation attached to the physical hand location.
+            if tracked.landmarks_uv is not None and len(tracked.landmarks_uv):
+                points = np.asarray(tracked.landmarks_uv, dtype=np.int32)
+                x0, y0 = np.min(points, axis=0).tolist()
+                x1, y1 = np.max(points, axis=0).tolist()
+                cv2.rectangle(image, (x0 - 6, y0 - 6), (x1 + 6, y1 + 6), (0, 220, 190), 2)
+                for px, py in points:
+                    cv2.circle(image, (int(px), int(py)), 2, (0, 190, 255), -1)
+            cv2.circle(image, (u, v), 10, (0, 255, 210), 2)
+            xyz = xyz_by_id.get(tracked.hand_id)
+            if xyz is None or xyz.xyz_camera is None:
+                label = f"H{tracked.hand_id} depth pending"
+            else:
+                x, y, z = xyz.xyz_camera
+                label = f"H{xyz.hand_id} XYZ=({x:.2f},{y:.2f},{z:.2f}) c={xyz.confidence:.2f}"
+            text_width = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.42, 1)[0][0]
+            tx = min(max(4, u - text_width // 2), max(4, image.shape[1] - text_width - 4))
+            ty = max(22, v - 18)
+            cv2.rectangle(image, (tx - 3, ty - 16), (tx + text_width + 3, ty + 4), (12, 18, 22), -1)
+            cv2.putText(image, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (0, 255, 210), 1, cv2.LINE_AA)
     if display_size is not None and (image.shape[1], image.shape[0]) != display_size:
         image = _fit(image, display_size)
     metrics = snapshot.metrics
