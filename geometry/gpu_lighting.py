@@ -766,7 +766,7 @@ class GPURelightRenderer:
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uSpecularStrength"), float(specular_strength if stage != "l2_diffuse" else 0.0))
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uShininess"), float(shininess))
         gl.glUniform1f(gl.glGetUniformLocation(surface_program, "uDirectGain"), float(direct_gain))
-        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowsEnabled"), int(stage == "full"))
+        gl.glUniform1i(gl.glGetUniformLocation(surface_program, "uShadowsEnabled"), int(stage in {"full", "l4_shadows"}))
         self._bind_texture(0, self._textures["rgb"], surface_program, "uRgb")
         self._bind_texture(1, self._textures["depth"], surface_program, "uDepth")
         self._bind_texture(2, self._textures["normal"], surface_program, "uNormal")
