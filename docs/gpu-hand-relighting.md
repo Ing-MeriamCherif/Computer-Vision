@@ -62,3 +62,17 @@ tracing. Balanced settings use four deterministic area-light shadow rays with
 six samples each, quarter-resolution volumetrics with six camera samples and
 four sample-to-light visibility steps, and conservative depth-rejected
 temporal history. No per-frame depth normalization is performed.
+
+## Backend selection
+
+The live app accepts `--relight-backend auto|rtx|raster`. `auto` selects the
+optional NVIDIA OptiX module only when an RTX-class GPU and native module are
+available; otherwise it reports `OPENGL_RASTER`. `raster` forces the CUDA/OpenGL
+path. `rtx` is strict and reports `RTX_UNAVAILABLE` when unavailable; it never
+labels a fallback as RTX.
+
+The optional native build is under `native/optix_relight/` and requires the
+NVIDIA OptiX SDK, CUDA Toolkit, CMake, a C++ compiler, and pybind11. Set
+`OPTIX_ROOT` or pass `--optix-root` to `tools/build_optix_backend.py`. The
+current GTX 1650 Ti is intentionally detected as non-RTX and uses the raster
+backend.

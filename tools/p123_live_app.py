@@ -77,6 +77,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
     parser.add_argument("--mode", type=int, choices=range(1, 8), default=1, help="Starting view: 1 RGB through 7 hand relight")
     parser.add_argument("--lighting-quality", choices=["low", "balanced", "high"], default="balanced")
+    parser.add_argument("--relight-backend", choices=["auto", "rtx", "raster"], default="auto", help="Mode 7 renderer selection")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=True, help="Mirror the live camera left-to-right (default: True)")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
@@ -88,7 +89,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    configure_relight(args.lighting_quality)
+    configure_relight(args.lighting_quality, args.relight_backend)
     legacy_camera_is_phone = args.camera is not None and _camera_key(args.camera) == _camera_key(args.phone_camera)
     selected_source = "phone" if legacy_camera_is_phone else "webcam"
 
@@ -147,6 +148,7 @@ def main() -> int:
     print(f"  CUDA Devices:      depth={depth_device or 'unknown'} | normals={normal_device}")
     print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ  [7] Relight")
     print(f"  Relight Quality:   {args.lighting_quality}")
+    print(f"  Relight Backend:   {args.relight_backend} (auto selects RTX OptiX or OpenGL raster)")
     print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
     print("============================================================")
 

@@ -14,5 +14,7 @@ playwright==1.62.0
 # Mode 7 OpenGL 3.3 core renderer.
 glfw>=2.7.0
 PyOpenGL>=3.1.7
+# Optional RTX native build tooling (requires NVIDIA OptiX SDK via OPTIX_ROOT).
+pybind11>=2.12.0
 # Colleague hand-control integration. The .task model asset stays outside Git.
 mediapipe>=1.0.1

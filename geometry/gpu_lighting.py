@@ -88,7 +88,16 @@ float rayVisibility(vec3 p, vec3 n, vec3 lightPos, float radius) {
             if (any(lessThan(uv, vec2(0.0))) || any(greaterThanEqual(uv, vec2(1.0)))) continue;
             float sceneZ = texture(uDepth, uv).r;
             float bias = max(0.005, 0.012 * s.z);
-            if (sceneZ > 1e-5 && sceneZ < s.z - bias) {
+            // Reject discontinuity pixels: monocular depth edges are not
+            // reliable occluders and otherwise cause shadow bleeding.
+            vec2 texel = 1.0 / uResolution;
+            float edge = 0.0;
+            edge = max(edge, abs(sceneZ - texture(uDepth, uv + vec2(texel.x, 0.0)).r));
+            edge = max(edge, abs(sceneZ - texture(uDepth, uv - vec2(texel.x, 0.0)).r));
+            edge = max(edge, abs(sceneZ - texture(uDepth, uv + vec2(0.0, texel.y)).r));
+            edge = max(edge, abs(sceneZ - texture(uDepth, uv - vec2(0.0, texel.y)).r));
+            float edge_limit = max(0.08, 0.12 * max(sceneZ, s.z));
+            if (sceneZ > 1e-5 && sceneZ < s.z - bias && edge < edge_limit) {
                 rayVisible = 0.20;
                 break;
             }

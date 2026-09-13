@@ -601,12 +601,21 @@ def draw_viewport_hud(
 
         renderer = relight._renderer
         stats = renderer.last_lighting_stats
-        backend = "IDLE" if stats.get("renderer") == "IDLE" else "GPU" if stats.get("renderer") == "GPU" else "CPU FALLBACK" if stats.get("renderer") == "CPU_FALLBACK" else "GPU ..."
+        renderer_name = str(stats.get("renderer", "WAITING"))
+        backend = {
+            "RTX_OPTIX": "RTX OPTIX",
+            "OPENGL_RASTER": "OPENGL RASTER",
+            "CPU_FALLBACK": "CPU FALLBACK",
+            "RTX_UNAVAILABLE": "RTX UNAVAILABLE",
+            "IDLE": "IDLE",
+        }.get(renderer_name, "GPU ...")
         xyz_age = renderer.last_xyz_source_age_ms
         xyz_text = "XYZ --" if xyz_age is None else f"XYZ {xyz_age:.0f}ms"
         shadow = stats.get("shadow_quality", "--")
         volume = stats.get("volumetric_quality", "--")
-        desc = f"{backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}"
+        reason = str(stats.get("fallback_reason", ""))
+        suffix = " | " + reason[:48] if reason else ""
+        desc = f"{backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 

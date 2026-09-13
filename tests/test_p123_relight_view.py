@@ -10,6 +10,7 @@ from geometry.p123_contract import HandXYZ
 from geometry.state import GeometryState
 from geometry.p123_live_runtime import P123Metrics, P123Snapshot
 from p123.views.relight import RelightRenderer
+from geometry.rtx_lighting import detect_rtx_optix
 
 
 def _snapshot(hand_count: int = 1) -> P123Snapshot:
@@ -328,6 +329,19 @@ def test_gpu_shader_warmup_does_not_block_the_live_view():
             assert renderer._gpu_warmed
             image, _, _ = renderer.render(_snapshot())
             assert image.shape == snapshot.rgb_frame.shape
-            assert renderer.last_lighting_stats["renderer"] == "GPU"
+            assert renderer.last_lighting_stats["renderer"] == "OPENGL_RASTER"
     finally:
         renderer.close()
+
+
+def test_non_rtx_backend_detection_and_forced_modes():
+    capability = detect_rtx_optix()
+    assert capability.available is False
+    raster = RelightRenderer(use_gpu=False, backend="raster")
+    assert raster._ensure_rtx() is None
+    assert raster.backend_name == "UNINITIALIZED"
+    strict = RelightRenderer(use_gpu=False, backend="rtx")
+    assert strict._ensure_rtx() is None
+    assert strict.backend_name == "RTX_UNAVAILABLE"
+    raster.close()
+    strict.close()

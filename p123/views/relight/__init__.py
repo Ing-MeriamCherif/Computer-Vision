@@ -146,11 +146,18 @@ class RelightRenderer:
         *,
         lighting_quality: str = "balanced",
         use_gpu: bool = True,
+        backend: str = "auto",
     ) -> None:
         self.max_width = max(64, int(max_width))
         self.max_height = max(48, int(max_height))
         self.lighting_quality = lighting_quality
         self.use_gpu = bool(use_gpu)
+        self.backend_requested = str(backend).lower()
+        if self.backend_requested not in {"auto", "rtx", "raster"}:
+            raise ValueError("backend must be auto, rtx, or raster")
+        self.backend_name = "UNINITIALIZED"
+        self.backend_reason: str | None = None
+        self._rtx_renderer = None
         self._gpu_renderer = None
         self._gpu_error: str | None = None
         self._gpu_error_reported = False
@@ -175,12 +182,25 @@ class RelightRenderer:
             self._gpu_renderer.set_quality(self.lighting_quality)
         self._cache_key = None
 
+    def set_backend(self, backend: str) -> None:
+        value = str(backend).lower()
+        if value not in {"auto", "rtx", "raster"}:
+            raise ValueError("backend must be auto, rtx, or raster")
+        self.backend_requested = value
+        self._rtx_renderer = None
+        self.backend_name = "UNINITIALIZED"
+        self.backend_reason = None
+        self.reset_for_source_change()
+
     def close(self) -> None:
         if self._gpu_warm_thread is not None and self._gpu_warm_thread.is_alive():
             self._gpu_warm_thread.join(timeout=5.0)
         if self._gpu_renderer is not None:
             self._gpu_renderer.close()
             self._gpu_renderer = None
+        if self._rtx_renderer is not None:
+            self._rtx_renderer.close()
+            self._rtx_renderer = None
         self._gpu_warmed = False
         self._gesture_enabled.clear()
         self._gesture_last_seen.clear()
@@ -364,6 +384,25 @@ class RelightRenderer:
                 return self._ensure_gpu()
         return self._gpu_renderer
 
+    def _ensure_rtx(self):
+        if self.backend_requested == "raster":
+            return None
+        if self._rtx_renderer is not None:
+            return self._rtx_renderer
+        try:
+            from geometry.rtx_lighting import create_optix_renderer
+
+            self._rtx_renderer = create_optix_renderer(self.lighting_quality)
+            self.backend_name = "RTX_OPTIX"
+            return self._rtx_renderer
+        except Exception as exc:  # noqa: BLE001
+            self.backend_reason = f"{type(exc).__name__}: {exc}"
+            if self.backend_requested == "rtx":
+                self.backend_name = "RTX_UNAVAILABLE"
+                return None
+            self.backend_name = "OPENGL_RASTER"
+            return None
+
     def _start_gpu_warmup(self, renderer, frame: np.ndarray, geometry: GeometryState, lights: list[LightState]) -> None:
         if self._gpu_warm_active:
             return
@@ -419,31 +458,53 @@ class RelightRenderer:
             return self._cache_image, title, None
 
         started = time.perf_counter()
-        renderer = self._ensure_gpu()
-        if renderer is not None:
-            if not self._gpu_warmed:
-                self._start_gpu_warmup(renderer, frame, geometry, lights)
-                self.last_light_count = len(lights)
-                self.last_lighting_stats = {
-                    "renderer": "GPU_WARMUP",
-                    "quality": self.lighting_quality,
-                    "lights": float(len(lights)),
-                }
-                self.last_render_ms = (time.perf_counter() - started) * 1000.0
-                return frame.copy(), title, None
+        rtx_renderer = self._ensure_rtx()
+        if self.backend_requested == "rtx" and rtx_renderer is None:
+            self.last_light_count = len(lights)
+            self.last_lighting_stats = {
+                "renderer": "RTX_UNAVAILABLE",
+                "quality": self.lighting_quality,
+                "lights": float(len(lights)),
+                "fallback_reason": self.backend_reason or "RTX backend unavailable",
+            }
+            self.last_render_ms = (time.perf_counter() - started) * 1000.0
+            self._cache_key = key
+            self._cache_image = frame.copy()
+            return self._cache_image, title, None
+        if rtx_renderer is not None:
             try:
-                image, stats = renderer.render(frame, geometry, lights, ambient=0.40)
-                self.last_lighting_stats = stats
-            except Exception as exc:
-                self._gpu_error = f"{type(exc).__name__}: {exc}"
-                self._gpu_error_reported = True
-                print(f"GPU RELIGHT RENDER FAILED: {self._gpu_error}; falling back to CPU reference renderer")
-                renderer.close()
-                self._gpu_renderer = None
-                self._gpu_error = f"render {type(exc).__name__}: {exc}"
+                image, stats = rtx_renderer.render(frame, geometry, lights, ambient=0.40)
+                self.last_lighting_stats = dict(stats)
+                self.last_lighting_stats["renderer"] = "RTX_OPTIX"
+            except Exception as exc:  # noqa: BLE001
+                self.backend_reason = f"RTX render {type(exc).__name__}: {exc}"
+                if self.backend_requested == "rtx":
+                    self.last_lighting_stats = {"renderer": "RTX_UNAVAILABLE", "fallback_reason": self.backend_reason}
+                    self._cache_image = frame.copy()
+                    return self._cache_image, title, None
+                self.backend_name = "OPENGL_RASTER"
                 image = self._cpu_render(frame, geometry, lights)
         else:
-            image = self._cpu_render(frame, geometry, lights)
+            renderer = self._ensure_gpu()
+            if renderer is not None:
+                if not self._gpu_warmed:
+                    self._start_gpu_warmup(renderer, frame, geometry, lights)
+                    self.last_light_count = len(lights)
+                    self.last_lighting_stats = {"renderer": "GPU_WARMUP", "quality": self.lighting_quality, "lights": float(len(lights))}
+                    self.last_render_ms = (time.perf_counter() - started) * 1000.0
+                    return frame.copy(), title, None
+                try:
+                    image, stats = renderer.render(frame, geometry, lights, ambient=0.40)
+                    self.last_lighting_stats = dict(stats)
+                    self.last_lighting_stats["renderer"] = "OPENGL_RASTER"
+                except Exception as exc:
+                    self._gpu_error = f"{type(exc).__name__}: {exc}"
+                    self._gpu_error_reported = True
+                    renderer.close()
+                    self._gpu_renderer = None
+                    image = self._cpu_render(frame, geometry, lights)
+            else:
+                image = self._cpu_render(frame, geometry, lights)
 
         self.last_light_count = len(lights)
         self.last_render_ms = (time.perf_counter() - started) * 1000.0
@@ -472,8 +533,9 @@ class RelightRenderer:
 _renderer = RelightRenderer()
 
 
-def configure(lighting_quality: str = "balanced") -> None:
+def configure(lighting_quality: str = "balanced", backend: str = "auto") -> None:
     _renderer.set_lighting_quality(lighting_quality)
+    _renderer.set_backend(backend)
 
 
 def render(snapshot: Any) -> tuple[np.ndarray | None, str, str | None]:
