@@ -167,7 +167,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
     parser.add_argument("--depth-model", default="models/depth-anything-v2-small")
-    parser.add_argument("--depth-backend", choices=["local", "colleague"], default="local")
+    parser.add_argument("--depth-backend", choices=["local", "colleague", "mariem"], default="local")
     parser.add_argument(
         "--fp16", action="store_true",
         help="Use FP16 depth inference (benchmark first; FP32 is faster on some GPUs such as GTX 1650 Ti)",

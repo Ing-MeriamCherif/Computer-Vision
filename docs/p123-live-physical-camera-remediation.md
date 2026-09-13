@@ -33,6 +33,14 @@ depth speckle, normal speckle, and an obscured XYZ-axis legend. A low-confidence
 MediaPipe false hand near the face was also rejected; the post-fix webcam panel
 showed zero hands when no hand was present.
 
+### Mariem `main` depth module integration
+
+The complete `depth_module/` package from Mariem's `upstream/main` commit
+`a7ed804` is vendored unchanged and exposed as `--depth-backend mariem`. A
+physical A/B run showed cleaner foreground/background separation than the local
+provider, but approximately 9.8 Hz FP32 and 3 Hz FP16 on this GTX 1650 Ti;
+therefore the local provider remains the default for responsive live video.
+
 ## P123 CONSOLIDATION NOTES
 
 The runtime now negotiates camera dimensions after `start()`, rebuilds the

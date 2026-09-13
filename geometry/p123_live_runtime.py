@@ -155,15 +155,16 @@ class P123LiveRuntime:
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
         if depth_provider is not None:
             self.depth_provider = depth_provider
-        elif depth_backend == "colleague":
-            from .colleague_depth import ColleagueDepthProvider
+        elif depth_backend in {"colleague", "mariem"}:
+            from .colleague_depth import ColleagueDepthProvider, MariemDepthProvider
             if depth_size is None:
                 colleague_size = max(height, width)
             elif isinstance(depth_size, tuple):
                 colleague_size = max(int(v) for v in depth_size)
             else:
                 colleague_size = int(depth_size)
-            self.depth_provider = ColleagueDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16)
+            provider_cls = MariemDepthProvider if depth_backend == "mariem" else ColleagueDepthProvider
+            self.depth_provider = provider_cls(device="auto", input_size=colleague_size, fp16=use_fp16)
         elif depth_backend == "local":
             # Native camera dimensions preserve fine spatial detail; the
             # latest-only worker keeps capture/UI cadence independent of the

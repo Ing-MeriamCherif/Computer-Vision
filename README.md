@@ -84,9 +84,13 @@ Use keys `1`–`6` for RGB, depth, normals, temporal confidence, hands, and XYZ
 contract diagnostics; press `q` to exit. The default is native camera-sized
 depth input with FP32 inference (faster on the local GTX 1650 Ti); add
 `--fp16` only after benchmarking it on another GPU. Use
-`--depth-backend colleague --depth-size 420` to run Mariem's preserved
-Depth-Anything V2 pipeline, or `--headless --duration 10` for a bounded
-physical-camera smoke measurement. Native normals use the CUDA geometry stream
+`--depth-backend mariem --depth-size 420` to run the latest Depth-Anything V2
+module pulled from Mariem's `main` branch; `--depth-backend colleague` selects
+the older preserved adapter. On this GTX 1650 Ti, Mariem's module gives a
+visually cleaner relative-depth field but measures about 9.8 Hz FP32, while the
+local backend remains the live sweet spot at about 17–19 Hz. Use
+`--headless --duration 10` for a bounded physical-camera smoke measurement.
+Native normals use the CUDA geometry stream
 independently of the slower temporal CPU diagnostics; mode 4 uses a lightweight
 native temporal-consistency map at the same live cadence.
 XYZ mode samples the same fresh CUDA geometry state and reports “Waiting for a

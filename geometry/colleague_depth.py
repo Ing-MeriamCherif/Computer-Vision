@@ -22,10 +22,16 @@ from .state import DepthState
 class ColleagueDepthProvider:
     backend_name = "colleague-depth-anything-v2-small"
 
-    def __init__(self, *, device: str = "auto", input_size: int = 518, fp16: bool = True) -> None:
-        root = Path(__file__).resolve().parents[1] / "integrations" / "colleague_depth"
+    def __init__(self, *, device: str = "auto", input_size: int = 518, fp16: bool = True, module_root: str | Path | None = None) -> None:
+        root = Path(module_root) if module_root is not None else Path(__file__).resolve().parents[1] / "integrations" / "colleague_depth"
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
+        # Mariem's module keeps the historical top-level ``depth`` package
+        # name. Remove a previously loaded variant so A/B runs in one process
+        # resolve the requested source deterministically.
+        for module_name in tuple(sys.modules):
+            if module_name == "depth" or module_name.startswith("depth."):
+                del sys.modules[module_name]
         from depth.model import DepthModel  # the preserved upstream module
 
         if device == "auto":
@@ -100,3 +106,18 @@ class ColleagueDepthProvider:
             valid_mask=valid,
             confidence=np.where(finite, reliability, 0.0).astype(np.float32),
         )
+
+
+class MariemDepthProvider(ColleagueDepthProvider):
+    """Adapter for the latest depth module on Mariem's ``main`` branch.
+
+    The module is vendored under ``depth_module/`` with its original model and
+    backend entry points preserved.  It is selectable independently so the
+    older colleague integration remains available for A/B comparison.
+    """
+
+    backend_name = "mariem-main-depth-anything-v2-small"
+
+    def __init__(self, *, device: str = "auto", input_size: int = 420, fp16: bool = True) -> None:
+        root = Path(__file__).resolve().parents[1] / "depth_module"
+        super().__init__(device=device, input_size=input_size, fp16=fp16, module_root=root)
