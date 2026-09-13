@@ -43,6 +43,7 @@ class P123Metrics:
     captured: int
     overwritten_before_consumption: int
     depth_errors: int
+    normal_hz: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,7 @@ class P123Snapshot:
     xyz: tuple[HandXYZ, ...]
     contract: P4InputState | None
     metrics: P123Metrics
+    fast_geometry_state: GeometryState | None = None
 
 
 def _rate(timestamps: list[float]) -> float | None:
@@ -126,6 +128,15 @@ class P123LiveRuntime:
         self._rgb: tuple[np.ndarray, int, float] | None = None
         self._depth: DepthState | None = None
         self._geometry: GeometryState | None = None
+        self._fast_geometry: GeometryState | None = None
+        self._normal_backend = None
+        try:
+            from .cuda_backend import TorchGeometryBackend
+            backend = TorchGeometryBackend("auto")
+            if backend.is_cuda:
+                self._normal_backend = backend
+        except Exception:
+            self._normal_backend = None
         self._hands: GestureState | None = None
         self._running = False
         self._threads: list[threading.Thread] = []
@@ -136,6 +147,7 @@ class P123LiveRuntime:
         self._capture_times: list[float] = []
         self._depth_times: list[float] = []
         self._geometry_times: list[float] = []
+        self._normal_times: list[float] = []
         self._hand_times: list[float] = []
         self._xyz_times: list[float] = []
         self._depth_ages: list[float] = []
@@ -162,7 +174,7 @@ class P123LiveRuntime:
             raise RuntimeError(f"hand backend unavailable: {self.hand_engine.backend_name}")
         self.camera_worker.start()
         self._running = True
-        targets = [self._dispatch_loop, self._depth_loop, self._geometry_loop, self._hand_loop, self._xyz_loop]
+        targets = [self._dispatch_loop, self._depth_loop, self._geometry_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
         self._threads = [threading.Thread(target=target, name=target.__name__, daemon=True) for target in targets]
         for thread in self._threads:
             thread.start()
@@ -231,6 +243,35 @@ class P123LiveRuntime:
             self._geometry_times.append(completed)
             self._geometry_ages.append(max(0.0, (completed - state.timestamp) * 1000.0))
 
+    def _normal_loop(self) -> None:
+        """Publish native-resolution CUDA normals without blocking temporal CPU work."""
+        if self._normal_backend is None:
+            return
+        last_depth_id: int | str | None = None
+        while self._running:
+            state = self._depth_states.get()
+            if state is None or state.source_frame_id == last_depth_id:
+                time.sleep(0.002)
+                continue
+            try:
+                fast = self._normal_backend.process_depth(
+                    state.depth,
+                    self.camera,
+                    frame_id=state.source_frame_id,
+                    timestamp=state.timestamp,
+                    scale_mode=state.scale_mode,
+                    valid_mask=state.valid_mask,
+                    input_confidence=state.confidence,
+                )
+                fast.processing_frame_id = state.source_frame_id
+                with self._state_lock:
+                    self._fast_geometry = fast
+                self._normal_times.append(time.monotonic())
+                last_depth_id = state.source_frame_id
+            except Exception:
+                # Keep the temporal worker/UI alive if CUDA geometry rejects a frame.
+                last_depth_id = state.source_frame_id
+
     def _hand_loop(self) -> None:
         while self._running:
             packet = self._hand_frames.get()
@@ -278,7 +319,7 @@ class P123LiveRuntime:
         with self._rgb_lock:
             rgb = self._rgb
         with self._state_lock:
-            depth, geometry, hands = self._depth, self._geometry, self._hands
+            depth, geometry, hands, fast_geometry = self._depth, self._geometry, self._hands, self._fast_geometry
         xyz = tuple(self._xyz)
         contract = None
         if rgb is not None and geometry is not None:
@@ -298,8 +339,9 @@ class P123LiveRuntime:
             self.camera_worker.actual_fps if self.camera_worker.captured_frames > 1 else _rate(self._capture_times), _rate(self._depth_times), _rate(self._geometry_times), _rate(self._geometry_times), _rate(self._hand_times), _rate(self._xyz_times),
             _percentile(self._depth_ages, 50), _percentile(self._depth_ages, 95), _percentile(self._geometry_ages, 95), _percentile(self._hand_ages, 95), _percentile(self._xyz_ages, 95),
             self.camera_worker.captured_frames, self.camera_worker.overwritten_before_consumption, self._depth_errors,
+            _rate(self._normal_times),
         )
-        return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, geometry, hands, xyz, contract, metrics)
+        return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, geometry, hands, xyz, contract, metrics, fast_geometry)
 
     def stop(self) -> None:
         self._running = False

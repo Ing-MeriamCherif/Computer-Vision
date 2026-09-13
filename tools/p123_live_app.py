@@ -61,13 +61,14 @@ def _panel(
             title = "MODE 2 — DEPTH (warm=near, cool=far)"
             waiting = None
     elif mode == 3:
-        if snapshot.geometry_state is None or snapshot.geometry_state.normals is None:
+        normal_state = snapshot.fast_geometry_state or snapshot.geometry_state
+        if normal_state is None or normal_state.normals is None:
             image = np.zeros_like(rgb)
             title = "MODE 3 — NORMALS"
             waiting = "waiting for geometry worker"
         else:
-            image = normals_to_rgb_diagnostic(snapshot.geometry_state.normals, snapshot.geometry_state.normal_valid_mask)
-            title = "MODE 3 — NORMALS (R=Nx G=Ny B=Nz)"
+            image = normals_to_rgb_diagnostic(normal_state.normals, normal_state.normal_valid_mask)
+            title = "MODE 3 — NORMALS (CUDA live, R=Nx G=Ny B=Nz)"
             waiting = None
     elif mode == 4:
         if snapshot.geometry_state is None:
@@ -99,7 +100,7 @@ def _panel(
     metrics = snapshot.metrics
     lines = [
         f"capture {snapshot.rgb_capture_id} | capture Hz {metrics.capture_hz or 0:.1f} | overwritten {metrics.overwritten_before_consumption}",
-        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | geom {metrics.geometry_hz or 0:.1f} Hz | hand {metrics.hand_hz or 0:.1f} Hz",
+        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz | temporal {metrics.geometry_hz or 0:.1f} Hz | hand {metrics.hand_hz or 0:.1f} Hz",
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")
@@ -178,7 +179,7 @@ def main() -> int:
         final = runtime.snapshot()
         runtime.stop()
         cv2.destroyAllWindows()
-        print(f"frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
+        print(f"frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
     return 0
 
 

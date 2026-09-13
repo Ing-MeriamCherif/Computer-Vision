@@ -86,7 +86,8 @@ depth input with FP32 inference (faster on the local GTX 1650 Ti); add
 `--fp16` only after benchmarking it on another GPU. Use
 `--depth-backend colleague --depth-size 420` to run Mariem's preserved
 Depth-Anything V2 pipeline, or `--headless --duration 10` for a bounded
-physical-camera smoke measurement.
+physical-camera smoke measurement. Native normals use the CUDA geometry stream
+independently of the slower temporal CPU diagnostics.
 
 ---
 
