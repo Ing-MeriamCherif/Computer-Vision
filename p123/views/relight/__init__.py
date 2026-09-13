@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import threading
 import math
+import os
 from dataclasses import replace
 from typing import Any
 
@@ -119,6 +120,7 @@ def lights_from_snapshot(
                 range_m=DEFAULT_RANGE_M,
                 source_radius_m=0.018,
                 visual_radius_m=0.035,
+                is_palm_attached=True,
             )
         )
         if len(lights) == 2:
@@ -224,6 +226,13 @@ class RelightRenderer:
         value = str(backend).lower()
         if value not in {"auto", "rtx", "raster"}:
             raise ValueError("backend must be auto, rtx, or raster")
+        if value == "raster" and os.environ.get("NRW_ALLOW_RASTER_ON_RTX_DEBUG") != "1":
+            try:
+                import torch
+                if torch.cuda.is_available() and "RTX" in torch.cuda.get_device_name(0).upper():
+                    raise RuntimeError("Raster backend is disabled on RTX hardware; set NRW_ALLOW_RASTER_ON_RTX_DEBUG=1 for debug-only use")
+            except ImportError:
+                pass
         self.backend_requested = value
         self._rtx_renderer = None
         self._rtx_probe_done = False
@@ -404,6 +413,8 @@ class RelightRenderer:
             return self._rtx_renderer
         self._rtx_probe_done = True
         try:
+            from geometry.rtx_lighting import detect_rtx_optix
+            capability = detect_rtx_optix()
             from geometry.rtx_lighting import create_optix_renderer
 
             self._rtx_renderer = create_optix_renderer(self.lighting_quality)
@@ -413,7 +424,9 @@ class RelightRenderer:
             self.backend_reason = f"{type(exc).__name__}: {exc}"
             if self.backend_requested == "rtx":
                 self.backend_name = "RTX_UNAVAILABLE"
-                return None
+                raise RuntimeError(f"RTX GPU DETECTED BUT OPTIX RAY TRACING IS UNAVAILABLE: {self.backend_reason}") from exc
+            if 'capability' in locals() and capability.gpu_name and "RTX" in capability.gpu_name.upper():
+                raise RuntimeError(f"RTX GPU DETECTED BUT OPTIX RAY TRACING IS UNAVAILABLE: {self.backend_reason}") from exc
             self.backend_name = "OPENGL_RASTER"
             return None
 

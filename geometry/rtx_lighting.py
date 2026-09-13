@@ -46,12 +46,14 @@ def detect_rtx_optix() -> RTXCapability:
     # to avoid falsely advertising RT cores on a GTX 16-series card.
     if not re.search(r"\bRTX\b", gpu_name, re.IGNORECASE):
         return RTXCapability(False, f"GPU has no RTX hardware: {gpu_name}", gpu_name)
-    module_name = os.environ.get("P123_OPTIX_MODULE", "_p123_optix")
     try:
-        importlib.import_module(module_name)
+        import cupy  # noqa: F401
+        import optix  # noqa: F401
+        from .optix_relighting import _include_dir
+        _include_dir()
     except Exception as exc:  # noqa: BLE001
-        return RTXCapability(False, f"OptiX native module unavailable ({module_name}): {exc}", gpu_name)
-    return RTXCapability(True, "OptiX native module available", gpu_name)
+        return RTXCapability(False, f"OptiX Python/headers unavailable: {exc}", gpu_name)
+    return RTXCapability(True, "Youssef OptixShadowRenderer available", gpu_name)
 
 
 def create_optix_renderer(quality: str = "balanced") -> RelightBackend:
@@ -59,12 +61,8 @@ def create_optix_renderer(quality: str = "balanced") -> RelightBackend:
     capability = detect_rtx_optix()
     if not capability.available:
         raise RuntimeError(capability.reason)
-    module_name = os.environ.get("P123_OPTIX_MODULE", "_p123_optix")
-    module = importlib.import_module(module_name)
-    factory = getattr(module, "create_renderer", None)
-    if not callable(factory):
-        raise RuntimeError(f"{module_name} does not export create_renderer")
-    renderer = factory(str(quality))
+    from .optix_relighting import OptixShadowRenderer
+    renderer = OptixShadowRenderer()
     renderer.backend_name = "RTX_OPTIX"
     return renderer
 

@@ -1,6 +1,7 @@
 import numpy as np
 from dataclasses import replace
 import time
+import pytest
 import p123.views.relight as relight_view
 
 from geometry.backproject import DepthScaleMode
@@ -376,7 +377,8 @@ def test_non_rtx_backend_detection_and_forced_modes():
     assert raster._ensure_rtx() is None
     assert raster.backend_name == "UNINITIALIZED"
     strict = RelightRenderer(use_gpu=False, backend="rtx")
-    assert strict._ensure_rtx() is None
+    with pytest.raises(RuntimeError):
+        strict._ensure_rtx()
     assert strict.backend_name == "RTX_UNAVAILABLE"
     raster.close()
     strict.close()
