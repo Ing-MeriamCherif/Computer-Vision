@@ -111,6 +111,14 @@ def test_sidebar_hit_testing():
     assert common.hit_test_navigation(50, 10, size) is None
 
 
+def test_camera_source_toggle_hit_testing():
+    size = (1920, 1080)
+    x, y, w, h = common.source_toggle_rect(size)
+    assert common.hit_test_source_toggle(x + 10, y + h // 2, size) == "webcam"
+    assert common.hit_test_source_toggle(x + w - 10, y + h // 2, size) == "phone"
+    assert common.hit_test_source_toggle(x, y + h + 10, size) is None
+
+
 def test_all_six_views_render_valid_rgb_canvas():
     snap = make_test_snapshot(has_frame=True, has_hands=True)
     for mode in range(1, 7):

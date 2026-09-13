@@ -444,33 +444,20 @@ class P123LiveRuntime:
                 continue
 
     def _xyz_loop(self) -> None:
-        last_key: tuple[int | str | None, int | str | None] = (None, None)
+        last_hand_id: int | str | None = None
         while self._running:
             with self._state_lock:
-                # Prefer the fast native CUDA geometry state. The full CPU
-                # temporal state is retained for the contract but is too old
-                # for interactive XYZ on this hardware.
-                geometry, hands = self._fast_geometry or self._geometry, self._hands
-            if geometry is None or hands is None:
+                hands = self._hands
+            if hands is None:
                 time.sleep(0.01)
                 continue
-            key = (geometry.source_frame_id, hands.source_frame_id)
-            if key == last_key:
+            if hands.source_frame_id == last_hand_id:
                 time.sleep(0.01)
                 continue
-            last_key = key
-            # Keep physical freshness tied to capture time. Completion age is
-            # reported separately so a slow worker cannot hide stale frames.
+            last_hand_id = hands.source_frame_id
             now = time.monotonic()
-            age_ms = max(0.0, (now - geometry.timestamp) * 1000.0)
-            completion_age_ms = max(0.0, (now - (geometry.completed_timestamp or geometry.timestamp)) * 1000.0)
-            depth_hz = self._depth_times and _rate(self._depth_times) or 8.0
-            freshness_limit = min(self.max_state_age_ms, max(180.0, 1.75 * (1000.0 / max(depth_hz, 1.0))))
-            if age_ms > freshness_limit:
-                self._xyz = ()
-                for stale_id in tuple(self._xyz_smooth):
-                    self._xyz_smooth.pop(stale_id, None)
-                continue
+            age_ms = max(0.0, (now - hands.timestamp) * 1000.0)
+            completion_age_ms = 0.0
             values: list[HandXYZ] = []
             for hand in hands.hands:
                 # XYZ intentionally does not recalculate/sample depth. The
@@ -481,7 +468,7 @@ class P123LiveRuntime:
                 reliability = 1.0 if size_ok else 0.5
                 z = size_z if size_ok else 0.0
                 if z > 0:
-                    raw_xyz, _ = _talel_hand_xyz(geometry.camera, hand.palm_uv, hand.palm_width_px)
+                    raw_xyz, _ = _talel_hand_xyz(self.camera, hand.palm_uv, hand.palm_width_px)
                 else:
                     raw_xyz = None
                 if raw_xyz is None:

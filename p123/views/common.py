@@ -213,6 +213,21 @@ def hit_test_navigation(x: int, y: int, display_size: tuple[int, int]) -> int | 
     return None
 
 
+def source_toggle_rect(display_size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """Return the clickable Webcam/Phone segmented-control bounds."""
+    layout = compute_layout(display_size)
+    h = 28 if layout["is_fhd"] else 24
+    return (190 if layout["is_fhd"] else 165, (layout["header_h"] - h) // 2, 190 if layout["is_fhd"] else 160, h)
+
+
+def hit_test_source_toggle(x: int, y: int, display_size: tuple[int, int]) -> str | None:
+    """Return the selected camera source when its header segment is clicked."""
+    rx, ry, rw, rh = source_toggle_rect(display_size)
+    if not (rx <= x <= rx + rw and ry <= y <= ry + rh):
+        return None
+    return "webcam" if x < rx + rw // 2 else "phone"
+
+
 # ============================================================================
 # Header Telemetry Bar
 # ============================================================================
@@ -222,6 +237,7 @@ def draw_header(
     snapshot: Any,
     layout: dict[str, Any],
     display_fps: float | None = None,
+    camera_source: str = "webcam",
 ) -> None:
     """Draw sleek top live-status header with camera, display, depth, and hardware telemetry."""
     w = layout["w"]
@@ -249,6 +265,19 @@ def draw_header(
         padding_x=10 if is_fhd else 8,
         padding_y=4 if is_fhd else 3,
     )
+
+    # Center-left: direct physical source selector.
+    sx, sy, sw, sh = source_toggle_rect((w, layout["h"]))
+    segment_w = sw // 2
+    for index, (key, label) in enumerate((("webcam", "WEBCAM"), ("phone", "PHONE"))):
+        active = camera_source == key
+        draw_rounded_rect(
+            canvas, sx + index * segment_w, sy, segment_w, sh, sh // 2,
+            fill_color=COLOR_CONTAINER_ACTIVE if active else COLOR_CONTAINER,
+            border_color=COLOR_BORDER_ACTIVE if active else COLOR_BORDER_SUBTLE,
+        )
+        text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.34, 1)[0]
+        cv2.putText(canvas, label, (sx + index * segment_w + (segment_w - text_size[0]) // 2, sy + (sh + text_size[1]) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.34, COLOR_TEXT_PRIMARY if active else COLOR_TEXT_SECONDARY, 1, cv2.LINE_AA)
 
     # Right: Telemetry chips
     metrics = snapshot.metrics if snapshot is not None else None
@@ -632,6 +661,7 @@ def finish(
     display_size: tuple[int, int] | None = None,
     display_fps: float | None = None,
     show_debug: bool = False,
+    camera_source: str = "webcam",
 ) -> np.ndarray:
     """Compose the modern Google Material 3 UI layout for the selected view."""
     # Determine target canvas size
@@ -737,7 +767,7 @@ def finish(
     draw_viewport_hud(canvas, vx, vy, vw, vh, title, mode, snapshot, waiting, is_fhd=is_fhd)
 
     # Draw Header & Sidebar
-    draw_header(canvas, snapshot, layout, display_fps=display_fps)
+    draw_header(canvas, snapshot, layout, display_fps=display_fps, camera_source=camera_source)
     draw_sidebar(canvas, mode, layout)
 
     # Debug HUD Overlay if enabled

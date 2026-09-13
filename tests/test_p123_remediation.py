@@ -213,3 +213,34 @@ def test_talel_xyz_depth_proxy_stays_in_metric_working_volume():
     assert (fallback, estimated) == (0.50, False)
     xyz, estimated = _talel_hand_xyz(CameraModel(640, 480, 525, 525, 320, 240), (320, 240), 45)
     assert estimated is True and np.allclose(xyz[:2], 0.0, atol=1e-6) and 0.9 < xyz[2] < 1.1
+
+
+def test_xyz_worker_tracks_hands_without_waiting_for_depth_geometry():
+    import threading
+    from collections import deque
+    from geometry import CameraModel
+    from geometry.hand_control import GestureState, TrackedHand
+    from geometry.p123_live_runtime import P123LiveRuntime
+
+    runtime = P123LiveRuntime.__new__(P123LiveRuntime)
+    runtime._running = True
+    runtime._state_lock = threading.Lock()
+    runtime._hands = GestureState(
+        timestamp=time.monotonic(), source_frame_id=7,
+        hands=(TrackedHand(0, None, (320.0, 240.0), 0.95, palm_width_px=45.0),),
+        backend="test", tracker_ms=1.0,
+    )
+    runtime.camera = CameraModel(640, 480, 525, 525, 320, 240)
+    runtime._xyz = ()
+    runtime._xyz_smooth = {}
+    runtime._xyz_times = deque(maxlen=8)
+    runtime._xyz_ages = deque(maxlen=8)
+    runtime._xyz_completion_ages = deque(maxlen=8)
+    worker = threading.Thread(target=runtime._xyz_loop)
+    worker.start()
+    time.sleep(0.05)
+    runtime._running = False
+    worker.join(timeout=1.0)
+
+    assert runtime._xyz and runtime._xyz[0].xyz_camera is not None
+    assert runtime._xyz[0].source_frame_id == 7

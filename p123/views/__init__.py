@@ -24,6 +24,7 @@ def render(
     display_size: tuple[int, int] | None = None,
     display_fps: float | None = None,
     show_debug: bool = False,
+    camera_source: str = "webcam",
 ) -> np.ndarray:
     """Render exactly one latest snapshot through the selected view module."""
     view = _VIEWS.get(int(mode), rgb)
@@ -37,6 +38,7 @@ def render(
         display_size=display_size,
         display_fps=display_fps,
         show_debug=show_debug,
+        camera_source=camera_source,
     )
 
 

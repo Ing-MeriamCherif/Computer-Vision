@@ -10,7 +10,7 @@ import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
 from p123.views import render as _panel
-from p123.views.common import hit_test_navigation
+from p123.views.common import hit_test_navigation, hit_test_source_toggle
 
 
 def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
@@ -47,6 +47,8 @@ def _parse_display_size(value: str, camera_size: tuple[int, int]) -> tuple[int, 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app (Material 3 UI)")
     parser.add_argument("--camera", default="/dev/video0")
+    parser.add_argument("--webcam-camera", default="/dev/video0", help="Webcam device used by the in-app source toggle")
+    parser.add_argument("--phone-camera", default="/dev/video2", help="Phone device used by the in-app source toggle")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -66,31 +68,43 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    try:
-        cam_str = str(args.camera).strip()
-        if cam_str.isdigit():
-            camera = int(cam_str)
-        elif cam_str.startswith("/dev/video") and cam_str[10:].isdigit():
-            camera = int(cam_str[10:])
-        else:
-            camera = args.camera
-        depth_size = _parse_depth_size(args.depth_size, (args.height, args.width))
-        display_size = _parse_display_size(args.display_size, (args.width, args.height))
+    selected_source = "phone" if str(args.camera) == str(args.phone_camera) else "webcam"
 
-        runtime = P123LiveRuntime(
-            camera_device=camera,
-            width=args.width,
-            height=args.height,
+    def source_profile(source: str) -> tuple[str, int, int]:
+        if source == "phone":
+            return str(args.phone_camera), 1920, 1080
+        return str(args.webcam_camera), 640, 480
+
+    def make_runtime(source: str, depth_provider=None) -> P123LiveRuntime:
+        camera_name, source_width, source_height = source_profile(source)
+        cam_str = camera_name.strip()
+        if cam_str.isdigit():
+            camera_device = int(cam_str)
+        elif cam_str.startswith("/dev/video") and cam_str[10:].isdigit():
+            camera_device = int(cam_str[10:])
+        else:
+            camera_device = camera_name
+        source_depth_size = _parse_depth_size(args.depth_size, (source_height, source_width))
+        result = P123LiveRuntime(
+            camera_device=camera_device,
+            width=source_width,
+            height=source_height,
             fps=args.fps,
-            depth_size=depth_size,
+            depth_provider=depth_provider,
+            depth_size=source_depth_size,
             depth_backend=args.depth_backend,
             use_fp16=args.fp16,
             hand_backend=args.hand_backend,
             full_temporal=args.full_temporal,
             mirror=args.mirror,
         )
-        runtime.camera_worker.requested_fourcc = args.fourcc.upper()
-        runtime.start()
+        result.camera_worker.requested_fourcc = args.fourcc.upper()
+        result.start()
+        return result
+
+    try:
+        display_size = _parse_display_size(args.display_size, (args.width, args.height))
+        runtime = make_runtime(selected_source)
     except Exception as exc:  # noqa: BLE001
         print(f"P123 STARTUP FAILED: {type(exc).__name__}: {exc}")
         return 1
@@ -98,7 +112,8 @@ def main() -> int:
     print("============================================================")
     print("  NRW P123 LIVE DIAGNOSTICS — MATERIAL 3 INTERFACE")
     print("============================================================")
-    print(f"  Physical Camera:   {args.camera} ({args.width}x{args.height} @ {args.fps} FPS)")
+    active_camera, active_width, active_height = source_profile(selected_source)
+    print(f"  Physical Camera:   {active_camera} ({active_width}x{active_height} @ {args.fps} FPS)")
     print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
     print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
     print(f"  Depth Runtime:     {getattr(runtime.depth_provider, 'backend_name', 'unknown')}")
@@ -111,7 +126,7 @@ def main() -> int:
     print("============================================================")
 
     mode = 1
-    ui_state = {"mode": mode, "show_debug": False}
+    ui_state = {"mode": mode, "show_debug": False, "source": selected_source, "requested_source": None}
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics (Material 3)"
     frame_times: deque[float] = deque(maxlen=30)
@@ -129,10 +144,24 @@ def main() -> int:
                     hit = hit_test_navigation(x, y, display_size)
                     if hit is not None:
                         state["mode"] = hit
+                    source = hit_test_source_toggle(x, y, display_size)
+                    if source is not None and source != state["source"]:
+                        state["requested_source"] = source
 
             cv2.setMouseCallback(window, on_mouse, ui_state)
 
         while args.duration is None or time.monotonic() - started < args.duration:
+            requested_source = ui_state.pop("requested_source", None)
+            if requested_source is not None and requested_source != selected_source:
+                shared_depth = runtime.depth_provider
+                runtime.stop()
+                try:
+                    runtime = make_runtime(requested_source, depth_provider=shared_depth)
+                    selected_source = requested_source
+                    ui_state["source"] = selected_source
+                except Exception as exc:  # noqa: BLE001
+                    print(f"CAMERA SWITCH FAILED ({requested_source}): {type(exc).__name__}: {exc}")
+                    runtime = make_runtime(selected_source, depth_provider=shared_depth)
             now = time.monotonic()
             frame_times.append(now)
             display_fps = (len(frame_times) - 1) / (frame_times[-1] - frame_times[0]) if len(frame_times) > 1 else None
@@ -146,6 +175,7 @@ def main() -> int:
                     display_size,
                     display_fps=display_fps,
                     show_debug=ui_state.get("show_debug", False),
+                    camera_source=selected_source,
                 )
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
@@ -157,6 +187,8 @@ def main() -> int:
                     ui_state["mode"] = key - ord("0")
                 elif key in (ord("d"), ord("D")):
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
+                elif key in (ord("c"), ord("C")):
+                    ui_state["requested_source"] = "phone" if selected_source == "webcam" else "webcam"
                 elif key in (ord("f"), ord("F")):
                     is_fullscreen = not is_fullscreen
                     prop = cv2.WINDOW_FULLSCREEN if is_fullscreen else cv2.WINDOW_NORMAL
