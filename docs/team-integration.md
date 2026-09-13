@@ -93,9 +93,11 @@ Carries: `depth`, `positions_3d` (H×W×3 camera-space), `normals` (H×W×3), `c
 
 ### `LightState`
 
-Produced by `light_from_palm(hand, geom)`.
-Carries: `position_camera` (3-vector metres), `intensity`, `color_rgb`, `confidence`, `source_hand`, `light_id`.
-**No double attenuation**: `shade_geometry()` computes attenuation once from `position_camera` to surface.
+For P123 Mode 7, adapted from fresh `HandXYZ.xyz_camera` (palm-width metric-Z
+proxy plus camera intrinsics), without sampling palm scene depth. The legacy
+`light_from_palm(hand, geom)` remains available to the native CPU/reference path.
+Carries: `position_camera` (3-vector metres), `intensity`, `color_rgb`, `confidence`, `source_hand`, `light_id`, and the separate range/source/orb radii.
+The GPU renderer and CPU reference both attenuate from `position_camera` to the surface.
 
 ### `GestureState`
 

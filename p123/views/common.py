@@ -46,6 +46,7 @@ NAV_ITEMS: tuple[tuple[int, str, str], ...] = (
     (4, "Temporal Conf", "Frame Stability"),
     (5, "Hand Tracking", "Talel Landmarks"),
     (6, "XYZ Contract", "Metric 3D (m)"),
+    (7, "Hand Relight", "Live 3D Light"),
 )
 
 
@@ -433,7 +434,7 @@ def draw_sidebar(
     card_w = sidebar_w - (20 if is_fhd else 16)
     draw_rounded_rect(canvas, card_x, card_y, card_w, card_h, 8 if is_fhd else 6, fill_color=COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
     hint_font = 0.34 if is_fhd else 0.30
-    cv2.putText(canvas, "[1-6] Mode   [D] HUD", (card_x + 8, card_y + (18 if is_fhd else 15)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "[1-7] Mode   [D] HUD", (card_x + 8, card_y + (18 if is_fhd else 15)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
     cv2.putText(canvas, "[F] Fullscr  [Q] Exit", (card_x + 8, card_y + (36 if is_fhd else 29)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
 
 
@@ -595,6 +596,18 @@ def draw_viewport_hud(
     elif mode == 6:
         desc = "P123 XYZ Contract: Camera-relative metric coordinates (X right, Y down, Z forward in meters)"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
+    elif mode == 7:
+        from . import relight
+
+        renderer = relight._renderer
+        stats = renderer.last_lighting_stats
+        backend = "IDLE" if stats.get("renderer") == "IDLE" else "GPU" if stats.get("renderer") == "GPU" else "CPU FALLBACK" if stats.get("renderer") == "CPU_FALLBACK" else "GPU ..."
+        xyz_age = renderer.last_xyz_source_age_ms
+        xyz_text = "XYZ --" if xyz_age is None else f"XYZ {xyz_age:.0f}ms"
+        shadow = stats.get("shadow_quality", "--")
+        volume = stats.get("volumetric_quality", "--")
+        desc = f"{backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}"
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 
 def draw_debug_overlay(
@@ -606,6 +619,7 @@ def draw_debug_overlay(
     snapshot: Any,
     display_fps: float | None = None,
     is_fhd: bool = False,
+    mode: int = 0,
 ) -> None:
     """Floating telemetry card toggled with 'D'."""
     metrics = snapshot.metrics if snapshot is not None else None
@@ -613,7 +627,7 @@ def draw_debug_overlay(
         return
 
     card_w = min(560, vw - 32) if is_fhd else min(460, vw - 24)
-    card_h = 190 if is_fhd else 160
+    card_h = (232 if is_fhd else 196) if mode == 7 else (190 if is_fhd else 160)
     cx = vx + (16 if is_fhd else 12)
     cy = vy + (54 if is_fhd else 44)
 
@@ -641,6 +655,15 @@ def draw_debug_overlay(
         f"Hand Tracking:   {metrics.hand_hz or 0:.1f} Hz | Latency p95: {metrics.hand_age_p95_ms or 0:.1f} ms",
         f"XYZ Projection:  {metrics.xyz_hz or 0:.1f} Hz | Latency p95: {metrics.xyz_age_p95_ms or 0:.1f} ms",
     ]
+    if mode == 7:
+        from . import relight
+
+        renderer = relight._renderer
+        stats = renderer.last_lighting_stats
+        lines.extend([
+            f"Relight: {stats.get('renderer', 'GPU ...')} | {renderer.last_light_count} lights | {renderer.last_render_ms:.2f} ms | {renderer.lighting_quality}",
+            f"Shadows {stats.get('shadow_quality', '--')} | Volumes {stats.get('volumetric_quality', '--')} | Geometry source age {renderer.last_geometry_age_ms or 0:.1f} ms | XYZ source age {renderer.last_xyz_source_age_ms or 0:.1f} ms",
+        ])
     line_font = 0.36 if is_fhd else 0.32
     step_y = 20 if is_fhd else 16
     start_y = 52 if is_fhd else 40
@@ -772,6 +795,6 @@ def finish(
 
     # Debug HUD Overlay if enabled
     if show_debug:
-        draw_debug_overlay(canvas, vx, vy, vw, vh, snapshot, display_fps=display_fps, is_fhd=is_fhd)
+        draw_debug_overlay(canvas, vx, vy, vw, vh, snapshot, display_fps=display_fps, is_fhd=is_fhd, mode=mode)
 
     return canvas

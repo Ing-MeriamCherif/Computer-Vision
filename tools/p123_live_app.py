@@ -9,8 +9,10 @@ from collections import deque
 import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
+from p123.views import relight as relight_view
 from p123.views import render as _panel
 from p123.views.common import hit_test_navigation, hit_test_source_toggle
+from p123.views.relight import configure as configure_relight
 
 
 def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
@@ -44,9 +46,25 @@ def _parse_display_size(value: str, camera_size: tuple[int, int]) -> tuple[int, 
     return size, size
 
 
+def _camera_key(value: str | int) -> tuple[str, int | str]:
+    text = str(value).strip()
+    if text.isdigit():
+        return "device", int(text)
+    if text.startswith("/dev/video") and text[10:].isdigit():
+        return "device", int(text[10:])
+    return "name", text.casefold()
+
+
+def _source_profile(args: argparse.Namespace, source: str, *, legacy_camera_is_phone: bool) -> tuple[str, int, int]:
+    if source == "phone":
+        return str(args.phone_camera), 1920, 1080
+    camera = args.camera if args.camera is not None and not legacy_camera_is_phone else args.webcam_camera
+    return str(camera), args.width, args.height
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="P123 physical-camera asynchronous diagnostic app (Material 3 UI)")
-    parser.add_argument("--camera", default="/dev/video0")
+    parser.add_argument("--camera", default=None, help="Legacy initial camera selector; use --webcam-camera/--phone-camera to configure both sources")
     parser.add_argument("--webcam-camera", default="/dev/video0", help="Webcam device used by the in-app source toggle")
     parser.add_argument("--phone-camera", default="/dev/video2", help="Phone device used by the in-app source toggle")
     parser.add_argument("--width", type=int, default=640)
@@ -57,6 +75,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-size", default="336x448", help="Local production input HxW (default: 336x448); use 'native' explicitly, or a square side for teammate providers")
     parser.add_argument("--display-size", default="1920x1080", help="UI display resolution (default: 1920x1080 FHD; or 'native', 'auto', WxH)")
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
+    parser.add_argument("--mode", type=int, choices=range(1, 8), default=1, help="Starting view: 1 RGB through 7 hand relight")
+    parser.add_argument("--lighting-quality", choices=["low", "balanced", "high"], default="balanced")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=True, help="Mirror the live camera left-to-right (default: True)")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
@@ -68,15 +88,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    selected_source = "phone" if str(args.camera) == str(args.phone_camera) else "webcam"
-
-    def source_profile(source: str) -> tuple[str, int, int]:
-        if source == "phone":
-            return str(args.phone_camera), 1920, 1080
-        return str(args.webcam_camera), 640, 480
+    configure_relight(args.lighting_quality)
+    legacy_camera_is_phone = args.camera is not None and _camera_key(args.camera) == _camera_key(args.phone_camera)
+    selected_source = "phone" if legacy_camera_is_phone else "webcam"
 
     def make_runtime(source: str, depth_provider=None) -> P123LiveRuntime:
-        camera_name, source_width, source_height = source_profile(source)
+        camera_name, source_width, source_height = _source_profile(
+            args, source, legacy_camera_is_phone=legacy_camera_is_phone
+        )
         cam_str = camera_name.strip()
         if cam_str.isdigit():
             camera_device = int(cam_str)
@@ -103,7 +122,10 @@ def main() -> int:
         return result
 
     try:
-        display_size = _parse_display_size(args.display_size, (args.width, args.height))
+        _, initial_width, initial_height = _source_profile(
+            args, selected_source, legacy_camera_is_phone=legacy_camera_is_phone
+        )
+        display_size = _parse_display_size(args.display_size, (initial_width, initial_height))
         runtime = make_runtime(selected_source)
     except Exception as exc:  # noqa: BLE001
         print(f"P123 STARTUP FAILED: {type(exc).__name__}: {exc}")
@@ -112,7 +134,9 @@ def main() -> int:
     print("============================================================")
     print("  NRW P123 LIVE DIAGNOSTICS — MATERIAL 3 INTERFACE")
     print("============================================================")
-    active_camera, active_width, active_height = source_profile(selected_source)
+    active_camera, active_width, active_height = _source_profile(
+        args, selected_source, legacy_camera_is_phone=legacy_camera_is_phone
+    )
     print(f"  Physical Camera:   {active_camera} ({active_width}x{active_height} @ {args.fps} FPS)")
     print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
     print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
@@ -121,15 +145,18 @@ def main() -> int:
     normal_backend = getattr(runtime, "_normal_backend", None)
     normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"
     print(f"  CUDA Devices:      depth={depth_device or 'unknown'} | normals={normal_device}")
-    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ")
+    print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ  [7] Relight")
+    print(f"  Relight Quality:   {args.lighting_quality}")
     print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
     print("============================================================")
 
-    mode = 1
+    mode = int(args.mode)
     ui_state = {"mode": mode, "show_debug": False, "source": selected_source, "requested_source": None}
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics (Material 3)"
     frame_times: deque[float] = deque(maxlen=30)
+    display_fps: float | None = None
+    last_relight_state: tuple[str, int] | None = None
     is_fullscreen = bool(args.fullscreen)
 
     try:
@@ -159,6 +186,7 @@ def main() -> int:
                     runtime = make_runtime(requested_source, depth_provider=shared_depth)
                     selected_source = requested_source
                     ui_state["source"] = selected_source
+                    relight_view._renderer.reset_for_source_change()
                 except Exception as exc:  # noqa: BLE001
                     print(f"CAMERA SWITCH FAILED ({requested_source}): {type(exc).__name__}: {exc}")
                     runtime = make_runtime(selected_source, depth_provider=shared_depth)
@@ -177,13 +205,25 @@ def main() -> int:
                     show_debug=ui_state.get("show_debug", False),
                     camera_source=selected_source,
                 )
+                if mode == 7:
+                    relight = relight_view._renderer
+                    stats = relight.last_lighting_stats
+                    state = (str(stats.get("renderer", "WAITING")), int(relight.last_light_count))
+                    if state != last_relight_state:
+                        print(
+                            f"Mode 7 state: renderer={state[0]} lights={state[1]} "
+                            f"xyz_age_ms={relight.last_xyz_source_age_ms} "
+                            f"gpu_render_ms={stats.get('gpu_render_ms', stats.get('lighting_ms'))}",
+                            flush=True,
+                        )
+                        last_relight_state = state
                 if view is not None:
                     cv2.imshow(window, cv2.cvtColor(view, cv2.COLOR_RGB2BGR))
 
                 key = cv2.waitKey(1) & 0xFF
                 if key in (ord("q"), ord("Q"), 27):
                     break
-                if ord("1") <= key <= ord("6"):
+                if ord("1") <= key <= ord("7"):
                     ui_state["mode"] = key - ord("0")
                 elif key in (ord("d"), ord("D")):
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
@@ -201,7 +241,26 @@ def main() -> int:
         final = runtime.snapshot()
         runtime.stop()
         cv2.destroyAllWindows()
-        print(f"Session summary: frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} geometry_hz={final.metrics.geometry_hz} hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz}")
+        relight_view._renderer.close()
+        print(
+            "Session summary: "
+            f"frames={final.metrics.captured} capture_hz={final.metrics.capture_hz} "
+            f"depth_hz={final.metrics.depth_hz} normals_hz={final.metrics.normal_hz} "
+            f"hand_hz={final.metrics.hand_hz} xyz_hz={final.metrics.xyz_hz} "
+            f"display_fps={display_fps} geometry_age_p95_ms={final.metrics.geometry_age_p95_ms} "
+            f"hand_age_p95_ms={final.metrics.hand_age_p95_ms} xyz_age_p95_ms={final.metrics.xyz_age_p95_ms}"
+        )
+        relight_stats = relight_view._renderer.last_lighting_stats
+        if relight_stats:
+            print(
+                "Relight summary: "
+                f"renderer={relight_stats.get('renderer')} "
+                f"quality={relight_stats.get('quality')} lights={relight_stats.get('lights')} "
+                f"gpu_render_ms={relight_stats.get('gpu_render_ms', relight_stats.get('lighting_ms'))} "
+                f"shadows={relight_stats.get('shadow_quality')} volumes={relight_stats.get('volumetric_quality')} "
+                f"geometry_age_ms={relight_view._renderer.last_geometry_age_ms} "
+                f"xyz_source_age_ms={relight_view._renderer.last_xyz_source_age_ms}"
+            )
     return 0
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from argparse import Namespace
+
 import numpy as np
 
 from geometry.hand_control import GestureState, TrackedHand
@@ -9,7 +11,7 @@ from geometry.p123_contract import HandXYZ
 from geometry.p123_live_runtime import P123Metrics, P123Snapshot
 from p123 import views
 from p123.views import common
-from tools.p123_live_app import _parse_display_size
+from tools.p123_live_app import _camera_key, _parse_display_size, _source_profile
 
 
 def make_test_snapshot(
@@ -95,7 +97,7 @@ def test_layout_computation_across_resolutions():
             assert 140 <= layout["sidebar_w"] <= 220
         assert layout["vw"] > 0
         assert layout["vh"] > 0
-        assert len(layout["buttons_rects"]) == 6
+        assert len(layout["buttons_rects"]) == 7
 
 
 def test_sidebar_hit_testing():
@@ -119,9 +121,23 @@ def test_camera_source_toggle_hit_testing():
     assert common.hit_test_source_toggle(x, y + h + 10, size) is None
 
 
-def test_all_six_views_render_valid_rgb_canvas():
+def test_camera_source_profiles_keep_device_selection_configurable():
+    args = Namespace(
+        camera="1",
+        webcam_camera="0",
+        phone_camera="2",
+        width=640,
+        height=480,
+    )
+    assert _source_profile(args, "webcam", legacy_camera_is_phone=False) == ("1", 640, 480)
+    assert _source_profile(args, "phone", legacy_camera_is_phone=False) == ("2", 1920, 1080)
+    assert _source_profile(args, "webcam", legacy_camera_is_phone=True) == ("0", 640, 480)
+    assert _camera_key("2") == _camera_key("/dev/video2")
+
+
+def test_all_seven_views_render_valid_rgb_canvas():
     snap = make_test_snapshot(has_frame=True, has_hands=True)
-    for mode in range(1, 7):
+    for mode in range(1, 8):
         canvas = views.render(snap, mode, (960, 600), display_fps=30.0)
         assert canvas is not None
         assert canvas.shape == (600, 960, 3)

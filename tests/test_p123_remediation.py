@@ -180,6 +180,19 @@ def test_p123_live_cli_defaults_to_local_production(monkeypatch):
     assert args.depth_size == "336x448"
 
 
+def test_explicit_calibration_validates_dimensions_before_mirror_adjustment():
+    import pytest
+    from geometry.camera import CameraModel
+    from geometry.p123_live_runtime import _camera_for_capture
+
+    calibration = CameraModel(640, 480, 500.0, 501.0, 280.0, 240.0)
+    mirrored = _camera_for_capture(calibration, 640, 480, mirror=True)
+    assert mirrored.cx == 359.0
+    assert mirrored.cy == calibration.cy
+    with pytest.raises(RuntimeError, match="mismatches negotiated camera"):
+        _camera_for_capture(calibration, 1280, 720, mirror=True)
+
+
 def test_p123_views_are_separate_display_modules():
     import importlib
 
@@ -225,6 +238,7 @@ def test_xyz_worker_tracks_hands_without_waiting_for_depth_geometry():
     runtime = P123LiveRuntime.__new__(P123LiveRuntime)
     runtime._running = True
     runtime._state_lock = threading.Lock()
+    runtime.max_state_age_ms = 200.0
     runtime._hands = GestureState(
         timestamp=time.monotonic(), source_frame_id=7,
         hands=(TrackedHand(0, None, (320.0, 240.0), 0.95, palm_width_px=45.0),),
@@ -233,6 +247,7 @@ def test_xyz_worker_tracks_hands_without_waiting_for_depth_geometry():
     runtime.camera = CameraModel(640, 480, 525, 525, 320, 240)
     runtime._xyz = ()
     runtime._xyz_smooth = {}
+    runtime._hand_times = deque(maxlen=8)
     runtime._xyz_times = deque(maxlen=8)
     runtime._xyz_ages = deque(maxlen=8)
     runtime._xyz_completion_ages = deque(maxlen=8)
@@ -244,3 +259,36 @@ def test_xyz_worker_tracks_hands_without_waiting_for_depth_geometry():
 
     assert runtime._xyz and runtime._xyz[0].xyz_camera is not None
     assert runtime._xyz[0].source_frame_id == 7
+
+
+def test_xyz_worker_never_reuses_a_previous_position_when_palm_size_is_invalid():
+    import threading
+    from collections import deque
+    from geometry import CameraModel
+    from geometry.hand_control import GestureState, TrackedHand
+    from geometry.p123_live_runtime import P123LiveRuntime
+
+    runtime = P123LiveRuntime.__new__(P123LiveRuntime)
+    runtime._running = True
+    runtime._state_lock = threading.Lock()
+    runtime.max_state_age_ms = 200.0
+    runtime._hands = GestureState(
+        timestamp=time.monotonic(), source_frame_id=8,
+        hands=(TrackedHand(0, None, (320.0, 240.0), 0.95, palm_width_px=None),),
+        backend="test", tracker_ms=1.0,
+    )
+    runtime.camera = CameraModel(640, 480, 525, 525, 320, 240)
+    runtime._xyz = ()
+    runtime._xyz_smooth = {0: np.asarray((0.0, 0.0, 1.0), dtype=np.float32)}
+    runtime._hand_times = deque(maxlen=8)
+    runtime._xyz_times = deque(maxlen=8)
+    runtime._xyz_ages = deque(maxlen=8)
+    runtime._xyz_completion_ages = deque(maxlen=8)
+    worker = threading.Thread(target=runtime._xyz_loop)
+    worker.start()
+    time.sleep(0.05)
+    runtime._running = False
+    worker.join(timeout=1.0)
+
+    assert runtime._xyz and runtime._xyz[0].xyz_camera is None
+    assert runtime._xyz_smooth == {}

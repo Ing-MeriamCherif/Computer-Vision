@@ -131,7 +131,7 @@ or tools/p123_live_app.py (OpenCV imshow for diagnostics)
 - **Bypasses**: If temporal smoothing is disabled, raw per-frame geometry passes straight through.
 
 ### Stage P1: Hand Tracking & Hand XYZ
-- **Input**: RGB frame (`uint8`), `GeometryState` (for palm depth sampling), intrinsics [`CameraModel`](file:///home/rami/Computer-Vision-NRW/geometry/camera.py).
+- **Input**: RGB frame (`uint8`) and intrinsics [`CameraModel`](../geometry/camera.py). HandXYZ updates from tracked palm UV and a palm-width metric-Z proxy; it does not wait for geometry or sample depth under the palm.
 - **Output**: Tuple of [`HandXYZ`](file:///home/rami/Computer-Vision-NRW/geometry/p123_contract.py) dataclasses:
   - `hand_id: int` (stable integer ID, 0 or 1)
   - `palm_uv: tuple[float, float]` (2D normalized or pixel UV coordinates)
@@ -142,9 +142,15 @@ or tools/p123_live_app.py (OpenCV imshow for diagnostics)
   - `handedness: str | None` ("Left" or "Right")
 - **Bypasses**: When no hands are visible, `hand_states` is an empty tuple `()`.
 
-### Stage P123 → P4 Boundary: [`P4InputState`](file:///home/rami/Computer-Vision-NRW/geometry/p123_contract.py)
+### Stage P123 → P4 Boundary: [`P4InputState`](../geometry/p123_contract.py)
 - **Role**: Clean isolation boundary. P1/P2/P3 have zero awareness of lighting, shaders, or rendering parameters.
-- **Consumer**: [`shade_geometry()`](file:///home/rami/Computer-Vision-NRW/geometry/lighting.py) in P4 constructs lights from `hand_states` and applies diffuse, specular, shadows, and volumetrics.
+- **Consumer**: P123 Mode 7 adapts fresh `HandXYZ.xyz_camera` records to `LightState`. OpenGL 3.3 performs linear-space diffuse, additive specular, multi-light area-shadow ray marching, and reduced-resolution volumetric ray marching with sample-to-light visibility. [`shade_geometry()`](../geometry/lighting.py) remains the CPU reference/fallback.
+
+The renderer prefers `fast_geometry_state`, falling back to `geometry_state`.
+The projected 3D emitter orb, lighting, shadow rays, and volumetrics use the
+same camera-space `LightState` position. This is screen-space/camera-space ray
+marching over monocular 2.5D geometry, not hardware RTX ray tracing or full
+path tracing.
 
 ---
 

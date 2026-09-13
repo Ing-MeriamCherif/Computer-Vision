@@ -19,6 +19,9 @@ class DepthState:
     valid_mask: np.ndarray | None = None
     confidence: np.ndarray | None = None
     completed_timestamp: float | None = None
+    device_depth: object | None = None
+    device_valid_mask: object | None = None
+    device_confidence: object | None = None
 
     def __post_init__(self) -> None:
         self.depth = np.asarray(self.depth)

@@ -32,15 +32,17 @@ Physical Camera (cv2.VideoCapture)
   (CUDA: normals, confidence)              (stable 2-hand IDs)
         │  GeometryState                           │
         ▼                                          ▼
- TemporalGeometryEngine (optional)     light_from_palm() × N_hands
-  motion / temporal fusion                    │
-        │                                LightState list
-        ▼
- shade_geometry()  ─── render_volumetric_scattering()  (GPU)
-        │
-        ▼
- NativeOpenGLWindow  (GLFW + PyOpenGL)
-  texture upload → full-screen present
+        TemporalGeometryEngine (optional)     HandXYZ worker
+  motion / temporal fusion                 palm-width Z + camera intrinsics
+        │                                        │
+        └────────────── latest geometry ─────────┤
+                                                 ▼
+                              P123 Mode 7: HandXYZ → LightState
+                              OpenGL 3.3 surface/shadow/volume passes
+                              CPU lighting is reference/fallback
+                                                 │
+                                                 ▼
+                              OpenCV Material UI or shared GL texture path
         │
         ▼  [async, 2-10 Hz]
  PersistentMapWorker  (sidecar thread)
@@ -63,6 +65,11 @@ Physical Camera (cv2.VideoCapture)
 | Symbol | Purpose |
 |--------|---------|
 | `NativeOpenGLWindow` | GLFW + PyOpenGL double-buffered window. `render_frame(rgb_u8)` uploads texture and presents. Supports fullscreen toggle (`F`). `is_open` tracks state. |
+
+Mode 7 ray marches soft area-light visibility and sample-to-light volumetric
+occlusion through camera-space depth. It is a screen-space relighter, not RTX
+hardware ray tracing. HandXYZ uses palm size and camera intrinsics, independent
+of the depth worker.
 
 ### `geometry/native_app.py`
 

@@ -150,6 +150,25 @@ def _talel_hand_xyz(camera: CameraModel, palm_uv: tuple[float, float], palm_widt
     return np.asarray(camera.unproject(palm_uv[0], palm_uv[1], z), dtype=np.float32), estimated
 
 
+def _camera_for_capture(calibrated: CameraModel, width: int, height: int, *, mirror: bool) -> CameraModel:
+    """Validate explicit calibration dimensions before adapting mirrored cx."""
+    if (calibrated.width, calibrated.height) != (int(width), int(height)):
+        raise RuntimeError(
+            f"explicit calibration {calibrated.width}x{calibrated.height} mismatches negotiated camera "
+            f"{int(width)}x{int(height)}"
+        )
+    if not mirror:
+        return calibrated
+    return CameraModel(
+        calibrated.width,
+        calibrated.height,
+        calibrated.fx,
+        calibrated.fy,
+        calibrated.width - 1.0 - calibrated.cx,
+        calibrated.cy,
+    )
+
+
 class P123LiveRuntime:
     """Run camera, depth, geometry/temporal, and hands on independent workers."""
 
@@ -258,17 +277,17 @@ class P123LiveRuntime:
                 self.camera_worker.actual_width * 0.82, self.camera_worker.actual_width * 0.82,
                 self.camera_worker.actual_width / 2.0, self.camera_worker.actual_height / 2.0,
             )
-        elif self.mirror:
-            self.camera = CameraModel(
-                self.camera.width, self.camera.height, self.camera.fx, self.camera.fy,
-                self.camera.width - 1.0 - self.camera.cx, self.camera.cy,
-            )
-        elif (self.camera.width, self.camera.height) != (self.camera_worker.actual_width, self.camera_worker.actual_height):
-            self.camera_worker.stop()
-            raise RuntimeError(
-                f"explicit calibration {self.camera.width}x{self.camera.height} mismatches negotiated camera "
-                f"{self.camera_worker.actual_width}x{self.camera_worker.actual_height}"
-            )
+        else:
+            try:
+                self.camera = _camera_for_capture(
+                    self.camera,
+                    self.camera_worker.actual_width,
+                    self.camera_worker.actual_height,
+                    mirror=self.mirror,
+                )
+            except RuntimeError:
+                self.camera_worker.stop()
+                raise
         self._running = True
         targets = [self._dispatch_loop, self._depth_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
         if self.full_temporal:
@@ -457,7 +476,25 @@ class P123LiveRuntime:
             last_hand_id = hands.source_frame_id
             now = time.monotonic()
             age_ms = max(0.0, (now - hands.timestamp) * 1000.0)
-            completion_age_ms = 0.0
+            # Talel XYZ uses palm width and camera intrinsics, not scene depth.
+            # Its physical freshness therefore follows the hand capture. Tying
+            # it to the slower depth worker made valid lights flash briefly and
+            # disappear between geometry completions.
+            completion_age_ms = age_ms
+            hand_hz = self._hand_times and _rate(self._hand_times) or 15.0
+            freshness_limit = min(
+                self.max_state_age_ms,
+                max(200.0, 2.5 * (1000.0 / max(hand_hz, 1.0))),
+            )
+            if age_ms > freshness_limit:
+                self._xyz = ()
+                for stale_id in tuple(self._xyz_smooth):
+                    self._xyz_smooth.pop(stale_id, None)
+                continue
+            visible_ids = {hand.hand_id for hand in hands.hands}
+            for stale_id in tuple(self._xyz_smooth):
+                if stale_id not in visible_ids:
+                    self._xyz_smooth.pop(stale_id, None)
             values: list[HandXYZ] = []
             for hand in hands.hands:
                 # XYZ intentionally does not recalculate/sample depth. The
@@ -472,9 +509,9 @@ class P123LiveRuntime:
                 else:
                     raw_xyz = None
                 if raw_xyz is None:
-                    prior_xyz = self._xyz_smooth.get(hand.hand_id)
-                    xyz = None if prior_xyz is None else tuple(float(v) for v in prior_xyz)
-                    reliability = 0.0 if prior_xyz is None else reliability * 0.5
+                    self._xyz_smooth.pop(hand.hand_id, None)
+                    xyz = None
+                    reliability = 0.0
                 else:
                     prior_xyz = self._xyz_smooth.get(hand.hand_id)
                     motion = float(np.linalg.norm(raw_xyz - prior_xyz)) if prior_xyz is not None else 1.0

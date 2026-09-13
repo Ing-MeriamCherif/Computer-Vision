@@ -1,4 +1,4 @@
-"""Independent live display views for P123 modes 1–6."""
+"""Independent live display views for P123 modes 1–7."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from typing import Any
 
 import numpy as np
 
-from . import common, depth, hands, normals, rgb, temporal, xyz
+from . import common, depth, hands, normals, relight, rgb, temporal, xyz
 
 _VIEWS = {
     1: rgb,
@@ -15,6 +15,7 @@ _VIEWS = {
     4: temporal,
     5: hands,
     6: xyz,
+    7: relight,
 }
 
 

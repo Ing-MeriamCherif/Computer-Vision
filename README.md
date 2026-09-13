@@ -18,16 +18,35 @@ python main.py
 # Specify camera device, quality, fullscreen
 python main.py --camera 0 --quality high --fullscreen
 
-# P123 live diagnostics (Mariem depth + Talel hand XYZ)
+# P123 live diagnostics (depth + hand XYZ)
 PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 
 # All options
 python main.py --help
 ```
 
+The P123 live path defaults to local Depth Anything V2 at `336x448` FP32 with
+latest-only depth handoff and CUDA normals. Mode 7 uses an OpenGL 3.3
+screen-space/camera-space renderer when available and an explicit CPU reference
+fallback otherwise. It is not hardware RTX ray tracing or full path tracing.
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.p123_live_app --camera 0
+```
+
+Launch directly into the hand-held relight view:
+
+```powershell
+.\.venv\Scripts\python.exe -m tools.p123_live_app --webcam-camera 0 --phone-camera 2 --mode 7 --lighting-quality balanced
+```
+
+Use the header selector or `C` to switch WEBCAM/PHONE; device IDs are
+configurable with `--webcam-camera` and `--phone-camera`. Lighting quality can
+be selected with `--lighting-quality low|balanced|high`.
+
 ---
 
-## Display Modes (keys 1–9)
+## Native App Display Modes (keys 1–9)
 
 | Key | Mode | Description |
 |-----|------|-------------|
@@ -40,6 +59,9 @@ python main.py --help
 | `7` | GESTURE | Hand skeleton overlay |
 | `8` | MULTILIGHT | Hand-driven dual lighting (default) |
 | `9` | INFINITY | Persistent 3D surfel map overlay |
+
+The P123 live diagnostics tool has its own navigation: in that app, `7` is
+Hand Relight (Mode 7), not the native app's gesture view.
 
 **Keyboard controls**: `F` fullscreen · `D` HUD · `P` profile · `V` volumetrics · `S` shadows · `H` skeleton · `R` reset map · `Q/ESC` quit
 
@@ -94,8 +116,9 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 │ [4] Temporal │               CENTRAL VIEWPORT (Letterboxed / Aspect-Fit)    │
 │ [5] Hands    │                                                              │
 │ [6] XYZ      │                                                              │
+│ [7] Relight* │                                                              │
 │              │                                                              │
-│ [1-6] Mode   │                                                              │
+│ [1-7] Mode   │                                                              │
 │ [D] HUD      │                                                              │
 │ [F] Fullscr  │  Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue)│
 └──────────────┴──────────────────────────────────────────────────────────────┘
@@ -110,6 +133,7 @@ Organized under [`p123/views/`](p123/views):
 4. **Temporal Confidence** (`p123/views/temporal/`): Scale-invariant temporal stability consistency map.
 5. **Hand Tracking** (`p123/views/hands/`): Talel MediaPipe 21-point skeletal joints, palm tracking, confidence pills, and coasting state.
 6. **XYZ Contract** (`p123/views/xyz/`): Camera-space metric 3D coordinates (m), 3D coordinate legend card, and freshness pill.
+7. **Hand Relight** (`p123/views/relight/`): Full-resolution GPU surface relighting, reduced-resolution volumetrics, and a projected 3D light orb; CPU reference fallback preserves camera detail.
 
 ### Controls & Navigation
 
@@ -141,7 +165,7 @@ The `geometry/` package implements the complete calibrated geometry pipeline:
 | 1 | Calibrated camera model · depth → camera-space reconstruction · coordinate transforms |
 | 2 | Camera-facing surface normals · edge-aware / multi-scale · discontinuity protection · spatial confidence |
 | 3 | Optical flow (DIS/Farneback) · forward/backward consistency · depth-aware temporal warping · temporal fusion |
-| 4 | Hand tracking (MediaPipe) · palm depth fusion · diffuse/specular/shadow shading · hand-driven lights |
+| 4 | Hand tracking (MediaPipe) · palm-width HandXYZ · GPU diffuse/additive-specular/shadow/volume relighting |
 | 5 | PnP-RANSAC pose estimation · bounded voxel surfel map · persistent geometry · async sidecar |
 
 **Depth convention**: forward-Z, median normalized to ~2.0 m, `DepthScaleMode.RELATIVE`.  
@@ -189,3 +213,4 @@ See [`docs/team-integration.md`](docs/team-integration.md) for integration contr
 | [`docs/geometry-phase3.md`](docs/geometry-phase3.md) | Temporal fusion contracts |
 | [`docs/geometry-phase5.md`](docs/geometry-phase5.md) | Persistent geometry, surfel map |
 | [`docs/geometry-performance.md`](docs/geometry-performance.md) | Benchmark guidance |
+| [`docs/gpu-hand-relighting.md`](docs/gpu-hand-relighting.md) | Mode 7 OpenGL install, run, profiles, and presentation paths |

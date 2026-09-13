@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 import time
+import inspect
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,7 @@ from .state import DepthState
 class ColleagueDepthProvider:
     backend_name = "colleague-depth-anything-v2-small"
 
-    def __init__(self, *, device: str = "auto", input_size: int = 518, fp16: bool = True, module_root: str | Path | None = None) -> None:
+    def __init__(self, *, device: str = "auto", input_size: int | tuple[int, int] = 518, fp16: bool = True, metric: bool = False, module_root: str | Path | None = None) -> None:
         root = Path(module_root) if module_root is not None else Path(__file__).resolve().parents[1] / "integrations" / "colleague_depth"
         if str(root) not in sys.path:
             sys.path.insert(0, str(root))
@@ -40,7 +41,12 @@ class ColleagueDepthProvider:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             except Exception:
                 device = "cpu"
-        self._model = DepthModel(device=device, input_size=input_size, fp16=fp16)
+        model_kwargs = {"device": device, "input_size": input_size, "fp16": fp16}
+        if "metric" in inspect.signature(DepthModel).parameters:
+            model_kwargs["metric"] = metric
+        elif metric:
+            raise RuntimeError("the selected legacy depth module does not support metric checkpoints")
+        self._model = DepthModel(**model_kwargs)
         self.last_diagnostics: DepthInferenceDiagnostics | None = None
         self._session_scale: float | None = None
 
@@ -78,9 +84,16 @@ class ColleagueDepthProvider:
         depth_arr = np.asarray(upstream.depth_map, dtype=np.float32)
         valid = upstream.valid_mask if upstream.valid_mask is not None else np.isfinite(depth_arr)
         finite = valid & np.isfinite(depth_arr)
-        target_scale = 2.0 / max(float(np.median(depth_arr[finite])), 1e-6)
-        self._session_scale = target_scale if self._session_scale is None else 0.10 * target_scale + 0.90 * self._session_scale
-        depth_arr = (depth_arr * self._session_scale).astype(np.float32)
+        if upstream.scale_mode == "metric":
+            depth_arr = depth_arr.astype(np.float32)
+        else:
+            target_scale = 2.0 / max(float(np.median(depth_arr[finite])), 1e-6)
+            self._session_scale = target_scale if self._session_scale is None else 0.10 * target_scale + 0.90 * self._session_scale
+            depth_arr = (depth_arr * self._session_scale).astype(np.float32)
+        device_depth = getattr(upstream, "device_depth", None)
+        if device_depth is not None and self._session_scale is not None:
+            device_depth = device_depth * self._session_scale
+        device_valid = getattr(upstream, "device_valid_mask", None)
         min_d = float(np.min(depth_arr[valid])) if valid.any() else float(np.min(depth_arr))
         max_d = float(np.max(depth_arr[valid])) if valid.any() else float(np.max(depth_arr))
         peak_vram = None
@@ -97,7 +110,7 @@ class ColleagueDepthProvider:
             min_d,
             max_d,
             peak_vram,
-            float(self._session_scale),
+            None if self._session_scale is None else float(self._session_scale),
         )
 
         # The upstream branch exposes an all-valid mask, not neural
@@ -117,6 +130,8 @@ class ColleagueDepthProvider:
             upstream.scale_mode,
             valid_mask=valid,
             confidence=np.where(finite, reliability, 0.0).astype(np.float32),
+            device_depth=device_depth,
+            device_valid_mask=device_valid,
         )
 
 
@@ -130,6 +145,6 @@ class MariemDepthProvider(ColleagueDepthProvider):
 
     backend_name = "mariem-main-depth-anything-v2-small"
 
-    def __init__(self, *, device: str = "auto", input_size: int = 420, fp16: bool = True) -> None:
+    def __init__(self, *, device: str = "auto", input_size: int | tuple[int, int] = (420, 560), fp16: bool = True, metric: bool = False) -> None:
         root = Path(__file__).resolve().parents[1] / "depth_module"
-        super().__init__(device=device, input_size=input_size, fp16=fp16, module_root=root)
+        super().__init__(device=device, input_size=input_size, fp16=fp16, metric=metric, module_root=root)

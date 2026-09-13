@@ -1,5 +1,10 @@
 # Live Webcam End-to-End Validation Report
 
+> Historical report: its hand-light implementation predates the current P123
+> Mode 7 adapter. Current Mode 7 derives light position from fresh HandXYZ and
+> palm-width metric Z; the older depth-sampled lighting description below is
+> not the current production path.
+
 **Date:** 2026-09-12
 
 **Storage:** SATA `/dev/sda4` through `/mnt/storage`
