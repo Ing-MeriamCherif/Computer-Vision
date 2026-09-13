@@ -286,6 +286,7 @@ class NativeLiveApp:
         headless: bool = False,
         fullscreen: bool = False,
         use_synthetic_camera: bool = False,
+        enable_persistent: bool = True,
     ) -> None:
         self.requested_device = camera_device
         self.camera_width = camera_width
@@ -295,6 +296,7 @@ class NativeLiveApp:
         self.headless = bool(headless)
         self.use_fullscreen = bool(fullscreen)
         self.use_synthetic = bool(use_synthetic_camera)
+        self.enable_persistent = bool(enable_persistent)
 
         self.current_mode = AppMode(int(initial_mode))
         self.quality_profile = QualityProfile(quality_profile)
@@ -396,13 +398,17 @@ class NativeLiveApp:
         self.hand_worker = HandTrackingWorker(hand_engine)
         self.hand_worker.start()
 
-        # 4. Start Persistent Mapping Worker (sidecar at profile Hz)
-        self.persistent_worker = PersistentMapWorker(
-            self.camera,
-            map_update_hz=self.profile_config.persistent_hz,
-        )
-        self.persistent_worker.start()
-        self.pose_estimator = PoseEstimator(self.camera, max_samples=400, reprojection_error=3.0)
+        # 4. Start Persistent Mapping Worker (optional Phase 5 experimental sidecar)
+        if self.enable_persistent:
+            self.persistent_worker = PersistentMapWorker(
+                self.camera,
+                map_update_hz=self.profile_config.persistent_hz,
+            )
+            self.persistent_worker.start()
+            self.pose_estimator = PoseEstimator(self.camera, max_samples=400, reprojection_error=3.0)
+        else:
+            self.persistent_worker = None
+            self.pose_estimator = None
 
         # 5. Initialize CUDA/CPU Geometry Backend
         self.geometry_backend = TorchGeometryBackend(device="auto")
@@ -752,27 +758,40 @@ class NativeLiveApp:
                 volumetrics=self.volumetrics_enabled,
             )
         elif self.current_mode == AppMode.INFINITY:
-            # Mode 9: Persistent Infinity Geometry
-            if self.previous_geometry is not None and self.pose_estimator is not None and self.persistent_worker is not None:
-                pose_res = self.pose_estimator.estimate_pose(self.previous_geometry, geometry)
-                if pose_res.valid:
-                    self.persistent_worker.submit(geometry, pose_res, frame_id=frame_id, timestamp=frame_ts)
-            self.previous_geometry = geometry
-
-            # Query persistent map snapshot
-            p_snapshot = self.persistent_worker.get_latest_snapshot() if self.persistent_worker else None
-            if p_snapshot is not None and p_snapshot.surfel_count > 50:
-                p_depth = p_snapshot.projected_depth
-                p_conf = p_snapshot.projected_confidence
-                has_p = np.isfinite(p_depth) & (p_conf > 0.1)
+            # Mode 9: Persistent Infinity Geometry (Experimental Phase 5)
+            if not self.enable_persistent:
                 rendered = frame_rgb.copy()
-                # Tint persistent reconstructed surfels green/cyan
-                rendered[has_p] = np.clip(
-                    rendered[has_p].astype(np.float32) * 0.4 + np.array([30, 220, 150], dtype=np.float32) * 0.6,
-                    0, 255,
-                ).astype(np.uint8)
+                cv2.putText(
+                    rendered,
+                    "Phase 5 Persistent Mapping is disabled (--no-persistent)",
+                    (20, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 165, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
             else:
-                rendered = frame_rgb.copy()
+                if self.previous_geometry is not None and self.pose_estimator is not None and self.persistent_worker is not None:
+                    pose_res = self.pose_estimator.estimate_pose(self.previous_geometry, geometry)
+                    if pose_res.valid:
+                        self.persistent_worker.submit(geometry, pose_res, frame_id=frame_id, timestamp=frame_ts)
+                self.previous_geometry = geometry
+
+                # Query persistent map snapshot
+                p_snapshot = self.persistent_worker.get_latest_snapshot() if self.persistent_worker else None
+                if p_snapshot is not None and p_snapshot.surfel_count > 50:
+                    p_depth = p_snapshot.projected_depth
+                    p_conf = p_snapshot.projected_confidence
+                    has_p = np.isfinite(p_depth) & (p_conf > 0.1)
+                    rendered = frame_rgb.copy()
+                    # Tint persistent reconstructed surfels green/cyan
+                    rendered[has_p] = np.clip(
+                        rendered[has_p].astype(np.float32) * 0.4 + np.array([30, 220, 150], dtype=np.float32) * 0.6,
+                        0, 255,
+                    ).astype(np.uint8)
+                else:
+                    rendered = frame_rgb.copy()
 
         # 8. Draw Hand Skeleton Overlay
         if self.show_skeleton and hands:

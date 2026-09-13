@@ -572,6 +572,26 @@ class TestNativeLiveAppHeadlessSmoke:
         assert app.previous_geometry is None
         app.stop()
 
+    def test_disabled_persistent_mode_isolates_workers(self):
+        """When enable_persistent=False, persistent worker and pose estimator are None."""
+        from geometry.native_app import AppMode, NativeLiveApp, QualityProfile
+        app = NativeLiveApp(
+            headless=True,
+            use_synthetic_camera=True,
+            quality_profile=QualityProfile.LOW,
+            initial_mode=AppMode.INFINITY,
+            enable_persistent=False,
+        )
+        try:
+            app.start()
+            assert app.persistent_worker is None
+            assert app.pose_estimator is None
+            frame = app.step()
+            assert frame is not None
+            assert frame.shape == (480, 640, 3)
+        finally:
+            app.stop()
+
 
 # ---------------------------------------------------------------------------
 # Worker health reporting
