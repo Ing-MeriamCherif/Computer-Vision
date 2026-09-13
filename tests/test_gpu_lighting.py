@@ -78,6 +78,52 @@ def test_gpu_shader_keeps_specular_additive_and_normalizes_volume_steps():
     assert "* scatter * stepLength" in _VOLUME_SHADER
 
 
+def test_l2_shader_guards_normals_front_faces_and_runtime_parameters():
+    assert "uDiffuseStrength" in _SURFACE_SHADER
+    assert "uSpecularStrength" in _SURFACE_SHADER
+    assert "uShininess" in _SURFACE_SHADER
+    assert "uDirectGain" in _SURFACE_SHADER
+    assert "uShadowsEnabled" in _SURFACE_SHADER
+    assert "if (!(normalLength > 1e-4))" in _SURFACE_SHADER
+    assert "specular = diffuse > 0.0" in _SURFACE_SHADER
+
+
+def test_cpu_reference_zero_normal_and_low_confidence_preserve_camera_rgb():
+    from dataclasses import replace
+    from geometry.lighting import shade_geometry
+
+    rgb, geometry = _geometry()
+    zero_normal = replace(
+        geometry,
+        normals=np.zeros_like(geometry.normals),
+        normal_confidence=np.zeros_like(geometry.depth),
+    )
+    light = _light(geometry.camera, 0, (1.0, 1.0, 1.0))
+    result, _ = shade_geometry(rgb, zero_normal, [light], shadows=False, volumetrics=False)
+    np.testing.assert_allclose(result, rgb, atol=1)
+    low_conf = replace(geometry, confidence=np.zeros_like(geometry.depth), normal_confidence=np.zeros_like(geometry.depth))
+    result, _ = shade_geometry(rgb, low_conf, [light], shadows=False, volumetrics=False)
+    np.testing.assert_allclose(result, rgb, atol=1)
+
+
+def test_cpu_reference_back_facing_light_has_no_specular_response():
+    from geometry.lighting import shade_geometry
+
+    rgb, geometry = _geometry()
+    front = _light(geometry.camera, 0, (1.0, 1.0, 1.0))
+    back = LightState(
+        position_camera=np.array([0.0, 0.0, 2.0], dtype=np.float32),
+        intensity=1.0,
+        color_rgb=np.ones(3, dtype=np.float32),
+        confidence=1.0,
+        range_m=2.0,
+    )
+    front_result, _ = shade_geometry(rgb, geometry, [front], shadows=False, volumetrics=False)
+    back_result, _ = shade_geometry(rgb, geometry, [back], shadows=False, volumetrics=False)
+    assert front_result[12, 16].mean() > rgb[12, 16].mean()
+    np.testing.assert_allclose(back_result, rgb, atol=1)
+
+
 def test_texture_path_avoids_full_gpu_finish():
     import inspect
 

@@ -108,6 +108,22 @@ def test_p123_relight_enables_shadow_rays_and_volumetrics(monkeypatch):
     assert renderer.last_lighting_stats["volumetrics_ms"] > 0
 
 
+def test_p123_l2_stage_skips_shadow_and_volume_work(monkeypatch):
+    captured = {}
+
+    def capture_settings(*args, **kwargs):
+        captured.update(kwargs)
+        return np.asarray(args[0]).copy(), {"lighting_ms": 0.0, "lights": float(len(args[2])), "volumetrics_ms": 0.0}
+
+    monkeypatch.setattr(relight_view, "shade_geometry", capture_settings)
+    renderer = RelightRenderer(max_width=80, max_height=60, use_gpu=False)
+    renderer.set_lighting_stage("l2_diffuse")
+    renderer.render(_snapshot(hand_count=1))
+    assert captured["shadows"] is False
+    assert captured["volumetrics"] is False
+    assert captured["specular_enabled"] is False
+
+
 def test_p123_relight_handles_geometry_pending():
     snapshot = _snapshot()
     snapshot = P123Snapshot(
@@ -345,3 +361,25 @@ def test_non_rtx_backend_detection_and_forced_modes():
     assert strict.backend_name == "RTX_UNAVAILABLE"
     raster.close()
     strict.close()
+
+
+def test_mode7_stage_selector_cycles_without_rebuilding_renderer():
+    renderer = RelightRenderer(use_gpu=False)
+    assert renderer.lighting_stage == "full"
+    assert renderer.cycle_lighting_stage() == "l2_diffuse"
+    assert renderer.cycle_lighting_stage() == "l2_diffuse_specular"
+    assert renderer.cycle_lighting_stage() == "full"
+
+
+def test_auto_rtx_failure_is_cached(monkeypatch):
+    calls = []
+
+    def unavailable(_quality):
+        calls.append(1)
+        raise RuntimeError("no optix")
+
+    monkeypatch.setattr("geometry.rtx_lighting.create_optix_renderer", unavailable)
+    renderer = RelightRenderer(use_gpu=False, backend="auto")
+    assert renderer._ensure_rtx() is None
+    assert renderer._ensure_rtx() is None
+    assert calls == [1]

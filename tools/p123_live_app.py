@@ -149,7 +149,7 @@ def main() -> int:
     print("  Navigation Keys:   [1] RGB  [2] Depth  [3] Normals  [4] Temporal  [5] Hands  [6] XYZ  [7] Relight")
     print(f"  Relight Quality:   {args.lighting_quality}")
     print(f"  Relight Backend:   {args.relight_backend} (auto selects RTX OptiX or OpenGL raster)")
-    print("  Controls:          [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
+    print("  Controls:          [L] Mode 7 stage  [D] Telemetry HUD  [F] Fullscreen  [Q/ESC] Quit")
     print("============================================================")
 
     mode = int(args.mode)
@@ -158,7 +158,7 @@ def main() -> int:
     window = "NRW P123 Live Diagnostics (Material 3)"
     frame_times: deque[float] = deque(maxlen=30)
     display_fps: float | None = None
-    last_relight_state: tuple[str, int] | None = None
+    last_relight_state: tuple[str, int, str] | None = None
     is_fullscreen = bool(args.fullscreen)
 
     try:
@@ -210,10 +210,10 @@ def main() -> int:
                 if mode == 7:
                     relight = relight_view._renderer
                     stats = relight.last_lighting_stats
-                    state = (str(stats.get("renderer", "WAITING")), int(relight.last_light_count))
+                    state = (str(stats.get("renderer", "WAITING")), int(relight.last_light_count), relight.lighting_stage)
                     if state != last_relight_state:
                         print(
-                            f"Mode 7 state: renderer={state[0]} lights={state[1]} "
+                            f"Mode 7 state: renderer={state[0]} stage={state[2]} lights={state[1]} "
                             f"xyz_age_ms={relight.last_xyz_source_age_ms} "
                             f"gpu_render_ms={stats.get('gpu_render_ms', stats.get('lighting_ms'))}",
                             flush=True,
@@ -229,6 +229,8 @@ def main() -> int:
                     ui_state["mode"] = key - ord("0")
                 elif key in (ord("d"), ord("D")):
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
+                elif key in (ord("l"), ord("L")) and mode == 7:
+                    print(f"Mode 7 stage: {relight_view._renderer.cycle_lighting_stage()}", flush=True)
                 elif key in (ord("c"), ord("C")):
                     ui_state["requested_source"] = "phone" if selected_source == "webcam" else "webcam"
                 elif key in (ord("f"), ord("F")):

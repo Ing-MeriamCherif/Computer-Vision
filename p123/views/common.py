@@ -615,7 +615,12 @@ def draw_viewport_hud(
         volume = stats.get("volumetric_quality", "--")
         reason = str(stats.get("fallback_reason", ""))
         suffix = " | " + reason[:48] if reason else ""
-        desc = f"{backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
+        stage_label = {
+            "l2_diffuse": "L2 · DIFFUSE",
+            "l2_diffuse_specular": "L2 · DIFFUSE + SPECULAR",
+            "full": "FULL · SHADOWS + VOLUMETRICS",
+        }.get(getattr(renderer, "lighting_stage", "full"), "FULL")
+        desc = f"{stage_label} | {backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 
@@ -670,7 +675,7 @@ def draw_debug_overlay(
         renderer = relight._renderer
         stats = renderer.last_lighting_stats
         lines.extend([
-            f"Relight: {stats.get('renderer', 'GPU ...')} | {renderer.last_light_count} lights | {renderer.last_render_ms:.2f} ms | {renderer.lighting_quality}",
+            f"Relight: {stats.get('renderer', 'GPU ...')} | {getattr(renderer, 'lighting_stage', 'full')} | {renderer.last_light_count} lights | {renderer.last_render_ms:.2f} ms | {renderer.lighting_quality}",
             f"Shadows {stats.get('shadow_quality', '--')} | Volumes {stats.get('volumetric_quality', '--')} | Geometry source age {renderer.last_geometry_age_ms or 0:.1f} ms | XYZ source age {renderer.last_xyz_source_age_ms or 0:.1f} ms",
         ])
     line_font = 0.36 if is_fhd else 0.32

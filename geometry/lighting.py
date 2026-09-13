@@ -13,6 +13,49 @@ from .camera import CameraModel
 from .state import GeometryState
 
 
+# Shared defaults for the GPU shader and CPU reference path.  Keep these
+# values stable while exposing them as runtime parameters to the renderer.
+DEFAULT_DIFFUSE_STRENGTH = 0.92
+DEFAULT_SPECULAR_STRENGTH = 0.12
+DEFAULT_SHININESS = 36.0
+DEFAULT_AMBIENT = 0.40
+DEFAULT_DIRECT_GAIN = 1.0 / DEFAULT_AMBIENT
+
+
+def srgb_to_linear(color: np.ndarray) -> np.ndarray:
+    """Convert sRGB values in ``[0, 1]`` to linear-light values."""
+    value = np.clip(np.asarray(color, dtype=np.float32), 0.0, 1.0)
+    return np.where(value <= 0.04045, value / 12.92, ((value + 0.055) / 1.055) ** 2.4)
+
+
+def linear_to_srgb(color: np.ndarray) -> np.ndarray:
+    """Convert linear-light values to clipped sRGB values in ``[0, 1]``."""
+    value = np.maximum(np.nan_to_num(np.asarray(color, dtype=np.float32), nan=0.0, posinf=1.0, neginf=0.0), 0.0)
+    return np.clip(np.where(value <= 0.0031308, value * 12.92, 1.055 * np.power(value, 1.0 / 2.4) - 0.055), 0.0, 1.0)
+
+
+LIGHTING_STAGES = {
+    "l2_diffuse": {"diffuse": True, "specular": False, "shadows": False, "volumetrics": False},
+    "l2_diffuse_specular": {"diffuse": True, "specular": True, "shadows": False, "volumetrics": False},
+    "full": {"diffuse": True, "specular": True, "shadows": True, "volumetrics": True},
+}
+
+
+def normalize_lighting_stage(stage: str | None) -> str:
+    value = str(stage or "full").strip().lower().replace("+", "_").replace(" ", "_")
+    aliases = {
+        "diffuse": "l2_diffuse",
+        "l2": "l2_diffuse",
+        "l2_diffuse_spec": "l2_diffuse_specular",
+        "diffuse_specular": "l2_diffuse_specular",
+        "full_shadows_volumetrics": "full",
+    }
+    value = aliases.get(value, value)
+    if value not in LIGHTING_STAGES:
+        raise ValueError(f"unknown lighting stage '{stage}'")
+    return value
+
+
 @dataclass(slots=True)
 class LightState:
     position_camera: np.ndarray | None = None
@@ -361,27 +404,63 @@ def shade_geometry(
     geometry: GeometryState,
     lights: list[LightState] | tuple[LightState, ...],
     *,
-    ambient: float = 0.18,
-    specular_strength: float = 0.28,
-    shininess: float = 48.0,
+    ambient: float = DEFAULT_AMBIENT,
+    diffuse_strength: float = DEFAULT_DIFFUSE_STRENGTH,
+    specular_strength: float = DEFAULT_SPECULAR_STRENGTH,
+    shininess: float = DEFAULT_SHININESS,
+    direct_gain: float = DEFAULT_DIRECT_GAIN,
     shadows: bool = True,
     volumetrics: bool = False,
+    stage: str | None = None,
+    shadows_enabled: bool | None = None,
+    volumetrics_enabled: bool | None = None,
+    specular_enabled: bool | None = None,
 ) -> tuple[np.ndarray, dict[str, float]]:
-    """Apply diffuse + Blinn-Phong specular lighting, dynamic shadows, and optional volumetrics."""
+    """Apply linear-light virtual illumination over observed camera RGB."""
     started = time.perf_counter()
     image = np.asarray(rgb, dtype=np.float32)[..., :3] / 255.0
+    base_linear = srgb_to_linear(image)
     if not lights or geometry.normals is None:
-        return np.clip(image * 255.0, 0, 255).astype(np.uint8), {"lighting_ms": 0.0, "lights": 0.0, "volumetrics_ms": 0.0}
+        return np.clip(linear_to_srgb(base_linear) * 255.0, 0, 255).astype(np.uint8), {"lighting_ms": 0.0, "lights": 0.0, "volumetrics_ms": 0.0}
+
+    if stage is not None:
+        stage_defaults = LIGHTING_STAGES[normalize_lighting_stage(stage)]
+        shadows = bool(stage_defaults["shadows"])
+        volumetrics = bool(stage_defaults["volumetrics"])
+        if specular_enabled is None:
+            specular_enabled = bool(stage_defaults["specular"])
+        if not stage_defaults["specular"]:
+            specular_strength = 0.0
+    if shadows_enabled is not None:
+        shadows = bool(shadows_enabled)
+    if volumetrics_enabled is not None:
+        volumetrics = bool(volumetrics_enabled)
+    if specular_enabled is None:
+        specular_enabled = float(specular_strength) > 0.0
 
     points = np.asarray(geometry.positions_3d, dtype=np.float32)
-    normals = np.nan_to_num(np.asarray(geometry.normals, dtype=np.float32), nan=0.0)
-    normals /= np.maximum(np.linalg.norm(normals, axis=-1, keepdims=True), 1e-6)
-    valid = np.asarray(geometry.valid_mask, dtype=bool)
+    normals = np.nan_to_num(np.asarray(geometry.normals, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    normal_length = np.linalg.norm(normals, axis=-1)
+    normal_valid = np.isfinite(normal_length) & (normal_length >= 1e-4)
+    normals /= np.maximum(normal_length[..., None], 1e-6)
+    valid = np.asarray(geometry.valid_mask, dtype=bool) & np.isfinite(points).all(axis=-1) & (points[..., 2] > 1e-5)
     confidence = np.asarray(geometry.confidence if geometry.confidence is not None else valid, dtype=np.float32)
-    view = -points
-    view /= np.maximum(np.linalg.norm(view, axis=-1, keepdims=True), 1e-6)
+    confidence = np.clip(np.nan_to_num(confidence, nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    normal_confidence = getattr(geometry, "normal_confidence", None)
+    if normal_confidence is None:
+        normal_confidence = np.clip((normal_length - 1e-4) / 0.25, 0.0, 1.0)
+    normal_confidence = np.clip(np.nan_to_num(np.asarray(normal_confidence, dtype=np.float32), nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+    normal_valid_mask = getattr(geometry, "normal_valid_mask", None)
+    if normal_valid_mask is not None:
+        normal_valid &= np.asarray(normal_valid_mask, dtype=bool)
+        normal_confidence = np.where(normal_valid, normal_confidence, 0.0)
+    diffuse_confidence = confidence * normal_confidence * normal_valid.astype(np.float32)
+    specular_confidence = confidence * np.square(np.clip((normal_confidence - 0.35) / 0.40, 0.0, 1.0)) * normal_valid.astype(np.float32)
+    view = -points / np.maximum(np.linalg.norm(points, axis=-1, keepdims=True), 1e-6)
 
-    lit = image * float(ambient)
+    # Ambient remains a compatibility argument; direct gain now controls only
+    # synthetic illumination and cannot be changed by the ambient value.
+    lit = base_linear.copy()
     active_count = 0
 
     for light in lights:
@@ -389,23 +468,34 @@ def shade_geometry(
             continue
         active_count += 1
         pos = light.position_camera if light.position_camera is not None else light.position_camera_m
+        if pos is None:
+            active_count -= 1
+            continue
+        pos = np.asarray(pos, dtype=np.float32)
+        if pos.shape != (3,) or not np.isfinite(pos).all() or pos[2] <= 0.0:
+            active_count -= 1
+            continue
         delta = pos.reshape(1, 1, 3) - points
         distance = np.linalg.norm(delta, axis=-1, keepdims=True)
         direction = delta / np.maximum(distance, 1e-6)
         diffuse = np.maximum(np.sum(normals * direction, axis=-1), 0.0)
         halfway = direction + view
         halfway /= np.maximum(np.linalg.norm(halfway, axis=-1, keepdims=True), 1e-6)
-        specular = np.maximum(np.sum(normals * halfway, axis=-1), 0.0) ** float(shininess)
+        specular = np.where(diffuse > 0.0, np.maximum(np.sum(normals * halfway, axis=-1), 0.0) ** float(shininess), 0.0)
 
         # Keep each hand light local while retaining smooth quadratic falloff.
         range_m = max(float(getattr(light, "range_m", 1.0)), 1e-3)
         attenuation = float(light.intensity) / (1.0 + (distance[..., 0] / range_m) ** 2)
         visibility = _shadow_factor(geometry, light) if shadows else 1.0
-        contribution = (diffuse * 0.92 + specular * specular_strength) * attenuation * visibility * float(light.confidence)
-        lit += contribution[..., None] * light.color_rgb.reshape(1, 1, 3)
+        scale = attenuation * visibility * float(np.clip(light.confidence, 0.0, 1.0))
+        color = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0).reshape(1, 1, 3)
+        diffuse_term = base_linear * color * diffuse[..., None] * float(diffuse_strength) * diffuse_confidence[..., None]
+        specular_term = color * specular[..., None] * float(specular_strength) * specular_confidence[..., None] if specular_enabled else 0.0
+        lit += float(direct_gain) * (diffuse_term + specular_term) * scale[..., None]
 
-    lit = np.where(valid[..., None], lit, image * 0.1)
-    lit *= np.clip(0.65 + 0.35 * confidence[..., None], 0.0, 1.0)
+    # Invalid geometry and uncertain normals preserve observed camera RGB.
+    lit = np.where(valid[..., None], lit, base_linear)
+    lit = np.nan_to_num(lit, nan=0.0, posinf=1.0, neginf=0.0)
 
     vol_ms = 0.0
     if volumetrics and active_count > 0:
@@ -413,8 +503,9 @@ def shade_geometry(
         lit += haze
 
     elapsed = (time.perf_counter() - started) * 1000.0
-    return np.clip(lit * 255.0, 0, 255).astype(np.uint8), {
+    return np.clip(linear_to_srgb(lit) * 255.0, 0, 255).astype(np.uint8), {
         "lighting_ms": elapsed,
         "lights": float(active_count),
         "volumetrics_ms": vol_ms,
+        "direct_gain": float(direct_gain),
     }
