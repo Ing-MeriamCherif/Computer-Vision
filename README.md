@@ -55,6 +55,21 @@ python -m tools.live_camera_acceptance --duration 30 --json-report report.json
 python -m tools.live_camera_acceptance --soak --duration 300 --min-render-fps 28
 ```
 
+## P1/P2/P3 Physical Gates
+
+The authoritative remediation gates use only a physical camera and never
+substitute synthetic frames. They stop at the renderer-independent handoff
+contract in [`geometry/p123_contract.py`](geometry/p123_contract.py):
+
+```bash
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate camera --camera /dev/video0
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate depth --camera /dev/video0
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate geometry --camera /dev/video0
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate temporal --camera /dev/video0
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate hands --camera /dev/video0
+PYTHONPATH=. .venv/bin/python -m tools.physical_camera_gate --gate xyz --camera /dev/video0
+```
+
 ---
 
 ## Tests

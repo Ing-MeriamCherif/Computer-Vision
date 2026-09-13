@@ -29,21 +29,34 @@ class LatestFrameBuffer:
         self._packet: FramePacket | None = None
         self._lock = threading.Lock()
         self._put_count = 0
+        self._overwritten_before_consumption = 0
+        self._has_new = False
 
     def put(self, frame: np.ndarray, frame_id: int | str = 0, timestamp: float | None = None) -> None:
-        packet = FramePacket(np.asarray(frame), frame_id, time.time() if timestamp is None else float(timestamp))
+        packet = FramePacket(np.asarray(frame), frame_id, time.monotonic() if timestamp is None else float(timestamp))
         with self._lock:
+            if self._has_new:
+                self._overwritten_before_consumption += 1
             self._packet = packet
             self._put_count += 1
+            self._has_new = True
 
     def get(self) -> FramePacket | None:
         with self._lock:
+            if self._packet is None or not self._has_new:
+                return None
+            self._has_new = False
             return self._packet
 
     @property
     def frame_count(self) -> int:
         with self._lock:
             return self._put_count
+
+    @property
+    def overwritten_before_consumption(self) -> int:
+        with self._lock:
+            return self._overwritten_before_consumption
 
 
 class LatestDepthBuffer:

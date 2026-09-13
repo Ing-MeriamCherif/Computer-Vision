@@ -58,6 +58,7 @@ from .lighting import LightState, light_from_palm, render_volumetric_scattering,
 from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestFrameBuffer
 from .camera_worker import CameraCaptureWorker, LatestFrameSlot
 from .persistent_worker import PersistentMapWorker
+from .p123_contract import HandXYZ, P4InputState
 from .native_app import AppMode, NativeLiveApp, QualityProfile
 from .native_window import NativeOpenGLWindow
 
@@ -146,4 +147,6 @@ __all__ = [
     "AppMode",
     "QualityProfile",
     "NativeOpenGLWindow",
+    "HandXYZ",
+    "P4InputState",
 ]

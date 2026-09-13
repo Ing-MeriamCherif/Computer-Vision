@@ -18,6 +18,7 @@ class DepthInferenceDiagnostics:
     min_depth: float
     max_depth: float
     peak_vram_mb: float | None
+    session_scale: float | None = None
 
 
 class DepthAnythingProvider:
@@ -39,6 +40,7 @@ class DepthAnythingProvider:
         self.model = None
         self.device = None
         self.last_diagnostics: DepthInferenceDiagnostics | None = None
+        self._session_scale: float | None = None
 
     def load(self) -> None:
         if self.model is not None:
@@ -85,13 +87,28 @@ class DepthAnythingProvider:
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
         elapsed = (time.perf_counter() - start) * 1000.0
-        depth = resized.float().detach().cpu().numpy()
-        finite = np.isfinite(depth) & (depth > 1e-6)
+        model_output = resized.float().detach().cpu().numpy()
+        finite = np.isfinite(model_output) & (model_output > 1e-6)
         if not finite.any():
             raise RuntimeError("depth model produced no finite positive depth")
-        # Stable session-relative units: normalize robust median to 2.0.
-        depth = (depth * (2.0 / max(float(np.median(depth[finite])), 1e-6))).astype(np.float32)
-        confidence = np.where(finite, 1.0, 0.0).astype(np.float32)
+        # Depth Anything's predicted_depth is inverse-depth-like (larger is
+        # nearer). Convert explicitly to the project forward-Z convention:
+        # larger Z means farther from the camera.
+        depth = np.where(finite, 1.0 / np.maximum(model_output, 1e-6), np.nan).astype(np.float32)
+        # Stable session-relative units: smooth the scale target across frames
+        # so a hand entering the image cannot globally rescale the wall.
+        target_scale = 2.0 / max(float(np.median(depth[finite])), 1e-6)
+        self._session_scale = target_scale if self._session_scale is None else 0.10 * target_scale + 0.90 * self._session_scale
+        depth = (depth * self._session_scale).astype(np.float32)
+        # This is geometry/depth reliability, not a neural confidence score:
+        # finite validity is reduced near unstable depth discontinuities.
+        import cv2
+        gx = cv2.Sobel(depth, cv2.CV_32F, 1, 0, ksize=3)
+        gy = cv2.Sobel(depth, cv2.CV_32F, 0, 1, ksize=3)
+        gradient = np.hypot(gx, gy)
+        reference = max(float(np.percentile(gradient[finite], 90)), 1e-6)
+        reliability = np.exp(-np.clip(gradient / reference, 0.0, 4.0)).astype(np.float32)
+        confidence = np.where(finite, reliability, 0.0).astype(np.float32)
         peak = float(torch.cuda.max_memory_allocated(self.device) / 1048576.0) if self.device.type == "cuda" else None
-        self.last_diagnostics = DepthInferenceDiagnostics(str(self.device), elapsed, float(depth[finite].min()), float(depth[finite].max()), peak)
+        self.last_diagnostics = DepthInferenceDiagnostics(str(self.device), elapsed, float(depth[finite].min()), float(depth[finite].max()), peak, float(self._session_scale))
         return DepthState(depth, timestamp, source_frame_id, "relative", valid_mask=finite, confidence=confidence)

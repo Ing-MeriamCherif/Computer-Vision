@@ -29,6 +29,9 @@ class LatestFrameSlot:
         self._has_new: bool = False
         self._dropped_count: int = 0
         self._total_arrived: int = 0
+        self._consumed_count: int = 0
+        self._renderer_reuses: int = 0
+        self._last_consumed_sequence_id: int | None = None
 
     def put(
         self,
@@ -55,6 +58,11 @@ class LatestFrameSlot:
                 if not signaled or not self._has_new:
                     return None
             self._has_new = False
+            if self._last_consumed_sequence_id == self._capture_sequence_id:
+                self._renderer_reuses += 1
+            else:
+                self._consumed_count += 1
+                self._last_consumed_sequence_id = self._capture_sequence_id
             assert self._frame is not None
             return self._frame, self._capture_sequence_id, self._capture_timestamp
 
@@ -63,6 +71,12 @@ class LatestFrameSlot:
         with self._lock:
             if self._frame is None:
                 return None
+            self._has_new = False
+            if self._last_consumed_sequence_id == self._capture_sequence_id:
+                self._renderer_reuses += 1
+            else:
+                self._consumed_count += 1
+                self._last_consumed_sequence_id = self._capture_sequence_id
             return self._frame, self._capture_sequence_id, self._capture_timestamp
 
     @property
@@ -193,4 +207,24 @@ class CameraCaptureWorker:
 
     @property
     def dropped_frames(self) -> int:
+        return self.slot.dropped_count
+
+    @property
+    def captured_frames(self) -> int:
+        """Physical frames accepted from the camera device."""
+        return self.slot.total_arrived
+
+    @property
+    def consumed_frames(self) -> int:
+        with self.slot._lock:
+            return self.slot._consumed_count
+
+    @property
+    def renderer_reuses(self) -> int:
+        with self.slot._lock:
+            return self.slot._renderer_reuses
+
+    @property
+    def overwritten_before_consumption(self) -> int:
+        """Frames replaced in the capacity-one slot before a consumer read."""
         return self.slot.dropped_count

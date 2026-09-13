@@ -28,6 +28,7 @@ class TrackedHand:
     handedness: str | None = None
     palm_width_px: float | None = None
     stale: bool = False
+    depth_confidence: float = 0.0
 
 
 # Backward-compatible alias for existing tests
@@ -385,7 +386,24 @@ class HandControlEngine:
                     obs.palm_width_px *= (scale_x + scale_y) * 0.5
             observations = self._assign_stable_ids(raw_observations)
         else:
-            observations = self._last
+            # Detector-skip frames still update coordinates using LK optical
+            # flow. Reusing the previous UV was a false 30 Hz claim and made
+            # fast hands appear frozen between detector passes.
+            observations = []
+            if self._last and self._previous_gray is not None:
+                gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+                for prior in self._last:
+                    point = np.asarray([[prior.palm_uv[0] / scale_x, prior.palm_uv[1] / scale_y]], dtype=np.float32)
+                    nxt, status, _ = cv2.calcOpticalFlowPyrLK(self._previous_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
+                    if status is not None and bool(status[0, 0]):
+                        tracked = np.asarray(nxt).reshape(-1, 2)[0]
+                        u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
+                        if 0 <= u < width and 0 <= v < height:
+                            prior.palm_uv = (u, v)
+                            prior.confidence *= 0.95
+                            prior.stale = True
+                            prior.timestamp = timestamp
+                            observations.append(prior)
 
         if observations:
             filtered: list[TrackedHand] = []
@@ -398,9 +416,15 @@ class HandControlEngine:
                 hand_z = obs.depth_z
                 if depth_map is not None:
                     from .lighting import sample_depth
-                    z_val, z_conf = sample_depth(depth_map, None, uv[0], uv[1])
+                    depth_arr = np.asarray(depth_map)
+                    if depth_arr.ndim != 2:
+                        raise ValueError("depth_map must be a 2D array")
+                    if depth_arr.shape != (height, width):
+                        depth_arr = cv2.resize(depth_arr.astype(np.float32), (width, height), interpolation=cv2.INTER_LINEAR)
+                    z_val, z_conf = sample_depth(depth_arr, None, uv[0], uv[1])
                     if z_val > 0.0:
                         hand_z = z_val
+                        obs.depth_confidence = float(z_conf)
 
                 if self.filter_mode == "ema":
                     try:
@@ -442,7 +466,8 @@ class HandControlEngine:
                 point = np.asarray([[obs.palm_uv[0] / scale_x, obs.palm_uv[1] / scale_y]], dtype=np.float32)
                 nxt, status, _ = cv2.calcOpticalFlowPyrLK(prior_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
                 if status is not None and bool(status[0, 0]):
-                    u, v = float(nxt[0, 0, 0] * scale_x), float(nxt[0, 0, 1] * scale_y)
+                    tracked = np.asarray(nxt).reshape(-1, 2)[0]
+                    u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
                     if 0 <= u < width and 0 <= v < height:
                         obs.palm_uv = (u, v)
                         obs.confidence *= 0.85
