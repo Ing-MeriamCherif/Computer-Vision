@@ -58,6 +58,7 @@ class DepthAnythingProvider:
         self._session_scale: float | None = None
         self._previous_device_depth = None
         self._previous_device_valid = None
+        self._scale_updates = 0
         self._compute_count = 0
 
     def load(self) -> None:
@@ -142,12 +143,14 @@ class DepthAnythingProvider:
         target_scale = 2.0 / max(float(torch.median(depth[finite_t]).item()), 1e-6)
         # Robust scale tracking: use only stable overlapping pixels and cap
         # per-frame correction so entering hands cannot rescale the scene.
-        if self._previous_device_depth is not None and self._previous_device_depth.shape == depth.shape:
-            overlap = finite_t & self._previous_device_valid & torch.isfinite(self._previous_device_depth)
-            if bool(overlap.any().item()):
-                ratio = torch.median(self._previous_device_depth[overlap]) / torch.clamp(torch.median(raw_depth[overlap]), min=1e-6)
-                target_scale *= float(torch.clamp(ratio, 0.90, 1.10).item())
-        self._session_scale = target_scale if self._session_scale is None else 0.10 * target_scale + 0.90 * self._session_scale
+        if self._session_scale is None:
+            self._session_scale = target_scale
+        else:
+            self._scale_updates += 1
+            # Let the first few frames establish an anchor, then move only
+            # very slowly so scene-composition changes cannot breathe the map.
+            alpha = 0.02 if self._scale_updates < 15 else 0.002
+            self._session_scale = alpha * target_scale + (1.0 - alpha) * self._session_scale
         depth = depth * self._session_scale
         # This is geometry/depth reliability, not a neural confidence score:
         # finite validity is reduced near unstable depth discontinuities.

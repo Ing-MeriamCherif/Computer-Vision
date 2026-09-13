@@ -123,9 +123,10 @@ def _smooth_depth(
     overlap = valid & np.isfinite(previous) & (previous > 1e-6)
     if not overlap.any():
         return np.where(valid, current, np.nan).astype(np.float32)
-    ratio = float(np.median(previous[overlap])) / max(float(np.median(current[overlap])), 1e-6)
-    aligned = current * ratio
-    relative_delta = np.abs(aligned - previous) / np.maximum(np.abs(previous), 1e-6)
+    # Provider scale is already canonical. Do not introduce a second global
+    # median normalization on every frame; compare in that established scale.
+    aligned = current
+    relative_delta = np.abs(current - previous) / np.maximum(np.abs(previous), 1e-6)
     # Responsive on motion/edges, smooth only where the two estimates agree.
     local_alpha = np.clip(alpha + 0.55 * np.clip(relative_delta / 0.20, 0.0, 1.0), alpha, 0.9)
     agree = relative_delta <= 0.28
@@ -370,9 +371,8 @@ class P123LiveRuntime:
                     else:
                         overlap = valid_device & torch.isfinite(previous_device_depth) & (previous_device_depth > 1e-6)
                         if bool(overlap.any().item()):
-                            ratio = torch.median(previous_device_depth[overlap]) / torch.clamp(torch.median(current[overlap]), min=1e-6)
-                            aligned = current * ratio
-                            delta = torch.abs(aligned - previous_device_depth) / torch.clamp(torch.abs(previous_device_depth), min=1e-6)
+                            aligned = current
+                            delta = torch.abs(current - previous_device_depth) / torch.clamp(torch.abs(previous_device_depth), min=1e-6)
                             local_alpha = (0.30 + 0.55 * (delta / 0.20).clamp(0.0, 1.0)).clamp(0.30, 0.90)
                             smoothed_device = torch.where(overlap & (delta <= 0.28), (1.0 - local_alpha) * previous_device_depth + local_alpha * aligned, aligned)
                         else:
