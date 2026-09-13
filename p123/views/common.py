@@ -658,7 +658,7 @@ def draw_debug_overlay(
     lines = [
         f"Camera Capture:  {metrics.capture_hz or 0:.1f} Hz | Overwrites: {metrics.overwritten_before_consumption} | Total: {metrics.captured}",
         f"Display UI:      {display_fps or 0:.1f} FPS (decoupled render loop)",
-        f"CUDA Depth:      {metrics.depth_hz or 0:.1f} Hz | Latency p95: {metrics.depth_age_p95_ms or 0:.1f} ms | Errors: {metrics.depth_errors}",
+        f"CUDA Depth:      {metrics.depth_hz or 0:.1f} Hz | Source age p95: {metrics.depth_age_p95_ms or 0:.1f} ms | Errors: {metrics.depth_errors}",
         f"CUDA Normals:    {metrics.normal_hz or 0:.1f} Hz | Latency p95: {metrics.normal_age_p95_ms or 0:.1f} ms",
         f"Temporal Conf:   {metrics.temporal_hz or 0:.1f} Hz | Geometry Age: {metrics.geometry_age_p95_ms or 0:.1f} ms",
         f"Hand Tracking:   {metrics.hand_hz or 0:.1f} Hz | Latency p95: {metrics.hand_age_p95_ms or 0:.1f} ms",
