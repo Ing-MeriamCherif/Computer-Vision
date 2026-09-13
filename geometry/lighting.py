@@ -22,6 +22,7 @@ DEFAULT_DIRECT_GAIN = 1.0 / DEFAULT_AMBIENT
 LIGHTING_STAGES = {
     "l2_diffuse": {"diffuse": True, "specular": False, "shadows": False, "volumetrics": False},
     "l2_diffuse_specular": {"diffuse": True, "specular": True, "shadows": False, "volumetrics": False},
+    "l4_shadows": {"diffuse": True, "specular": True, "shadows": True, "volumetrics": False},
     "full": {"diffuse": True, "specular": True, "shadows": True, "volumetrics": True},
 }
 
@@ -38,7 +39,7 @@ def linear_to_srgb(color: np.ndarray) -> np.ndarray:
 
 def normalize_lighting_stage(stage: str | None) -> str:
     value = str(stage or "full").strip().lower().replace("+", "_").replace(" ", "_")
-    value = {"diffuse": "l2_diffuse", "l2": "l2_diffuse", "diffuse_specular": "l2_diffuse_specular"}.get(value, value)
+    value = {"diffuse": "l2_diffuse", "l2": "l2_diffuse", "diffuse_specular": "l2_diffuse_specular", "shadows": "l4_shadows", "l4": "l4_shadows"}.get(value, value)
     if value not in LIGHTING_STAGES:
         raise ValueError(f"unknown lighting stage '{stage}'")
     return value

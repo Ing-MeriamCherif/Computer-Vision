@@ -9,6 +9,8 @@ struct LaunchParams {
     unsigned int height;
     unsigned int light_count;
     float light_positions[6];
+    float source_radii[2];
+    float self_eps[2];
 };
 
 extern "C" {
@@ -26,6 +28,9 @@ static __forceinline__ __device__ float3 scale3(float3 a, float s) {
 }
 static __forceinline__ __device__ float length3(float3 a) {
     return sqrtf(a.x * a.x + a.y * a.y + a.z * a.z);
+}
+static __forceinline__ __device__ float3 cross3(float3 a, float3 b) {
+    return make_float3(a.y*b.z-a.z*b.y, a.z*b.x-a.x*b.z, a.x*b.y-a.y*b.x);
 }
 
 extern "C" __global__ void __raygen__shadow() {
@@ -58,23 +63,23 @@ extern "C" __global__ void __raygen__shadow() {
         return;
     }
 
-    const float3 origin = add3(point, scale3(normal, 0.002f));
+    const float3 origin = add3(point, scale3(normal, params.self_eps[light_index]));
     const float3 direction = scale3(delta, 1.0f / distance);
-    unsigned int visible = 0;
-    optixTrace(
-        params.traversable,
-        origin,
-        direction,
-        0.001f,
-        max(distance - 0.004f, 0.001f),
-        0.0f,
-        OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT,
-        0,
-        1,
-        0,
-        visible);
-    output[light_index * params.width * params.height + pixel] = visible ? 1.0f : 0.18f;
+    float3 reference = fabsf(direction.z) < 0.9f ? make_float3(0,0,1) : make_float3(0,1,0);
+    float3 tangent = scale3(cross3(direction, reference), 1.0f / max(length3(cross3(direction, reference)), 1e-5f));
+    float3 bitangent = cross3(direction, tangent);
+    const float samples[4][2] = {{0.0f,0.0f},{0.65f,0.0f},{-0.325f,0.563f},{-0.325f,-0.563f}};
+    unsigned int visible_count = 0;
+    for (int sample=0; sample<4; ++sample) {
+        float3 emitter = add3(light, scale3(add3(scale3(tangent, samples[sample][0]), scale3(bitangent, samples[sample][1])), params.source_radii[light_index]));
+        float3 to_emitter = sub3(emitter, point); float d = length3(to_emitter);
+        unsigned int visible = 0;
+        optixTrace(params.traversable, origin, scale3(to_emitter, 1.0f/max(d,1e-5f)), 0.001f,
+            max(d - params.self_eps[light_index], 0.001f), 0.0f, OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_ANYHIT, 0, 1, 0, visible);
+        visible_count += visible ? 1u : 0u;
+    }
+    output[light_index * params.width * params.height + pixel] = float(visible_count) / 4.0f;
 }
 
 extern "C" __global__ void __miss__shadow() {

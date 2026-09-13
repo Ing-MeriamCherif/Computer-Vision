@@ -78,6 +78,7 @@ class OptixShadowRenderer:
             ("traversable", np.uint64), ("points", np.uint64), ("normals", np.uint64),
             ("visibility", np.uint64), ("width", np.uint32), ("height", np.uint32),
             ("light_count", np.uint32), ("light_positions", np.float32, (6,)),
+            ("source_radii", np.float32, (2,)), ("self_eps", np.float32, (2,)),
         ], align=True)
 
     def _create_pipeline(self, ptx):
@@ -135,8 +136,9 @@ class OptixShadowRenderer:
         options = o.AccelBuildOptions(buildFlags=int(o.BUILD_FLAG_ALLOW_UPDATE | o.BUILD_FLAG_PREFER_FAST_TRACE),
                                       operation=o.BUILD_OPERATION_BUILD)
         sizes = self.ctx.accelComputeMemoryUsage([options], [self._triangle_input()])
-        temp, output = self.cp.cuda.alloc(sizes.tempSizeInBytes), self.cp.cuda.alloc(sizes.outputSizeInBytes)
-        handle = self.ctx.accelBuild(0, [options], [self._triangle_input()], temp.ptr, sizes.tempSizeInBytes,
+        temp_bytes = max(int(sizes.tempSizeInBytes), int(getattr(sizes, "tempUpdateSizeInBytes", 0)))
+        temp, output = self.cp.cuda.alloc(temp_bytes), self.cp.cuda.alloc(sizes.outputSizeInBytes)
+        handle = self.ctx.accelBuild(0, [options], [self._triangle_input()], temp.ptr, temp_bytes,
                                     output.ptr, sizes.outputSizeInBytes, [])
         self.gas_options, self.gas_sizes = options, sizes
         return handle, output, temp
@@ -146,7 +148,7 @@ class OptixShadowRenderer:
         options = o.AccelBuildOptions(buildFlags=int(o.BUILD_FLAG_ALLOW_UPDATE | o.BUILD_FLAG_PREFER_FAST_TRACE),
                                       operation=o.BUILD_OPERATION_UPDATE)
         handle = self.ctx.accelBuild(0, [options], [self._triangle_input()], self.gas_temp.ptr,
-            self.gas_sizes.tempUpdateSizeInBytes, self.gas_buffer.ptr, self.gas_sizes.outputSizeInBytes, [])
+            max(int(self.gas_sizes.tempSizeInBytes), int(self.gas_sizes.tempUpdateSizeInBytes)), self.gas_buffer.ptr, self.gas_sizes.outputSizeInBytes, [])
         self.gas_options = options
         return handle
 
@@ -191,12 +193,16 @@ class OptixShadowRenderer:
         self.vertices.set(vertices); self.points.set(points); self.normals.set(normals)
         handle = self._update_gas()
         positions = np.zeros((2, 3), dtype=np.float32)
+        radii = np.full(2, 0.025, dtype=np.float32)
+        epsilons = np.full(2, 0.002, dtype=np.float32)
         count = min(len(lights), 2)
         for i, light in enumerate(lights[:count]):
             positions[i] = light.position_camera
+            radii[i] = max(float(getattr(light, "source_radius_m", 0.025)), 0.0)
+            epsilons[i] = max(float(getattr(light, "self_intersection_epsilon_m", 0.002)), 1e-4)
         host_params = np.zeros(1, dtype=self.param_dtype)
         host_params[0] = (handle, self.points.data.ptr, self.normals.data.ptr,
-                          self.visibility.data.ptr, self.width, self.height, count, positions.reshape(-1))
+                          self.visibility.data.ptr, self.width, self.height, count, positions.reshape(-1), radii, epsilons)
         self.params.set(host_params.view(np.uint8))
         optix = self.optix
         optix.launch(self.pipeline, 0, self.params.data.ptr, self.param_dtype.itemsize,

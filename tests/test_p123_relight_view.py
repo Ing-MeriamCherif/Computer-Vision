@@ -387,6 +387,7 @@ def test_mode7_stage_selector_cycles_without_rebuilding_renderer():
     assert renderer.lighting_stage == "full"
     assert renderer.cycle_lighting_stage() == "l2_diffuse"
     assert renderer.cycle_lighting_stage() == "l2_diffuse_specular"
+    assert renderer.cycle_lighting_stage() == "l4_shadows"
     assert renderer.cycle_lighting_stage() == "full"
 
 

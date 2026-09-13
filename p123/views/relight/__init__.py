@@ -215,7 +215,7 @@ class RelightRenderer:
             self._gpu_renderer.reset_history()
 
     def cycle_lighting_stage(self) -> str:
-        stages = ("l2_diffuse", "l2_diffuse_specular", "full")
+        stages = ("l2_diffuse", "l2_diffuse_specular", "l4_shadows", "full")
         index = stages.index(self.lighting_stage)
         self.set_lighting_stage(stages[(index + 1) % len(stages)])
         return self.lighting_stage

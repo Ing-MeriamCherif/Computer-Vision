@@ -618,6 +618,7 @@ def draw_viewport_hud(
         stage_label = {
             "l2_diffuse": "L2 · DIFFUSE",
             "l2_diffuse_specular": "L2 · DIFFUSE + SPECULAR",
+            "l4_shadows": "L4 · DYNAMIC SHADOWS",
             "full": "FULL · SHADOWS + VOLUMETRICS",
         }.get(getattr(renderer, "lighting_stage", "full"), "FULL")
         desc = f"{stage_label} | {backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
