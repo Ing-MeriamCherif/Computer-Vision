@@ -56,6 +56,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--display-size", default="1920x1080", help="UI display resolution (default: 1920x1080 FHD; or 'native', 'auto', WxH)")
     parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
+    parser.add_argument("--mirror", action=argparse.BooleanOptionalAction, default=True, help="Mirror the live camera left-to-right (default: True)")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
     parser.add_argument("--headless", action="store_true")
@@ -86,6 +87,7 @@ def main() -> int:
             use_fp16=args.fp16,
             hand_backend=args.hand_backend,
             full_temporal=args.full_temporal,
+            mirror=args.mirror,
         )
         runtime.camera_worker.requested_fourcc = args.fourcc.upper()
         runtime.start()

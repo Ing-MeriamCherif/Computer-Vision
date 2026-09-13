@@ -19,7 +19,6 @@ from .backproject import DepthScaleMode
 from .camera import CameraModel
 from .camera_worker import CameraCaptureWorker
 from .depth_provider import DeviceDepthState, DepthAnythingProvider
-from .depth_sampling import sample_depth
 from .hand_control import GestureState, HandControlEngine
 from .motion import OpenCVFlowProvider
 from .p123_contract import HandXYZ, P4InputState
@@ -170,6 +169,7 @@ class P123LiveRuntime:
         calibration: CameraModel | None = None,
         max_state_age_ms: float = 200.0,
         full_temporal: bool = False,
+        mirror: bool = True,
     ) -> None:
         self.camera_worker = CameraCaptureWorker(camera_device, width, height, fps)
         self._explicit_calibration = calibration is not None
@@ -199,6 +199,7 @@ class P123LiveRuntime:
         )
         self.max_state_age_ms = float(max_state_age_ms)
         self.full_temporal = bool(full_temporal)
+        self.mirror = bool(mirror)
         self._depth_frames = LatestFrameBuffer()
         self._hand_frames = LatestFrameBuffer()
         self._depth_states = LatestDepthBuffer()
@@ -257,6 +258,11 @@ class P123LiveRuntime:
                 self.camera_worker.actual_width * 0.82, self.camera_worker.actual_width * 0.82,
                 self.camera_worker.actual_width / 2.0, self.camera_worker.actual_height / 2.0,
             )
+        elif self.mirror:
+            self.camera = CameraModel(
+                self.camera.width, self.camera.height, self.camera.fx, self.camera.fy,
+                self.camera.width - 1.0 - self.camera.cx, self.camera.cy,
+            )
         elif (self.camera.width, self.camera.height) != (self.camera_worker.actual_width, self.camera_worker.actual_height):
             self.camera_worker.stop()
             raise RuntimeError(
@@ -277,6 +283,10 @@ class P123LiveRuntime:
             if packet is None:
                 continue
             frame, capture_id, timestamp = packet
+            if self.mirror:
+                # Mirror once at the capture boundary so RGB, depth, hands,
+                # and XYZ all share the user-facing left/right convention.
+                frame = np.ascontiguousarray(frame[:, ::-1])
             self._last_dispatched_id = capture_id
             self._capture_times.append(time.monotonic())
             with self._rgb_lock:
@@ -462,25 +472,15 @@ class P123LiveRuntime:
                     self._xyz_smooth.pop(stale_id, None)
                 continue
             values: list[HandXYZ] = []
-            with self._state_lock:
-                raw_depth_state = self._depth
             for hand in hands.hands:
-                sampled_z, reliability = sample_depth(geometry.depth, geometry.valid_mask, *hand.palm_uv)
-                if sampled_z <= 0.0 and raw_depth_state is not None:
-                    sampled_z, reliability = sample_depth(raw_depth_state.depth, raw_depth_state.valid_mask, *hand.palm_uv)
-                # Relative monocular depth has no metric unit. Use it only
-                # when it lands in Talel's physically plausible working
-                # volume; otherwise use his palm-size proxy so XYZ cannot
-                # collapse to centimetre-scale coordinates.
+                # XYZ intentionally does not recalculate/sample depth. The
+                # P123 hand contract uses Talel's stable palm-size metric-Z
+                # proxy; depth inference remains an independent visualization
+                # and geometry worker.
                 size_z, size_ok = _talel_depth_from_palm_size(self.camera.fx, hand.palm_width_px)
-                mode_value = getattr(getattr(geometry, "scale_mode", "relative"), "value", getattr(geometry, "scale_mode", "relative"))
-                metric_depth = str(mode_value) == "metric"
-                z = sampled_z if metric_depth and 0.20 <= sampled_z <= 3.0 else size_z
-                if not size_ok:
-                    reliability *= 0.5
-                if metric_depth and z > 0:
-                    raw_xyz = np.asarray(geometry.camera.unproject(hand.palm_uv[0], hand.palm_uv[1], z), dtype=np.float32)
-                elif z > 0:
+                reliability = 1.0 if size_ok else 0.5
+                z = size_z if size_ok else 0.0
+                if z > 0:
                     raw_xyz, _ = _talel_hand_xyz(geometry.camera, hand.palm_uv, hand.palm_width_px)
                 else:
                     raw_xyz = None
