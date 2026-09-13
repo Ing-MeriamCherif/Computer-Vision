@@ -300,8 +300,28 @@ vec3 toSrgb(vec3 c) {
     return mix(c * 12.92, 1.055 * pow(c, vec3(1.0/2.4)) - 0.055, step(vec3(0.0031308), c));
 }
 
+vec3 depthAwareVolume(vec2 uv) {
+    float receiverZ = texture(uDepth, uv).r;
+    vec2 texel = 1.0 / max(uVolumeResolution, vec2(1.0));
+    vec3 sum = vec3(0.0);
+    float weights = 0.0;
+    for (int oy=-1; oy<=1; ++oy) {
+        for (int ox=-1; ox<=1; ++ox) {
+            vec2 sampleUv = clamp(uv + vec2(ox, oy) * texel, vec2(0.0), vec2(1.0));
+            float candidateZ = texture(uDepth, sampleUv).r;
+            float spatial = (ox == 0 && oy == 0) ? 1.0 : 0.55;
+            float depthWeight = receiverZ <= 1e-5 || candidateZ <= 1e-5
+                ? 0.15 : exp(-abs(candidateZ-receiverZ) / max(0.03, 0.05*receiverZ));
+            float weight = spatial * depthWeight;
+            sum += texture(uVolume, sampleUv).rgb * weight;
+            weights += weight;
+        }
+    }
+    return sum / max(weights, 1e-5);
+}
+
 void main() {
-    vec3 color = texture(uSurface, vUv).rgb + texture(uVolume, vUv).rgb;
+    vec3 color = texture(uSurface, vUv).rgb + depthAwareVolume(vUv);
     vec2 pixel = vUv * uResolution - vec2(0.5);
     for (int i=0; i<2; ++i) {
         if (i >= uLightCount) break;
@@ -369,6 +389,7 @@ class GPURelightRenderer:
         self._history_index = 0
         self._history_key: tuple[Any, ...] | None = None
         self._history_time = 0.0
+        self._geometry_upload_key: tuple[Any, ...] | None = None
         self._render_lock = threading.Lock()
         self._rt_renderer = None
         self._rt_init_error = "not initialized"
@@ -551,6 +572,7 @@ class GPURelightRenderer:
         self._history_index = 0
         self._history_key = None
         self._history_time = 0.0
+        self._geometry_upload_key = None
 
     def _attach_surface_targets(self, write_index: int) -> None:
         gl = self._gl
@@ -684,6 +706,7 @@ class GPURelightRenderer:
         with self._render_lock:
             self._history_key = None
             self._history_time = 0.0
+            self._geometry_upload_key = None
 
     def render(
         self,
@@ -740,10 +763,17 @@ class GPURelightRenderer:
         confidence = np.clip(np.nan_to_num(np.asarray(confidence, dtype=np.float32), nan=0.0), 0.0, 1.0)
         valid_tex = valid.astype(np.uint8) * 255
         self._upload("rgb", frame, gl.GL_RGB, gl.GL_UNSIGNED_BYTE)
-        self._upload("depth", depth, gl.GL_RED, gl.GL_FLOAT)
-        self._upload("normal", np.ascontiguousarray(normals), gl.GL_RGB, gl.GL_FLOAT)
-        self._upload("confidence", np.ascontiguousarray(confidence), gl.GL_RED, gl.GL_FLOAT)
-        self._upload("valid", np.ascontiguousarray(valid_tex), gl.GL_RED, gl.GL_UNSIGNED_BYTE)
+        geometry_key = (
+            geometry.source_frame_id, width, height,
+            float(geometry.camera.fx), float(geometry.camera.fy),
+            float(geometry.camera.cx), float(geometry.camera.cy),
+        )
+        if geometry_key != self._geometry_upload_key:
+            self._upload("depth", depth, gl.GL_RED, gl.GL_FLOAT)
+            self._upload("normal", np.ascontiguousarray(normals), gl.GL_RGB, gl.GL_FLOAT)
+            self._upload("confidence", np.ascontiguousarray(confidence), gl.GL_RED, gl.GL_FLOAT)
+            self._upload("valid", np.ascontiguousarray(valid_tex), gl.GL_RED, gl.GL_UNSIGNED_BYTE)
+            self._geometry_upload_key = geometry_key
         active = active_lights(lights)[:2]
         rt_trace_ms = 0.0
         rt_active = self._rt_renderer is not None and self._rt_mode in {"auto", "optix", "rtx"}

@@ -387,7 +387,7 @@ class HandControlEngine:
         return self.backend.name
 
     def _assign_stable_ids(self, raw_obs: list[TrackedHand]) -> list[TrackedHand]:
-        """Greedy matching of new detections to previous hands to maintain stable hand_ids."""
+        """Deterministically match two hands without trivial crossing-induced swaps."""
         if not self._last:
             for idx, obs in enumerate(raw_obs[:self.max_hands]):
                 obs.hand_id = idx
@@ -396,6 +396,24 @@ class HandControlEngine:
         assigned: list[TrackedHand] = []
         available_ids = list(range(self.max_hands))
         used_new = set()
+
+        previous = self._last[:2]
+        candidates = raw_obs[:2]
+        if len(previous) == 2 and len(candidates) == 2:
+            diagonal = max(64.0, max(np.hypot(*hand.palm_uv) for hand in previous + candidates))
+            handedness_penalty = 0.60 * diagonal
+
+            def cost(old: TrackedHand, new: TrackedHand) -> float:
+                distance = float(np.linalg.norm(np.subtract(old.palm_uv, new.palm_uv)))
+                mismatch = bool(old.handedness and new.handedness and old.handedness != new.handedness)
+                return distance + (handedness_penalty if mismatch else 0.0)
+
+            direct = cost(previous[0], candidates[0]) + cost(previous[1], candidates[1])
+            crossed = cost(previous[0], candidates[1]) + cost(previous[1], candidates[0])
+            order = (0, 1) if direct <= crossed else (1, 0)
+            for old, candidate_index in zip(previous, order):
+                candidates[candidate_index].hand_id = old.hand_id
+            return candidates
 
         # Prioritize matching existing hands
         for old in self._last:
@@ -409,7 +427,8 @@ class HandControlEngine:
                     best_dist = dist
                     best_idx = n_idx
 
-            if best_idx is not None and best_dist < 200.0:
+            gate = max(64.0, np.hypot(*old.palm_uv) * 0.70)
+            if best_idx is not None and best_dist < gate:
                 n_obs = raw_obs[best_idx]
                 n_obs.hand_id = old.hand_id
                 if old.hand_id in available_ids:
@@ -508,6 +527,7 @@ class HandControlEngine:
 
         started = time.perf_counter()
         source = np.asarray(rgb, dtype=np.uint8)[..., :3]
+        previous_hands = tuple(self._last)
         height, width = source.shape[:2]
         iw, ih = choose_tracker_size((width, height), self.input_size or (640, 360))
         scale_x, scale_y = width / iw, height / ih
@@ -608,6 +628,25 @@ class HandControlEngine:
                 obs.stale = bool(obs.stale or not should_detect or self._coast > 0)
                 filtered.append(obs)
 
+            fresh_ids = {hand.hand_id for hand in filtered}
+            for old in previous_hands:
+                if old.hand_id in fresh_ids:
+                    continue
+                age = max(0.0, timestamp - self._last_detected_at.get(old.hand_id, old.timestamp))
+                if age < self.dropout_grace_seconds:
+                    filtered.append(TrackedHand(
+                        hand_id=old.hand_id,
+                        landmarks_uv=None if old.landmarks_uv is None else old.landmarks_uv.copy(),
+                        palm_uv=old.palm_uv,
+                        confidence=max(0.15, old.confidence * (1.0 - 0.45 * age / max(self.dropout_grace_seconds, 1e-6))),
+                        depth_z=old.depth_z,
+                        timestamp=timestamp,
+                        velocity_px_s=0.0,
+                        handedness=old.handedness,
+                        palm_width_px=old.palm_width_px,
+                        stale=True,
+                        depth_confidence=old.depth_confidence,
+                    ))
             self._last = filtered
             self._coast = 0
         else:

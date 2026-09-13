@@ -25,10 +25,15 @@ from geometry.lighting import (
     shade_geometry,
 )
 from geometry.state import GeometryState
+from geometry.palm_light import PalmLightController
 
 
 LIGHT_COLORS = ((0.44, 0.72, 0.82), (0.88, 0.63, 0.40))
-COLOR_PRESETS = (("CYAN", (0.18, 0.78, 1.0)), ("AMBER", (1.0, 0.53, 0.14)), ("MAGENTA", (0.95, 0.24, 0.70)), ("WHITE", (1.0, 1.0, 0.92)))
+COLOR_PAIRS = (
+    ("CYAN / AMBER", ((0.18, 0.78, 1.0), (1.0, 0.53, 0.14))),
+    ("MAGENTA / WARM WHITE", ((0.95, 0.24, 0.70), (1.0, 0.92, 0.78))),
+    ("BLUE / WARM RED", ((0.22, 0.42, 1.0), (1.0, 0.28, 0.16))),
+)
 DEFAULT_RANGE_M = 0.30
 DEFAULT_INTENSITY = 0.70
 MIN_INTENSITY, MAX_INTENSITY = 0.10, 2.00
@@ -62,6 +67,9 @@ def lights_from_snapshot(
     snapshot: Any,
     *,
     freshness_limit_ms: float = FRESHNESS_LIMIT_MS,
+    geometry: GeometryState | None = None,
+    palm_controller: PalmLightController | None = None,
+    infinity_enabled: bool = False,
 ) -> tuple[list[LightState], float | None]:
     """Adapt current tracked-hand and HandXYZ records without resampling depth."""
     tracked = {
@@ -107,6 +115,13 @@ def lights_from_snapshot(
         if confidence < 0.04:
             continue
         hand_id = int(xyz.hand_id)
+        oriented = None
+        if infinity_enabled and geometry is not None and palm_controller is not None:
+            oriented = palm_controller.update(
+                hand, geometry, fallback_position=position, mirrored_input=bool(getattr(snapshot, "mirrored_input", True)),
+                intensity=DEFAULT_INTENSITY, color_rgb=LIGHT_COLORS[hand_id % len(LIGHT_COLORS)],
+                range_m=DEFAULT_RANGE_M, source_hand=hand_id, light_id=hand_id, timestamp=float(xyz.timestamp),
+            )
         lights.append(
             LightState(
                 position_camera=position,
@@ -121,6 +136,11 @@ def lights_from_snapshot(
                 source_radius_m=0.018,
                 visual_radius_m=0.035,
                 is_palm_attached=True,
+                palm_normal_camera=None if oriented is None else oriented.palm_normal_camera,
+                orientation_confidence=0.0 if oriented is None else oriented.orientation_confidence,
+                directionality=0.0 if oriented is None else float(np.clip(oriented.orientation_confidence, 0.0, 1.0) * oriented.directionality),
+                beam_inner_angle_deg=32.0,
+                beam_outer_angle_deg=78.0,
             )
         )
         if len(lights) == 2:
@@ -192,14 +212,24 @@ class RelightRenderer:
         self.light_intensity = DEFAULT_INTENSITY
         self.light_range_m = DEFAULT_RANGE_M
         self.light_color_index = 0
+        self.infinity_enabled = False
+        self._palm_controller = PalmLightController()
         self._gesture_enabled: dict[int, bool] = {}
         self._gesture_last_seen: dict[int, float] = {}
         self._recent_lights: dict[int, LightState] = {}
         self.lighting_stage = "full"
 
     def controlled_lights(self, lights: list[LightState]) -> list[LightState]:
-        color = np.asarray(COLOR_PRESETS[self.light_color_index][1], dtype=np.float32)
-        return [replace(light, intensity=self.light_intensity, range_m=self.light_range_m, color_rgb=color.copy()) for light in lights]
+        pair = COLOR_PAIRS[self.light_color_index][1]
+        return [replace(light, intensity=self.light_intensity, range_m=self.light_range_m,
+                        color_rgb=np.asarray(pair[int(light.source_hand) % 2], dtype=np.float32)) for light in lights]
+
+    def toggle_infinity(self) -> bool:
+        self.infinity_enabled = not self.infinity_enabled
+        self._cache_key = None
+        if self._gpu_renderer is not None:
+            self._gpu_renderer.reset_history()
+        return self.infinity_enabled
 
     def set_lighting_quality(self, quality: str) -> None:
         self.lighting_quality = str(quality).lower()
@@ -482,7 +512,10 @@ class RelightRenderer:
 
         self.last_geometry_source_id = geometry.source_frame_id
         self.last_geometry_age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
-        lights, self.last_xyz_source_age_ms = lights_from_snapshot(snapshot)
+        lights, self.last_xyz_source_age_ms = lights_from_snapshot(
+            snapshot, geometry=geometry, palm_controller=self._palm_controller,
+            infinity_enabled=self.infinity_enabled,
+        )
         lights = self.controlled_lights(self._gesture_gated_lights(snapshot, lights))
         key = self._cache_key_for(snapshot, geometry, lights)
         if key == self._cache_key and self._cache_image is not None:
@@ -612,7 +645,7 @@ def handle_control_mouse(event: int, x: int, y: int, flags: int, display_size: t
     if event == cv2.EVENT_LBUTTONUP:
         previous=_active_control; _active_control=None
         if previous in ("intensity","range"): _set_slider(previous,x,controls[previous]); return True
-        if previous == "color": _renderer.light_color_index=(_renderer.light_color_index+1)%len(COLOR_PRESETS); _renderer._cache_key=None; return True
+        if previous == "color": _renderer.light_color_index=(_renderer.light_color_index+1)%len(COLOR_PAIRS); _renderer._cache_key=None; return True
     return False
 
 
@@ -622,7 +655,7 @@ def draw_controls(canvas: np.ndarray, viewport: tuple[int, int, int, int]) -> No
     x,y,w,h=controls["panel"]; cv2.rectangle(canvas,(x,y),(x+w,y+h),(28,32,38),-1)
     for name,value,low,high,label in (("intensity",_renderer.light_intensity,MIN_INTENSITY,MAX_INTENSITY,"INTENSITY"),("range",_renderer.light_range_m,MIN_RANGE_M,MAX_RANGE_M,"RANGE")):
         rx,ry,rw,_=controls[name]; cv2.putText(canvas,f"{label} {value:.2f}",(rx,ry-14),cv2.FONT_HERSHEY_SIMPLEX,.34,(235,235,235),1,cv2.LINE_AA); filled=rx+round(rw*(value-low)/(high-low)); cv2.line(canvas,(rx,ry),(rx+rw,ry),(85,90,100),5); cv2.line(canvas,(rx,ry),(filled,ry),(240,130,40),5); cv2.circle(canvas,(filled,ry),6,(245,245,245),-1)
-    rx,ry,_,_=controls["color"]; name,color=COLOR_PRESETS[_renderer.light_color_index]; cv2.putText(canvas,f"COLOR: {name}",(rx,ry+27),cv2.FONT_HERSHEY_SIMPLEX,.34,tuple(int(c*255) for c in color[::-1]),1,cv2.LINE_AA)
+    rx,ry,_,_=controls["color"]; name,_colors=COLOR_PAIRS[_renderer.light_color_index]; cv2.putText(canvas,f"COLORS: {name}",(rx,ry+27),cv2.FONT_HERSHEY_SIMPLEX,.34,(235,235,235),1,cv2.LINE_AA)
 
 
 def configure(lighting_quality: str = "balanced", backend: str = "auto") -> None:

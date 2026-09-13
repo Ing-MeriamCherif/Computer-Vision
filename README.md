@@ -16,7 +16,7 @@ The setup script installs `requirements.txt` and downloads Depth Anything V2 Sma
 .venv/bin/python -m pytest -q
 ```
 
-Keys `1`–`7` select RGB, depth, normals, temporal confidence, hands, XYZ, and relighting. `D` toggles telemetry, `F` fullscreen, and `Q`/`Esc` exits. Mode 7 reports `RTX_OPTIX`, `OPENGL_RASTER`, or `CPU_FALLBACK`; forced RTX fails clearly when unsupported.
+Keys `1`–`7` select RGB, depth, normals, temporal confidence, hands, XYZ, and relighting. `L` cycles lighting stages, `I` toggles the Level Infinity palm spotlight, `D` toggles telemetry, `F` fullscreen, and `Q`/`Esc` exits. Mode 7 reports `NVIDIA_OPTIX_RT_CORES`, `OPENGL_RASTER`, or `CPU_FALLBACK`; RTX hardware fails closed when real OptiX is unavailable.
 
 ## Architecture
 
@@ -30,6 +30,11 @@ CameraCaptureWorker → LatestFrameSlot(capacity=1)
 ```
 
 The asynchronous workers are latest-only so slow inference never blocks the live display. See [`docs/live-runtime-architecture.md`](docs/live-runtime-architecture.md) and [`docs/gpu-hand-relighting.md`](docs/gpu-hand-relighting.md).
+
+RTX production additionally requires NVIDIA's Python OptiX binding, CuPy,
+`cuda-python`/NVRTC, OptiX SDK headers, and `OPTIX_INCLUDE_DIR`. The real
+production implementation is `geometry/optix_relighting.py` plus
+`geometry/optix_shadow.cu`; the native C++ directory is not the jury path.
 
 ## Verification
 

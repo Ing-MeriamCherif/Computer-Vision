@@ -31,7 +31,7 @@ def test_mode7_controls_drag_power_and_range_and_cycle_color():
         controlled = renderer.controlled_lights([light])[0]
         assert controlled.intensity == relight.MAX_INTENSITY
         assert controlled.range_m == relight.MIN_RANGE_M
-        np.testing.assert_allclose(controlled.color_rgb, relight.COLOR_PRESETS[1][1])
+        np.testing.assert_allclose(controlled.color_rgb, relight.COLOR_PAIRS[1][1][0])
     finally:
         renderer.light_intensity, renderer.light_range_m, renderer.light_color_index = previous
         relight._active_control = None

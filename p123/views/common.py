@@ -621,7 +621,8 @@ def draw_viewport_hud(
             "l4_shadows": "L4 · DYNAMIC SHADOWS",
             "full": "FULL · SHADOWS + VOLUMETRICS",
         }.get(getattr(renderer, "lighting_stage", "full"), "FULL")
-        desc = f"{stage_label} | {backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
+        infinity = " | ∞ SPATIAL FLASHLIGHT ON" if getattr(renderer, "infinity_enabled", False) else ""
+        desc = f"{stage_label}{infinity} | {backend} {renderer.last_light_count}L {renderer.last_render_ms:.1f}ms S:{shadow} V:{volume} G:{renderer.last_geometry_age_ms or 0:.0f}ms {xyz_text}{suffix}"
         draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 

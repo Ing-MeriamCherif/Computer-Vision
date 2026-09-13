@@ -245,6 +245,9 @@ def main() -> int:
                     ui_state["show_debug"] = not ui_state.get("show_debug", False)
                 elif key in (ord("l"), ord("L")) and mode == 7:
                     print(f"Mode 7 stage: {relight_view._renderer.cycle_lighting_stage()}", flush=True)
+                elif key in (ord("i"), ord("I")) and mode == 7:
+                    enabled = relight_view._renderer.toggle_infinity()
+                    print(f"Level Infinity spatial flashlight: {'ON' if enabled else 'OFF'}", flush=True)
                 elif key in (ord("c"), ord("C")):
                     ui_state["requested_source"] = "phone" if selected_source == "webcam" else "webcam"
                 elif key in (ord("f"), ord("F")):

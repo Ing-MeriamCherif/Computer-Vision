@@ -9,6 +9,12 @@ frame. Depth discontinuities and invalid samples are excluded. Volumetric
 scattering still uses the existing screen-space visibility marcher; this is
 not full path tracing and monocular depth cannot reveal hidden geometry.
 
+Each receiver/light traces four deterministic finite-area rays. Two lights use
+independent R/G visibility channels, and full-resolution shading reconstructs
+the coarse RT visibility with depth-aware weights. RTX production is
+fail-closed: OptiX initialization or runtime failure is fatal rather than a
+silent raster fallback.
+
 It uses `fast_geometry_state` when available, falling back to `geometry_state`,
 and positions lights from fresh `HandXYZ.xyz_camera`; it never samples palm
 depth to infer a production light position. RGB is converted from sRGB to
@@ -53,7 +59,9 @@ present before starting `--hand-backend auto`.
 Quality can be selected with `--lighting-quality low|balanced|high`. The RT
 grid defaults to 96x54, configurable with `NRW_RT_WIDTH` and `NRW_RT_HEIGHT`;
 this keeps RT traversal light while maintaining a full-resolution final
-image. The last relight/session stats expose `ray_backend`, `rt_trace_ms`, and
+surface. Press `I` to toggle Level Infinity spatial flashlight mode: HandXYZ
+remains the emitter position while the existing palm normal controls each
+light's surface and volumetric beam independently. The last relight/session stats expose `ray_backend`, `rt_trace_ms`, and
 `gpu_render_ms`; on the RTX 4060 Laptop at 1280x720 the balanced relight pass
 measured about 33 ms (~30 FPS), excluding camera capture and depth inference.
 The
@@ -76,7 +84,7 @@ avoids this copy. Create `NativeOpenGLWindow` first, pass its GLFW window as
 `NativeOpenGLWindow.render_texture()`. The shared GL context owns the texture;
 close the renderer and window during shutdown.
 
-Balanced settings use one RT-core surface visibility ray per coarse sample,
+Balanced settings use four finite-area RT-core visibility rays per light and coarse sample,
 quarter-resolution volumetrics with six camera samples and four
 sample-to-light visibility steps, and conservative depth-rejected temporal
 history. The surface fallback uses deterministic screen-space rays. No

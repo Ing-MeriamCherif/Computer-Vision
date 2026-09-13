@@ -396,6 +396,22 @@ def test_mode7_stage_selector_cycles_without_rebuilding_renderer():
     assert renderer.cycle_lighting_stage() == "full"
 
 
+def test_level_infinity_toggle_preserves_handxyz_and_two_light_identity():
+    snapshot = _snapshot(hand_count=2)
+    renderer = RelightRenderer(use_gpu=False)
+    assert renderer.toggle_infinity() is True
+    lights, _ = relight_view.lights_from_snapshot(
+        snapshot, geometry=snapshot.geometry_state,
+        palm_controller=renderer._palm_controller, infinity_enabled=True,
+    )
+    controlled = renderer.controlled_lights(lights)
+    assert len(controlled) == 2
+    np.testing.assert_allclose(controlled[0].position_camera, snapshot.xyz[0].xyz_camera)
+    np.testing.assert_allclose(controlled[1].position_camera, snapshot.xyz[1].xyz_camera)
+    assert controlled[0].light_id != controlled[1].light_id
+    assert not np.array_equal(controlled[0].color_rgb, controlled[1].color_rgb)
+
+
 def test_auto_rtx_failure_is_cached(monkeypatch):
     calls = []
 
