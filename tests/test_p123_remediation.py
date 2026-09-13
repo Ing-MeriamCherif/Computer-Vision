@@ -131,3 +131,18 @@ def test_hand_control_has_no_p4_depth_sampling_dependency():
 
     source = Path("geometry/hand_control.py").read_text(encoding="utf-8")
     assert "from .lighting import sample_depth" not in source
+
+
+def test_fast_temporal_confidence_is_native_and_scale_invariant():
+    from geometry.p123_live_runtime import _fast_temporal_confidence
+
+    previous = np.full((2, 3), 2.0, np.float32)
+    current = np.full((2, 3), 4.0, np.float32)
+    confidence = _fast_temporal_confidence(previous, current, None, None)
+    assert confidence.shape == previous.shape
+    assert np.all(confidence > 0.99)
+
+    changed = current.copy()
+    changed[0, 0] = 8.0
+    confidence = _fast_temporal_confidence(previous, changed, None, None)
+    assert confidence[0, 0] < confidence[1, 1]

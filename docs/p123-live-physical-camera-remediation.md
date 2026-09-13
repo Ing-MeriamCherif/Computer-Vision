@@ -18,10 +18,12 @@ with `--depth-backend colleague --depth-size 420`.
 
 Physical webcam smoke (`--depth-size native`, FP32, 10 seconds): capture
 31.18 Hz, depth 9.24 Hz, CUDA normals 8.76 Hz, temporal geometry 1.76 Hz,
-hands 30.14 Hz. The live normals panel consumes the independent CUDA geometry
-stream; temporal CPU diagnostics remain available in mode 4 without blocking
-normals. The camera/display cadence is independent from all slower workers;
-each worker publishes only its newest completed state.
+hands 30.14 Hz. A follow-up run measured CUDA normals 8.43 Hz and the
+lightweight live temporal-confidence map 8.43 Hz, while the full CPU temporal
+geometry remained 1.37 Hz. The live normals and mode-4 panels consume the
+independent fast stream; full temporal diagnostics remain available for the
+P4 contract without blocking them. The camera/display cadence is independent
+from all slower workers; each worker publishes only its newest completed state.
 
 ============================================================
 SCOPE GUARD

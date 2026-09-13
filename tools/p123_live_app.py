@@ -71,13 +71,14 @@ def _panel(
             title = "MODE 3 — NORMALS (CUDA live, R=Nx G=Ny B=Nz)"
             waiting = None
     elif mode == 4:
-        if snapshot.geometry_state is None:
+        temporal_state = snapshot.fast_geometry_state or snapshot.geometry_state
+        if temporal_state is None or temporal_state.temporal_confidence is None:
             image = np.zeros_like(rgb)
             title = "MODE 4 — TEMPORAL / CONFIDENCE"
             waiting = "waiting for temporal geometry"
         else:
-            image = confidence_to_rgb(snapshot.geometry_state.temporal_confidence, snapshot.geometry_state.valid_mask)
-            title = "MODE 4 — TEMPORAL CONFIDENCE"
+            image = confidence_to_rgb(temporal_state.temporal_confidence, temporal_state.valid_mask)
+            title = "MODE 4 — TEMPORAL CONFIDENCE (fast live)" if snapshot.fast_geometry_state is not None else "MODE 4 — TEMPORAL CONFIDENCE"
             waiting = None
     elif mode == 5:
         image = rgb.copy()
@@ -100,7 +101,7 @@ def _panel(
     metrics = snapshot.metrics
     lines = [
         f"capture {snapshot.rgb_capture_id} | capture Hz {metrics.capture_hz or 0:.1f} | overwritten {metrics.overwritten_before_consumption}",
-        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz | temporal {metrics.geometry_hz or 0:.1f} Hz | hand {metrics.hand_hz or 0:.1f} Hz",
+        f"depth {metrics.depth_hz or 0:.1f} Hz age p95 {metrics.depth_age_p95_ms or 0:.0f} ms | normals {metrics.normal_hz or 0:.1f} Hz | temporal {metrics.temporal_hz or 0:.1f} Hz | hand {metrics.hand_hz or 0:.1f} Hz",
     ]
     if snapshot.geometry_state is not None:
         lines.append(f"depth source {snapshot.geometry_state.source_frame_id} | processing {snapshot.geometry_state.processing_frame_id}")

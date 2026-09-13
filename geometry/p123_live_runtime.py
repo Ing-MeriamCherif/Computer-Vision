@@ -71,6 +71,37 @@ def _percentile(values: list[float], p: float) -> float | None:
     return float(np.percentile(values, p)) if values else None
 
 
+def _fast_temporal_confidence(
+    previous_depth: np.ndarray | None,
+    current_depth: np.ndarray,
+    current_valid: np.ndarray | None,
+    current_confidence: np.ndarray | None,
+) -> np.ndarray:
+    """Compute a cheap native-resolution depth-consistency confidence map."""
+    current = np.asarray(current_depth, dtype=np.float32)
+    valid = np.isfinite(current) & (current > 1e-6)
+    if current_valid is not None:
+        valid &= np.asarray(current_valid, dtype=bool)
+    if previous_depth is None:
+        confidence = np.ones(current.shape, dtype=np.float32)
+    else:
+        previous = np.asarray(previous_depth, dtype=np.float32)
+        if previous.shape != current.shape:
+            return np.zeros(current.shape, dtype=np.float32)
+        overlap = valid & np.isfinite(previous) & (previous > 1e-6)
+        if not overlap.any():
+            return np.zeros(current.shape, dtype=np.float32)
+        prev_med = float(np.median(previous[overlap]))
+        curr_med = float(np.median(current[overlap]))
+        aligned = current * (prev_med / max(curr_med, 1e-6))
+        relative_error = np.abs(aligned - previous) / np.maximum(np.abs(previous), 1e-6)
+        confidence = np.exp(-np.clip(relative_error / 0.12, 0.0, 8.0)).astype(np.float32)
+        valid &= overlap
+    if current_confidence is not None:
+        confidence *= np.clip(np.nan_to_num(np.asarray(current_confidence, dtype=np.float32)), 0.0, 1.0)
+    return np.where(valid, np.clip(confidence, 0.0, 1.0), 0.0).astype(np.float32)
+
+
 class P123LiveRuntime:
     """Run camera, depth, geometry/temporal, and hands on independent workers."""
 
@@ -148,6 +179,7 @@ class P123LiveRuntime:
         self._depth_times: list[float] = []
         self._geometry_times: list[float] = []
         self._normal_times: list[float] = []
+        self._fast_temporal_times: list[float] = []
         self._hand_times: list[float] = []
         self._xyz_times: list[float] = []
         self._depth_ages: list[float] = []
@@ -248,6 +280,7 @@ class P123LiveRuntime:
         if self._normal_backend is None:
             return
         last_depth_id: int | str | None = None
+        previous_depth: np.ndarray | None = None
         while self._running:
             state = self._depth_states.get()
             if state is None or state.source_frame_id == last_depth_id:
@@ -264,9 +297,14 @@ class P123LiveRuntime:
                     input_confidence=state.confidence,
                 )
                 fast.processing_frame_id = state.source_frame_id
+                fast.temporal_confidence = _fast_temporal_confidence(
+                    previous_depth, state.depth, state.valid_mask, state.confidence
+                )
                 with self._state_lock:
                     self._fast_geometry = fast
                 self._normal_times.append(time.monotonic())
+                self._fast_temporal_times.append(time.monotonic())
+                previous_depth = np.asarray(state.depth, dtype=np.float32).copy()
                 last_depth_id = state.source_frame_id
             except Exception:
                 # Keep the temporal worker/UI alive if CUDA geometry rejects a frame.
@@ -336,7 +374,7 @@ class P123LiveRuntime:
             )
         now = time.monotonic()
         metrics = P123Metrics(
-            self.camera_worker.actual_fps if self.camera_worker.captured_frames > 1 else _rate(self._capture_times), _rate(self._depth_times), _rate(self._geometry_times), _rate(self._geometry_times), _rate(self._hand_times), _rate(self._xyz_times),
+            self.camera_worker.actual_fps if self.camera_worker.captured_frames > 1 else _rate(self._capture_times), _rate(self._depth_times), _rate(self._geometry_times), _rate(self._fast_temporal_times), _rate(self._hand_times), _rate(self._xyz_times),
             _percentile(self._depth_ages, 50), _percentile(self._depth_ages, 95), _percentile(self._geometry_ages, 95), _percentile(self._hand_ages, 95), _percentile(self._xyz_ages, 95),
             self.camera_worker.captured_frames, self.camera_worker.overwritten_before_consumption, self._depth_errors,
             _rate(self._normal_times),
