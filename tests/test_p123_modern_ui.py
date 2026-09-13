@@ -87,8 +87,12 @@ def test_layout_computation_across_resolutions():
         layout = common.compute_layout((w, h))
         assert layout["w"] == w
         assert layout["h"] == h
-        assert 35 <= layout["header_h"] <= 55
-        assert 140 <= layout["sidebar_w"] <= 220
+        if layout.get("is_fhd"):
+            assert 42 <= layout["header_h"] <= 68
+            assert 160 <= layout["sidebar_w"] <= 290
+        else:
+            assert 35 <= layout["header_h"] <= 55
+            assert 140 <= layout["sidebar_w"] <= 220
         assert layout["vw"] > 0
         assert layout["vh"] > 0
         assert len(layout["buttons_rects"]) == 6
@@ -165,6 +169,9 @@ def test_debug_overlay_hud():
 
 def test_display_size_parser():
     assert _parse_display_size("native", (640, 480)) == (640, 480)
-    assert _parse_display_size("auto", (640, 480)) == (960, 600)
+    assert _parse_display_size("auto", (640, 480)) == (1920, 1080)
+    assert _parse_display_size("fhd", (640, 480)) == (1920, 1080)
+    assert _parse_display_size("1080p", (640, 480)) == (1920, 1080)
+    assert _parse_display_size("fullscreen", (640, 480)) == (1920, 1080)
     assert _parse_display_size("1280x720", (640, 480)) == (1280, 720)
     assert _parse_display_size("800", (640, 480)) == (800, 800)

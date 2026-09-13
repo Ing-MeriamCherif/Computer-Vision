@@ -161,29 +161,32 @@ def draw_pill(
 def compute_layout(display_size: tuple[int, int]) -> dict[str, Any]:
     """Compute responsive dimensions and bounds for header, sidebar, and viewport."""
     w, h = display_size
-    header_h = min(48, max(38, int(h * 0.08)))
-    sidebar_w = min(210, max(140, int(w * 0.22)))
-    vx = sidebar_w + 6
-    vy = header_h + 6
-    vw = max(100, w - vx - 8)
-    vh = max(100, h - vy - 8)
+    is_fhd = (w >= 1400 or h >= 800)
 
-    nav_y0 = header_h + 24
-    footer_h = 44
-    nav_available_h = h - nav_y0 - footer_h - 12
-    button_h = max(32, min(52, nav_available_h // len(NAV_ITEMS) - 4))
-    button_gap = 4
+    header_h = int(np.clip(h * 0.062, 42, 68)) if is_fhd else min(48, max(38, int(h * 0.08)))
+    sidebar_w = int(np.clip(w * 0.15, 160, 290)) if is_fhd else min(210, max(140, int(w * 0.22)))
+    vx = sidebar_w + (8 if is_fhd else 6)
+    vy = header_h + (8 if is_fhd else 6)
+    vw = max(100, w - vx - (10 if is_fhd else 8))
+    vh = max(100, h - vy - (10 if is_fhd else 8))
+
+    footer_h = 58 if is_fhd else 44
+    nav_y0 = header_h + (30 if is_fhd else 24)
+    nav_available_h = h - nav_y0 - footer_h - (16 if is_fhd else 12)
+    button_h = int(np.clip(nav_available_h // len(NAV_ITEMS) - (8 if is_fhd else 4), 34, 88))
+    button_gap = 6 if is_fhd else 4
 
     buttons_rects = []
     for idx, (mode_id, name, sub) in enumerate(NAV_ITEMS):
-        bx = 8
+        bx = 10 if is_fhd else 8
         by = nav_y0 + idx * (button_h + button_gap)
-        bw = sidebar_w - 16
+        bw = sidebar_w - (20 if is_fhd else 16)
         buttons_rects.append((mode_id, bx, by, bw, button_h, name, sub))
 
     return {
         "w": w,
         "h": h,
+        "is_fhd": is_fhd,
         "header_h": header_h,
         "sidebar_w": sidebar_w,
         "vx": vx,
@@ -221,14 +224,16 @@ def draw_header(
     """Draw sleek top live-status header with camera, display, depth, and hardware telemetry."""
     w = layout["w"]
     header_h = layout["header_h"]
+    is_fhd = layout.get("is_fhd", False)
 
     # Header background surface
     draw_rounded_rect(canvas, 0, 0, w, header_h, 0, fill_color=COLOR_CONTAINER_LOW)
     cv2.line(canvas, (0, header_h - 1), (w, header_h - 1), COLOR_BORDER_SUBTLE, 1, cv2.LINE_AA)
 
     # Left: Brand / Mode Indicator
-    brand_x = 10
-    brand_y = (header_h - 24) // 2
+    brand_x = 12 if is_fhd else 10
+    brand_h = 28 if is_fhd else 24
+    brand_y = (header_h - brand_h) // 2
     draw_pill(
         canvas,
         brand_x,
@@ -238,9 +243,9 @@ def draw_header(
         COLOR_CONTAINER,
         dot_color=COLOR_PRIMARY_ACCENT,
         border_color=COLOR_BORDER_SUBTLE,
-        font_scale=0.36,
-        padding_x=8,
-        padding_y=3,
+        font_scale=0.42 if is_fhd else 0.36,
+        padding_x=10 if is_fhd else 8,
+        padding_y=4 if is_fhd else 3,
     )
 
     # Right: Telemetry chips
@@ -283,14 +288,18 @@ def draw_header(
         chips.append((xyz_text, xyz_color, xyz_color))
         chips.append(("CUDA", COLOR_STATUS_CYAN, None))
 
-    curr_x = w - 10
-    chip_y = (header_h - 22) // 2
+    curr_x = w - 12
+    chip_h = 26 if is_fhd else 22
+    chip_y = (header_h - chip_h) // 2
+    chip_font = 0.38 if is_fhd else 0.34
+    chip_pad_x = 8 if is_fhd else 6
+    chip_pad_y = 3 if is_fhd else 2
     for text, tcolor, dcolor in reversed(chips):
-        tsize = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.34, 1)[0]
-        dot_offset = 12 if dcolor is not None else 0
-        pw = tsize[0] + dot_offset + 14
-        curr_x -= pw + 4
-        if curr_x < 180:
+        tsize = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, chip_font, 1)[0]
+        dot_offset = 14 if dcolor is not None else 0
+        pw = tsize[0] + dot_offset + chip_pad_x * 2
+        curr_x -= pw + 6
+        if curr_x < (240 if is_fhd else 180):
             break
         draw_pill(
             canvas,
@@ -301,9 +310,9 @@ def draw_header(
             COLOR_CONTAINER,
             dot_color=dcolor,
             border_color=COLOR_BORDER_SUBTLE,
-            font_scale=0.34,
-            padding_x=6,
-            padding_y=2,
+            font_scale=chip_font,
+            padding_x=chip_pad_x,
+            padding_y=chip_pad_y,
         )
 
 
@@ -320,6 +329,7 @@ def draw_sidebar(
     sidebar_w = layout["sidebar_w"]
     header_h = layout["header_h"]
     h = layout["h"]
+    is_fhd = layout.get("is_fhd", False)
 
     # Background surface
     draw_rounded_rect(canvas, 0, header_h, sidebar_w, h - header_h, 0, fill_color=COLOR_CONTAINER_LOW)
@@ -329,9 +339,9 @@ def draw_sidebar(
     cv2.putText(
         canvas,
         "VIEW MODES",
-        (12, header_h + 16),
+        (14 if is_fhd else 12, header_h + (20 if is_fhd else 16)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.34,
+        0.38 if is_fhd else 0.34,
         COLOR_TEXT_TERTIARY,
         1,
         cv2.LINE_AA,
@@ -342,49 +352,58 @@ def draw_sidebar(
         is_active = (mode_id == active_mode)
         bg = COLOR_CONTAINER_ACTIVE if is_active else COLOR_CONTAINER
         border = COLOR_BORDER_ACTIVE if is_active else COLOR_BORDER_SUBTLE
-        draw_rounded_rect(canvas, bx, by, bw, bh, 8, fill_color=bg, border_color=border)
+        draw_rounded_rect(canvas, bx, by, bw, bh, 10 if is_fhd else 8, fill_color=bg, border_color=border)
 
         # Active indicator vertical bar
         if is_active:
-            draw_rounded_rect(canvas, bx + 2, by + 4, 3, bh - 8, 1, fill_color=COLOR_PRIMARY_ACCENT)
+            bar_w = 4 if is_fhd else 3
+            draw_rounded_rect(canvas, bx + 2, by + 4, bar_w, bh - 8, 1, fill_color=COLOR_PRIMARY_ACCENT)
 
         # Mode number pill
-        badge_w, badge_h = 16, 16
-        badge_x = bx + (10 if is_active else 8)
+        badge_w, badge_h = (22, 22) if is_fhd else (16, 16)
+        badge_x = bx + (12 if is_active else 10)
         badge_y = by + (bh - badge_h) // 2
         badge_bg = COLOR_PRIMARY_ACCENT if is_active else COLOR_CONTAINER_HIGH
         badge_fg = COLOR_SURFACE_DARK if is_active else COLOR_TEXT_SECONDARY
-        draw_rounded_rect(canvas, badge_x, badge_y, badge_w, badge_h, 4, fill_color=badge_bg)
+        draw_rounded_rect(canvas, badge_x, badge_y, badge_w, badge_h, 5 if is_fhd else 4, fill_color=badge_bg)
+        badge_font = 0.40 if is_fhd else 0.34
+        badge_offset_y = 16 if is_fhd else 12
+        badge_offset_x = 6 if is_fhd else 4
         cv2.putText(
             canvas,
             str(mode_id),
-            (badge_x + 4, badge_y + 12),
+            (badge_x + badge_offset_x, badge_y + badge_offset_y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.34,
+            badge_font,
             badge_fg,
             1,
             cv2.LINE_AA,
         )
 
         # Text labels
-        tx = badge_x + badge_w + 6
+        tx = badge_x + badge_w + (10 if is_fhd else 6)
         if bh >= 42:
             name_color = COLOR_TEXT_PRIMARY if is_active else COLOR_TEXT_SECONDARY
-            cv2.putText(canvas, name, (tx, by + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.38, name_color, 1, cv2.LINE_AA)
+            name_font = 0.46 if is_fhd else 0.38
+            name_y = by + (22 if is_fhd else 16)
+            cv2.putText(canvas, name, (tx, name_y), cv2.FONT_HERSHEY_SIMPLEX, name_font, name_color, 1, cv2.LINE_AA)
             sub_color = COLOR_PRIMARY_ACCENT if is_active else COLOR_TEXT_TERTIARY
-            cv2.putText(canvas, sub, (tx, by + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.30, sub_color, 1, cv2.LINE_AA)
+            sub_font = 0.36 if is_fhd else 0.30
+            sub_y = by + (40 if is_fhd else 30)
+            cv2.putText(canvas, sub, (tx, sub_y), cv2.FONT_HERSHEY_SIMPLEX, sub_font, sub_color, 1, cv2.LINE_AA)
         else:
             name_color = COLOR_TEXT_PRIMARY if is_active else COLOR_TEXT_SECONDARY
-            cv2.putText(canvas, name, (tx, by + (bh + 4) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.36, name_color, 1, cv2.LINE_AA)
+            cv2.putText(canvas, name, (tx, by + (bh + 4) // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.38, name_color, 1, cv2.LINE_AA)
 
     # Shortcuts Card at bottom of sidebar
-    card_h = 38
-    card_y = h - card_h - 6
-    card_x = 8
-    card_w = sidebar_w - 16
-    draw_rounded_rect(canvas, card_x, card_y, card_w, card_h, 6, fill_color=COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
-    cv2.putText(canvas, "[1-6] Mode   [D] HUD", (card_x + 6, card_y + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.30, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
-    cv2.putText(canvas, "[F] Fullscr  [Q] Exit", (card_x + 6, card_y + 29), cv2.FONT_HERSHEY_SIMPLEX, 0.30, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
+    card_h = 48 if is_fhd else 38
+    card_y = h - card_h - (10 if is_fhd else 6)
+    card_x = 10 if is_fhd else 8
+    card_w = sidebar_w - (20 if is_fhd else 16)
+    draw_rounded_rect(canvas, card_x, card_y, card_w, card_h, 8 if is_fhd else 6, fill_color=COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+    hint_font = 0.34 if is_fhd else 0.30
+    cv2.putText(canvas, "[1-6] Mode   [D] HUD", (card_x + 8, card_y + (18 if is_fhd else 15)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
+    cv2.putText(canvas, "[F] Fullscr  [Q] Exit", (card_x + 8, card_y + (36 if is_fhd else 29)), cv2.FONT_HERSHEY_SIMPLEX, hint_font, COLOR_TEXT_TERTIARY, 1, cv2.LINE_AA)
 
 
 # ============================================================================
@@ -419,10 +438,11 @@ def draw_state_card(
     subtitle: str,
     status_tag: str,
     status_color: tuple[int, int, int] = COLOR_STATUS_AMBER,
+    is_fhd: bool = False,
 ) -> None:
     """Render a Material 3 centered card for waiting, loading, degraded, or empty states."""
-    card_w = min(420, vw - 32)
-    card_h = 130
+    card_w = min(540, vw - 48) if is_fhd else min(420, vw - 32)
+    card_h = 160 if is_fhd else 130
     cx = vx + (vw - card_w) // 2
     cy = vy + (vh - card_h) // 2
 
@@ -433,7 +453,7 @@ def draw_state_card(
         cy,
         card_w,
         card_h,
-        12,
+        14 if is_fhd else 12,
         fill_color=COLOR_CONTAINER,
         alpha=0.92,
         border_color=COLOR_BORDER_STRONG,
@@ -443,25 +463,25 @@ def draw_state_card(
     # Status tag pill
     draw_pill(
         canvas,
-        cx + 16,
-        cy + 16,
+        cx + (20 if is_fhd else 16),
+        cy + (20 if is_fhd else 16),
         status_tag,
         status_color,
         COLOR_CONTAINER_HIGH,
         dot_color=status_color,
         border_color=COLOR_BORDER_SUBTLE,
-        font_scale=0.34,
-        padding_x=8,
-        padding_y=3,
+        font_scale=0.38 if is_fhd else 0.34,
+        padding_x=10 if is_fhd else 8,
+        padding_y=4 if is_fhd else 3,
     )
 
     # Title
     cv2.putText(
         canvas,
         title,
-        (cx + 16, cy + 58),
+        (cx + (20 if is_fhd else 16), cy + (72 if is_fhd else 58)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.50,
+        0.58 if is_fhd else 0.50,
         COLOR_TEXT_PRIMARY,
         1,
         cv2.LINE_AA,
@@ -471,9 +491,9 @@ def draw_state_card(
     cv2.putText(
         canvas,
         subtitle,
-        (cx + 16, cy + 80),
+        (cx + (20 if is_fhd else 16), cy + (100 if is_fhd else 80)),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.36,
+        0.42 if is_fhd else 0.36,
         COLOR_TEXT_SECONDARY,
         1,
         cv2.LINE_AA,
@@ -482,10 +502,10 @@ def draw_state_card(
     # Rhythmic pulsing dot animation
     phase = int((time.monotonic() * 3) % 3)
     for i in range(3):
-        dot_x = cx + 16 + i * 14
-        dot_y = cy + 104
+        dot_x = cx + (20 if is_fhd else 16) + i * (18 if is_fhd else 14)
+        dot_y = cy + (130 if is_fhd else 104)
         dot_col = status_color if i == phase else COLOR_TEXT_TERTIARY
-        cv2.circle(canvas, (dot_x, dot_y), 3, dot_col, -1, cv2.LINE_AA)
+        cv2.circle(canvas, (dot_x, dot_y), 4 if is_fhd else 3, dot_col, -1, cv2.LINE_AA)
 
 
 def draw_viewport_hud(
@@ -498,6 +518,7 @@ def draw_viewport_hud(
     mode: int,
     snapshot: Any,
     waiting: str | None,
+    is_fhd: bool = False,
 ) -> None:
     """Render top-left mode tag and bottom contextual diagnostics inside the viewport."""
     # Top-Left View Title Pill
@@ -505,41 +526,44 @@ def draw_viewport_hud(
     dot_color = COLOR_STATUS_GREEN if waiting is None else COLOR_STATUS_AMBER
     draw_pill(
         canvas,
-        vx + 12,
-        vy + 12,
+        vx + (16 if is_fhd else 12),
+        vy + (16 if is_fhd else 12),
         title_text,
         COLOR_TEXT_PRIMARY,
         COLOR_CONTAINER,
         dot_color=dot_color,
         border_color=COLOR_BORDER_STRONG,
-        font_scale=0.38,
-        padding_x=10,
-        padding_y=4,
+        font_scale=0.46 if is_fhd else 0.38,
+        padding_x=12 if is_fhd else 10,
+        padding_y=5 if is_fhd else 4,
     )
 
     # Bottom Contextual Diagnostic Bar
     metrics = snapshot.metrics if snapshot is not None else None
-    bottom_y = vy + vh - 32
+    bottom_y = vy + vh - (40 if is_fhd else 32)
+    b_font = 0.40 if is_fhd else 0.34
+    b_pad_x = 10 if is_fhd else 8
+    b_pad_y = 4 if is_fhd else 3
     if mode == 1:
         fid = snapshot.rgb_capture_id if snapshot else 0
         desc = f"Sensor Frame #{fid} | Cadence {(metrics.capture_hz or 0):.1f} Hz | Overwritten {metrics.overwritten_before_consumption if metrics else 0}"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_TEXT_SECONDARY, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_TEXT_SECONDARY, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 2:
         desc = "Scale: Warm Near (Yellow/Red) -> Cool Far (Blue/Purple) | Mariem CUDA Depth"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_CYAN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 3:
         desc = "Normals: +X Right (Red) | +Y Down (Green) | +Z Forward (Blue) | Multiscale R=1..4"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_STATUS_PURPLE, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_PURPLE, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 4:
         desc = "Confidence: Green = Stable Geometry | Dark/Red = Inconsistent / Motion"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 5:
         count = len(snapshot.hand_state.hands) if (snapshot and snapshot.hand_state) else 0
         desc = f"Talel Tracker: {count} hands tracked | MediaPipe landmarks (21 pts) + Optical Flow"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_PRIMARY_ACCENT, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_PRIMARY_ACCENT, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
     elif mode == 6:
         desc = "P123 XYZ Contract: Camera-relative metric coordinates (X right, Y down, Z forward in meters)"
-        draw_pill(canvas, vx + 12, bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE)
+        draw_pill(canvas, vx + (16 if is_fhd else 12), bottom_y, desc, COLOR_STATUS_GREEN, COLOR_CONTAINER, border_color=COLOR_BORDER_SUBTLE, font_scale=b_font, padding_x=b_pad_x, padding_y=b_pad_y)
 
 
 def draw_debug_overlay(
@@ -550,16 +574,17 @@ def draw_debug_overlay(
     vh: int,
     snapshot: Any,
     display_fps: float | None = None,
+    is_fhd: bool = False,
 ) -> None:
     """Floating telemetry card toggled with 'D'."""
     metrics = snapshot.metrics if snapshot is not None else None
     if metrics is None:
         return
 
-    card_w = min(460, vw - 24)
-    card_h = 160
-    cx = vx + 12
-    cy = vy + 44
+    card_w = min(560, vw - 32) if is_fhd else min(460, vw - 24)
+    card_h = 190 if is_fhd else 160
+    cx = vx + (16 if is_fhd else 12)
+    cy = vy + (54 if is_fhd else 44)
 
     draw_rounded_rect_alpha(
         canvas,
@@ -567,14 +592,15 @@ def draw_debug_overlay(
         cy,
         card_w,
         card_h,
-        10,
+        12 if is_fhd else 10,
         fill_color=COLOR_CONTAINER_LOW,
         alpha=0.92,
         border_color=COLOR_BORDER_ACTIVE,
         border_thickness=1,
     )
 
-    cv2.putText(canvas, "ENGINE PIPELINE TELEMETRY [DEBUG HUD]", (cx + 12, cy + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.40, COLOR_PRIMARY_ACCENT, 1, cv2.LINE_AA)
+    title_scale = 0.46 if is_fhd else 0.40
+    cv2.putText(canvas, "ENGINE PIPELINE TELEMETRY [DEBUG HUD]", (cx + 14, cy + (26 if is_fhd else 20)), cv2.FONT_HERSHEY_SIMPLEX, title_scale, COLOR_PRIMARY_ACCENT, 1, cv2.LINE_AA)
     lines = [
         f"Camera Capture:  {metrics.capture_hz or 0:.1f} Hz | Overwrites: {metrics.overwritten_before_consumption} | Total: {metrics.captured}",
         f"Display UI:      {display_fps or 0:.1f} FPS (decoupled render loop)",
@@ -584,8 +610,11 @@ def draw_debug_overlay(
         f"Hand Tracking:   {metrics.hand_hz or 0:.1f} Hz | Latency p95: {metrics.hand_age_p95_ms or 0:.1f} ms",
         f"XYZ Projection:  {metrics.xyz_hz or 0:.1f} Hz | Latency p95: {metrics.xyz_age_p95_ms or 0:.1f} ms",
     ]
+    line_font = 0.36 if is_fhd else 0.32
+    step_y = 20 if is_fhd else 16
+    start_y = 52 if is_fhd else 40
     for i, line in enumerate(lines):
-        cv2.putText(canvas, line, (cx + 12, cy + 40 + i * 16), cv2.FONT_HERSHEY_SIMPLEX, 0.32, COLOR_TEXT_SECONDARY, 1, cv2.LINE_AA)
+        cv2.putText(canvas, line, (cx + 14, cy + start_y + i * step_y), cv2.FONT_HERSHEY_SIMPLEX, line_font, COLOR_TEXT_SECONDARY, 1, cv2.LINE_AA)
 
 
 # ============================================================================
@@ -632,6 +661,8 @@ def finish(
     # Viewport border outline
     draw_rounded_rect(canvas, vx, vy, vw, vh, 8, fill_color=None, border_color=COLOR_BORDER_SUBTLE, border_thickness=1)
 
+    is_fhd = layout.get("is_fhd", False)
+
     # Handle Empty/Waiting/Loading States
     if waiting:
         if "camera" in waiting.lower():
@@ -645,6 +676,7 @@ def finish(
                 "Connecting to physical video device (/dev/video0)...",
                 "CONNECTING",
                 COLOR_STATUS_AMBER,
+                is_fhd=is_fhd,
             )
         elif "depth" in waiting.lower():
             draw_state_card(
@@ -657,6 +689,7 @@ def finish(
                 "Warming up TensorRT / CUDA depth estimation worker...",
                 "INITIALIZING",
                 COLOR_STATUS_CYAN,
+                is_fhd=is_fhd,
             )
         elif "geometry" in waiting.lower():
             draw_state_card(
@@ -669,6 +702,7 @@ def finish(
                 "Awaiting valid depth frames for CUDA normals calculation...",
                 "CALCULATING",
                 COLOR_STATUS_PURPLE,
+                is_fhd=is_fhd,
             )
         elif "temporal" in waiting.lower():
             draw_state_card(
@@ -681,6 +715,7 @@ def finish(
                 "Accumulating multi-frame depth confidence baseline...",
                 "STABILIZING",
                 COLOR_STATUS_GREEN,
+                is_fhd=is_fhd,
             )
         else:
             draw_state_card(
@@ -693,10 +728,11 @@ def finish(
                 waiting,
                 "STATUS",
                 COLOR_STATUS_AMBER,
+                is_fhd=is_fhd,
             )
 
     # In-viewport HUD overlays
-    draw_viewport_hud(canvas, vx, vy, vw, vh, title, mode, snapshot, waiting)
+    draw_viewport_hud(canvas, vx, vy, vw, vh, title, mode, snapshot, waiting, is_fhd=is_fhd)
 
     # Draw Header & Sidebar
     draw_header(canvas, snapshot, layout, display_fps=display_fps)
@@ -704,6 +740,6 @@ def finish(
 
     # Debug HUD Overlay if enabled
     if show_debug:
-        draw_debug_overlay(canvas, vx, vy, vw, vh, snapshot, display_fps=display_fps)
+        draw_debug_overlay(canvas, vx, vy, vw, vh, snapshot, display_fps=display_fps, is_fhd=is_fhd)
 
     return canvas

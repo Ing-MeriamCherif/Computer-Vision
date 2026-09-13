@@ -30,11 +30,13 @@ def _parse_depth_size(value: str, native: tuple[int, int]) -> tuple[int, int]:
 
 def _parse_display_size(value: str, camera_size: tuple[int, int]) -> tuple[int, int]:
     text = str(value).lower().strip()
+    if text in ("fhd", "1080p", "fullscreen"):
+        return (1920, 1080)
     if text == "native":
         return camera_size
     if text == "auto":
-        # Widescreen Material 3 canvas that accommodates sidebar and header comfortably
-        return max(960, camera_size[0] + 200), max(600, camera_size[1] + 60)
+        # Default to FHD for seamless fullscreen display
+        return (1920, 1080)
     if "x" in text:
         w_str, h_str = text.split("x", 1)
         return int(w_str), int(h_str)
@@ -51,7 +53,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--depth-backend", choices=["mariem"], default="mariem", help="Use Mariem's CUDA depth module (the sole P123 depth backend)")
     parser.add_argument("--fp16", action="store_true", help="Use FP16 depth inference (benchmark first; FP32 is faster on GTX 1650 Ti)")
     parser.add_argument("--depth-size", default="336", help="Mariem model input side in pixels (default: 336; use 420 for higher quality)")
-    parser.add_argument("--display-size", default="auto", help="UI display resolution, e.g. 960x600, 1024x640, native, or auto")
+    parser.add_argument("--display-size", default="1920x1080", help="UI display resolution (default: 1920x1080 FHD; or 'native', 'auto', WxH)")
+    parser.add_argument("--fullscreen", action=argparse.BooleanOptionalAction, default=True, help="Run in fullscreen mode (default: True; use --no-fullscreen for windowed)")
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
     parser.add_argument("--hand-backend", choices=["auto", "tasks", "legacy", "colleague"], default="auto")
@@ -109,12 +112,14 @@ def main() -> int:
     started = time.monotonic()
     window = "NRW P123 Live Diagnostics (Material 3)"
     frame_times: deque[float] = deque(maxlen=30)
-    is_fullscreen = False
+    is_fullscreen = bool(args.fullscreen)
 
     try:
         if not args.headless:
             cv2.namedWindow(window, cv2.WINDOW_NORMAL)
             cv2.resizeWindow(window, display_size[0], display_size[1])
+            if is_fullscreen:
+                cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
             def on_mouse(event: int, x: int, y: int, _flags: int, state: dict) -> None:
                 if event == cv2.EVENT_LBUTTONUP:
@@ -153,6 +158,8 @@ def main() -> int:
                     is_fullscreen = not is_fullscreen
                     prop = cv2.WINDOW_FULLSCREEN if is_fullscreen else cv2.WINDOW_NORMAL
                     cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, prop)
+                    if not is_fullscreen:
+                        cv2.resizeWindow(window, display_size[0], display_size[1])
             else:
                 time.sleep(0.02)
     finally:
