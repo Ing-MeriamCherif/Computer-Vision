@@ -149,7 +149,7 @@ def _smooth_depth(
 
 
 def _talel_depth_from_palm_size(
-    fx: float, palm_width_px: float | None, *, real_palm_m: float = 0.085,
+    fx: float, palm_width_px: float | None, *, real_palm_m: float = 0.0425,
     z_min: float = 0.20, z_max: float = 3.0, fallback: float = 0.50,
 ) -> tuple[float, bool]:
     """Talel hand branch's stable metric Z proxy from apparent palm width."""

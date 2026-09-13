@@ -128,3 +128,13 @@ def test_talel_xyz_projects_back_to_filtered_palm():
     xyz, valid = _talel_hand_xyz(camera, uv, 48.0)
     assert valid
     assert np.allclose(camera.project(xyz), uv, atol=1e-6)
+
+
+def test_palm_scale_z_is_forward_monotonic_and_half_scale_corrected():
+    from geometry.p123_live_runtime import _talel_depth_from_palm_size
+
+    z30, _ = _talel_depth_from_palm_size(525.0, 30.0)
+    z40, _ = _talel_depth_from_palm_size(525.0, 40.0)
+    z50, _ = _talel_depth_from_palm_size(525.0, 50.0)
+    assert z30 > z40 > z50
+    assert np.isclose(z40, 525.0 * 0.0425 / 40.0)

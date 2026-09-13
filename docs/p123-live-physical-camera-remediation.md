@@ -78,11 +78,13 @@ FP16). Talel's hand tracker and palm-size XYZ math remain the P123 hand path.
 ### Talel XYZ correction
 
 XYZ now uses Talel's `light_vector.py` math for relative-depth runs: apparent
-palm width estimates metric Z with `z = fx * 0.085 / palm_pixels`, clamped to
+palm width estimates working Z with `z = fx * 0.0425 / palm_pixels`, clamped to
 0.2–3.0 m, followed by camera-model back-projection. A sampled depth value is
 used directly only for an explicitly metric depth state. This prevents the
 previous relative-depth values (for example `z≈0.02`) from being mislabeled as
-camera-space meters. The pending-state bug was a timestamp-domain error:
+camera-space meters. The 0.0425 m canonical span matches the 5↔17 MCP span
+observed on the competition hand image; it corrects the prior two-times scale
+bias without changing the estimator architecture. The pending-state bug was a timestamp-domain error:
 freshness now uses the CUDA geometry completion timestamp rather than the older
 camera capture timestamp, so valid hand XYZ is not rejected while inference is
 still within the adaptive 180–200 ms window.

@@ -242,7 +242,7 @@ def test_talel_xyz_depth_proxy_stays_in_metric_working_volume():
     fallback, estimated = _talel_depth_from_palm_size(525.0, None)
     assert (fallback, estimated) == (0.50, False)
     xyz, estimated = _talel_hand_xyz(CameraModel(640, 480, 525, 525, 320, 240), (320, 240), 45)
-    assert estimated is True and np.allclose(xyz[:2], 0.0, atol=1e-6) and 0.9 < xyz[2] < 1.1
+    assert estimated is True and np.allclose(xyz[:2], 0.0, atol=1e-6) and 0.45 < xyz[2] < 0.55
 
 
 def test_xyz_worker_tracks_hands_without_waiting_for_depth_geometry():
