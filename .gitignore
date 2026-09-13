@@ -8,3 +8,4 @@ camera_benchmark_live_results.csv
 model_comparison/results.csv
 To
 .env
+yolo26*.pt
