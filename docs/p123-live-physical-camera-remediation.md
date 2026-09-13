@@ -4,7 +4,7 @@ Starting main commit: `e5b1fec`
 
 Working branch: `bug-fixes/live-p123-physical-camera-remediation`
 
-Ending commit: code commit recorded below; report commit follows it
+Ending commit (code): `a0b86cf`; this report is finalized in the following report-only commit
 
 ============================================================
 SCOPE GUARD
