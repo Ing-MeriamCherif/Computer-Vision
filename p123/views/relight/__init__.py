@@ -88,6 +88,7 @@ def lights_from_snapshot(
                 light_id=hand_id,
                 range_m=DEFAULT_RANGE_M,
                 source_radius_m=0.018,
+                visual_radius_m=0.035,
             )
         )
         if len(lights) == 2:

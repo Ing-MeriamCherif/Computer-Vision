@@ -28,7 +28,8 @@ def test_light_orb_center_is_camera_projection_of_lighting_position():
 
     image = np.zeros((camera.height, camera.width, 3), dtype=np.uint8)
     result = render_light_orbs(image, camera, [light], depth_aware=False)
-    assert 100 < result[39, 47].max() < 220
+    assert 180 < result[39, 47].max() <= 255
+    assert projected[2] > 12.0
     assert result[39, 47].mean() > result[39, 35].mean()
 
 
@@ -53,8 +54,8 @@ def test_two_lights_render_distinct_color_sources():
     amber_halo = result[60, 106].astype(float)
     assert cyan_halo[2] > cyan_halo[0]
     assert amber_halo[0] > amber_halo[2]
-    assert 100 < result[60, 48].max() < 220
-    assert 100 < result[60, 112].max() < 220
+    assert 180 < result[60, 48].max() <= 255
+    assert 180 < result[60, 112].max() <= 255
 
 
 def test_near_surface_dims_halo_without_hiding_emitter_core():
@@ -66,7 +67,7 @@ def test_near_surface_dims_halo_without_hiding_emitter_core():
     depth_aware = render_light_orbs(image, camera, [light], depth=occluding_depth)
     assert depth_aware[60, 80].max() > 100
     assert depth_aware[60, 80].max() == visible[60, 80].max()
-    assert depth_aware[60, 86].max() < visible[60, 86].max()
+    assert depth_aware[60, 96].max() < visible[60, 96].max()
 
 
 def test_invalid_and_disabled_lights_do_not_draw():

@@ -26,6 +26,7 @@ class LightState:
     position_camera_m: np.ndarray | None = None
     range_m: float = 1.0
     source_radius_m: float = 0.025
+    visual_radius_m: float = 0.035
 
     def __post_init__(self) -> None:
         if self.position_camera is not None:
@@ -98,22 +99,27 @@ def project_light_orb(
     uv = camera.project(position)
     if not np.isfinite(uv).all():
         return None
-    radius_m = light.source_radius_m if source_radius_m is None else float(source_radius_m)
-    radius_px = float(np.clip(camera.fx * radius_m / float(position[2]), 3.5, 14.0))
+    radius_m = light.visual_radius_m if source_radius_m is None else float(source_radius_m)
+    radius_px = float(np.clip(camera.fx * radius_m / float(position[2]), 6.0, 32.0))
     return float(uv[0]), float(uv[1]), radius_px
 
 
 @lru_cache(maxsize=24)
-def _light_orb_masks(radius_px: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Build reusable, small radial masks for the halo, inner glow, and core."""
-    extent = max(5, int(math.ceil(radius_px * 3.0)))
+def _light_orb_masks(radius_px: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build reusable masks for the local glow and shaded spherical emitter."""
+    extent = max(5, int(math.ceil(radius_px * 1.8)))
     yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1].astype(np.float32)
     distance = np.sqrt(xx * xx + yy * yy)
     broad_glow = np.exp(-0.5 * (distance / max(radius_px * 1.35, 1.0)) ** 2)
-    inner = np.exp(-0.5 * (distance / max(radius_px * 0.58, 1.0)) ** 2)
-    core = np.exp(-0.5 * (distance / max(radius_px * 0.23, 1.0)) ** 2)
+    inner = np.exp(-0.5 * (distance / max(radius_px * 0.88, 1.0)) ** 2)
+    normalized = distance / max(float(radius_px), 1.0)
+    sphere_depth = np.sqrt(np.maximum(1.0 - normalized * normalized, 0.0))
+    highlight = np.exp(-0.5 * (
+        ((xx + radius_px * 0.24) / max(radius_px * 0.12, 1.0)) ** 2
+        + ((yy + radius_px * 0.30) / max(radius_px * 0.12, 1.0)) ** 2
+    ))
     halo = np.maximum(broad_glow - inner, 0.0)
-    return halo, inner, core
+    return halo, inner, sphere_depth, highlight
 
 
 def render_light_orbs(
@@ -144,7 +150,7 @@ def render_light_orbs(
         u, v, radius = projected
         cx, cy = int(round(u)), int(round(v))
         radius_i = max(4, int(round(radius)))
-        halo, inner, core = _light_orb_masks(radius_i)
+        halo, inner, sphere_depth, highlight = _light_orb_masks(radius_i)
         extent = halo.shape[0] // 2
         left, top = cx - extent, cy - extent
         right, bottom = cx + extent + 1, cy + extent + 1
@@ -157,7 +163,8 @@ def render_light_orbs(
         mask_x1, mask_y1 = mask_x0 + (x1 - x0), mask_y0 + (y1 - y0)
         halo_roi = halo[mask_y0:mask_y1, mask_x0:mask_x1]
         inner_roi = inner[mask_y0:mask_y1, mask_x0:mask_x1]
-        core_roi = core[mask_y0:mask_y1, mask_x0:mask_x1]
+        sphere_roi = sphere_depth[mask_y0:mask_y1, mask_x0:mask_x1]
+        highlight_roi = highlight[mask_y0:mask_y1, mask_x0:mask_x1]
 
         halo_visibility = 1.0
         if depth_aware and depth is not None and depth.shape == (height, width):
@@ -170,12 +177,18 @@ def render_light_orbs(
         roi = result[y0:y1, x0:x1].astype(np.float32)
         color = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
         power = float(np.clip(light.intensity * light.confidence, 0.0, 2.0))
-        glow = (halo_roi * 0.05 * halo_visibility + inner_roi * 0.18) * power
-        roi += glow[..., None] * color[None, None, :] * 100.0
+        glow = (halo_roi * 0.05 * halo_visibility + inner_roi * 0.10) * power
+        roi += glow[..., None] * color[None, None, :] * 85.0
 
-        core_alpha = np.clip(core_roi * min(0.68, 0.46 + power * 0.04), 0.0, 0.68)[..., None]
-        hot_color = color * 0.35 + np.array([1.0, 0.98, 0.92], dtype=np.float32) * 0.65
-        roi = roi * (1.0 - core_alpha) + hot_color[None, None, :] * (255.0 * core_alpha)
+        normalized = np.sqrt(np.maximum(1.0 - sphere_roi * sphere_roi, 0.0))
+        edge_t = np.clip((1.0 - normalized) * 8.0, 0.0, 1.0)
+        edge_alpha = edge_t * edge_t * (3.0 - 2.0 * edge_t)
+        sphere_alpha = (0.90 * edge_alpha)[..., None]
+        white_mix = np.clip(0.42 + 0.36 * sphere_roi + 0.55 * highlight_roi, 0.0, 1.0)[..., None]
+        ball_color = color[None, None, :] * (1.0 - white_mix) + np.array([1.0, 0.98, 0.93], dtype=np.float32) * white_mix
+        rim = ((1.0 - sphere_roi) ** 2 * 0.22)[..., None]
+        ball_color = ball_color * (1.0 - rim) + color[None, None, :] * rim
+        roi = roi * (1.0 - sphere_alpha) + ball_color * (255.0 * sphere_alpha)
         result[y0:y1, x0:x1] = np.clip(roi, 0.0, 255.0).astype(np.uint8)
 
     return image if result is None else result

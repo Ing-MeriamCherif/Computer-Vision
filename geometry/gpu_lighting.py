@@ -238,6 +238,7 @@ uniform int uLightCount;
 uniform vec3 uLightPosition[2];
 uniform vec3 uLightColor[2];
 uniform vec4 uLightPower[2];
+uniform float uLightVisualRadius[2];
 
 vec3 toSrgb(vec3 c) {
     c = max(c, vec3(0.0));
@@ -253,17 +254,28 @@ void main() {
         if (p.z <= 1e-4) continue;
         vec2 center = vec2(uCamera.x * p.x / p.z + uCamera.z,
                            uCamera.y * p.y / p.z + uCamera.w);
-        float radius = clamp(uCamera.x * max(uLightPower[i].w, 0.004) / p.z, 3.5, 14.0);
+        float radius = clamp(uCamera.x * max(uLightVisualRadius[i], 0.004) / p.z, 6.0, 32.0);
         float d = length(pixel - center);
+        float normalized = d / radius;
         float outer = exp(-0.5 * pow(d / max(radius * 1.35, 1.0), 2.0));
-        float inner = exp(-0.5 * pow(d / max(radius * 0.58, 1.0), 2.0));
-        float core = exp(-0.5 * pow(d / max(radius * 0.23, 1.0), 2.0));
+        float inner = exp(-0.5 * pow(d / max(radius * 0.88, 1.0), 2.0));
         float power = clamp(uLightPower[i].x * uLightPower[i].y, 0.0, 2.0);
         float sceneZ = texture(uDepth, vUv).r;
         float haloVisibility = sceneZ > 1e-5 && sceneZ + max(0.025, 0.04 * p.z) < p.z ? 0.28 : 1.0;
-        color += uLightColor[i] * max(outer-inner, 0.0) * 0.012 * power * haloVisibility;
-        color += uLightColor[i] * inner * 0.05 * power * mix(0.55, 1.0, haloVisibility);
-        color = mix(color, mix(uLightColor[i], vec3(1.0,0.97,0.90),0.68), core * 0.46);
+        color += uLightColor[i] * max(outer-inner, 0.0) * 0.008 * power * haloVisibility;
+        color += uLightColor[i] * inner * 0.025 * power * mix(0.55, 1.0, haloVisibility);
+        if (normalized < 1.0) {
+            float sphereZ = sqrt(max(1.0 - normalized * normalized, 0.0));
+            vec2 orbXY = (pixel - center) / radius;
+            float highlight = exp(-0.5 * dot((orbXY - vec2(-0.24, -0.30)) / 0.12,
+                                              (orbXY - vec2(-0.24, -0.30)) / 0.12));
+            float whiteMix = clamp(0.42 + 0.36 * sphereZ + 0.55 * highlight, 0.0, 1.0);
+            vec3 ballColor = mix(uLightColor[i], vec3(1.0, 0.98, 0.93), whiteMix);
+            float rim = pow(1.0 - sphereZ, 2.0) * 0.22;
+            ballColor = mix(ballColor, uLightColor[i], rim);
+            float edge = 1.0 - smoothstep(0.88, 1.0, normalized);
+            color = mix(color, ballColor, edge * 0.90);
+        }
     }
     oColor = vec4(clamp(toSrgb(color), 0.0, 1.0), 1.0);
 }
@@ -461,6 +473,7 @@ class GPURelightRenderer:
         positions = np.zeros((2, 3), dtype=np.float32)
         colors = np.zeros((2, 3), dtype=np.float32)
         powers = np.zeros((2, 4), dtype=np.float32)
+        visual_radii = np.zeros(2, dtype=np.float32)
         for i, light in enumerate(lights[:2]):
             positions[i] = np.asarray(light.position_camera, dtype=np.float32)
             colors[i] = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
@@ -470,10 +483,14 @@ class GPURelightRenderer:
                 max(float(getattr(light, "range_m", 0.45)), 0.01),
                 max(float(getattr(light, "source_radius_m", 0.025)), 0.001),
             )
+            visual_radii[i] = max(float(getattr(light, "visual_radius_m", 0.035)), 0.004)
         gl.glUniform1i(gl.glGetUniformLocation(program, "uLightCount"), min(len(lights), 2))
         gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightPosition[0]"), 2, positions)
         gl.glUniform3fv(gl.glGetUniformLocation(program, "uLightColor[0]"), 2, colors)
         gl.glUniform4fv(gl.glGetUniformLocation(program, "uLightPower[0]"), 2, powers)
+        visual_radius_location = gl.glGetUniformLocation(program, "uLightVisualRadius[0]")
+        if visual_radius_location >= 0:
+            gl.glUniform1fv(visual_radius_location, 2, visual_radii)
 
     def _bind_texture(self, unit: int, texture: int, program: int, uniform_name: str) -> None:
         gl = self._gl
