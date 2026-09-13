@@ -181,6 +181,8 @@ def main() -> int:
                 cv2.setWindowProperty(window, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
             def on_mouse(event: int, x: int, y: int, _flags: int, state: dict) -> None:
+                if state["mode"] == 7 and relight_view.handle_control_mouse(event, x, y, _flags, display_size):
+                    return
                 if event == cv2.EVENT_LBUTTONUP:
                     hit = hit_test_navigation(x, y, display_size)
                     if hit is not None:
@@ -266,13 +268,32 @@ def main() -> int:
             f"display_fps={display_fps} geometry_age_p95_ms={final.metrics.geometry_age_p95_ms} "
             f"hand_age_p95_ms={final.metrics.hand_age_p95_ms} xyz_age_p95_ms={final.metrics.xyz_age_p95_ms}"
         )
+        if final.hand_state is not None:
+            hand = final.hand_state
+            print(
+                "Tracking summary: "
+                f"hands={len(hand.hands)} hand_fps={final.metrics.hand_hz} "
+                f"luma={hand.frame_luminance:.1f} low_light={hand.low_light_active} "
+                f"gamma={hand.low_light_gamma:.2f} preprocess_ms={hand.preprocess_ms:.3f} "
+                f"detect_ms={hand.detection_ms:.3f} detect_avg_ms={hand.detection_avg_ms:.3f} "
+                f"filter_ms={hand.filtering_ms:.3f} "
+                f"dropout_ms={hand.dropout_age_ms:.1f}"
+            )
         relight_stats = relight_view._renderer.last_lighting_stats
         if relight_stats:
             print(
                 "Relight summary: "
                 f"renderer={relight_stats.get('renderer')} "
+                f"ray_backend={relight_stats.get('ray_backend', 'n/a')} "
                 f"quality={relight_stats.get('quality')} lights={relight_stats.get('lights')} "
                 f"gpu_render_ms={relight_stats.get('gpu_render_ms', relight_stats.get('lighting_ms'))} "
+                f"rt_trace_ms={relight_stats.get('rt_trace_ms', 'n/a')} "
+                f"shadow_submit_ms={relight_stats.get('shadow_submit_ms', 'n/a')} "
+                f"volume_ms={relight_stats.get('volumetrics_ms', 'n/a')} "
+                f"volumetric_submit_ms={relight_stats.get('volumetric_submit_ms', 'n/a')} "
+                f"palm_pose_ms={relight_stats.get('palm_pose_ms', 'n/a')} "
+                f"tracking_confidence={relight_stats.get('tracking_confidence', 'n/a')} "
+                f"orb_visibility={relight_stats.get('orb_visibility', 'n/a')} "
                 f"shadows={relight_stats.get('shadow_quality')} volumes={relight_stats.get('volumetric_quality')} "
                 f"geometry_age_ms={relight_view._renderer.last_geometry_age_ms} "
                 f"xyz_source_age_ms={relight_view._renderer.last_xyz_source_age_ms}"

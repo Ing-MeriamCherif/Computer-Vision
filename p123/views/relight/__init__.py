@@ -27,8 +27,11 @@ from geometry.state import GeometryState
 
 
 LIGHT_COLORS = ((0.44, 0.72, 0.82), (0.88, 0.63, 0.40))
+COLOR_PRESETS = (("CYAN", (0.18, 0.78, 1.0)), ("AMBER", (1.0, 0.53, 0.14)), ("MAGENTA", (0.95, 0.24, 0.70)), ("WHITE", (1.0, 1.0, 0.92)))
 DEFAULT_RANGE_M = 0.30
 DEFAULT_INTENSITY = 0.70
+MIN_INTENSITY, MAX_INTENSITY = 0.10, 2.00
+MIN_RANGE_M, MAX_RANGE_M = 0.12, 1.50
 FRESHNESS_LIMIT_MS = 250.0
 FADE_START_MS = 150.0
 HAND_LIGHT_HOLD_MS = 160.0
@@ -184,10 +187,17 @@ class RelightRenderer:
         self.last_geometry_source_id: int | str | None = None
         self.last_geometry_age_ms: float | None = None
         self.last_xyz_source_age_ms: float | None = None
+        self.light_intensity = DEFAULT_INTENSITY
+        self.light_range_m = DEFAULT_RANGE_M
+        self.light_color_index = 0
         self._gesture_enabled: dict[int, bool] = {}
         self._gesture_last_seen: dict[int, float] = {}
         self._recent_lights: dict[int, LightState] = {}
         self.lighting_stage = "full"
+
+    def controlled_lights(self, lights: list[LightState]) -> list[LightState]:
+        color = np.asarray(COLOR_PRESETS[self.light_color_index][1], dtype=np.float32)
+        return [replace(light, intensity=self.light_intensity, range_m=self.light_range_m, color_rgb=color.copy()) for light in lights]
 
     def set_lighting_quality(self, quality: str) -> None:
         self.lighting_quality = str(quality).lower()
@@ -449,7 +459,7 @@ class RelightRenderer:
         self.last_geometry_source_id = geometry.source_frame_id
         self.last_geometry_age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
         lights, self.last_xyz_source_age_ms = lights_from_snapshot(snapshot)
-        lights = self._gesture_gated_lights(snapshot, lights)
+        lights = self.controlled_lights(self._gesture_gated_lights(snapshot, lights))
         key = self._cache_key_for(snapshot, geometry, lights)
         if key == self._cache_key and self._cache_image is not None:
             return self._cache_image, title, None
@@ -553,6 +563,53 @@ class RelightRenderer:
 
 
 _renderer = RelightRenderer()
+_active_control: str | None = None
+
+
+def _control_layout(viewport: tuple[int, int, int, int]) -> dict[str, tuple[int, int, int, int]]:
+    vx, vy, vw, vh = viewport
+    width = min(vw - 20, max(420, min(560, int(vw * 0.72))))
+    if width < 300:
+        return {}
+    x, y = vx + (vw - width) // 2, vy + vh - 78
+    scale = width / 560.0
+    return {"panel": (x, y, width, 66), "intensity": (x + round(16*scale), y+46, round(148*scale), 18), "range": (x+round(190*scale), y+46, round(148*scale), 18), "color": (x+round(374*scale), y+12, round(170*scale), 42)}
+
+
+def _set_slider(name: str, x: int, rect: tuple[int, int, int, int]) -> None:
+    fraction = float(np.clip((x-rect[0])/max(rect[2], 1), 0.0, 1.0))
+    if name == "intensity": _renderer.light_intensity = MIN_INTENSITY + fraction*(MAX_INTENSITY-MIN_INTENSITY)
+    else: _renderer.light_range_m = MIN_RANGE_M + fraction*(MAX_RANGE_M-MIN_RANGE_M)
+    _renderer._cache_key = None
+
+
+def handle_control_mouse(event: int, x: int, y: int, flags: int, display_size: tuple[int, int]) -> bool:
+    global _active_control
+    from ..common import compute_layout
+    layout = compute_layout(display_size); controls = _control_layout((layout["vx"], layout["vy"], layout["vw"], layout["vh"]))
+    if not controls: return False
+    if event == cv2.EVENT_LBUTTONDOWN:
+        for name in ("intensity", "range"):
+            rx, ry, rw, rh = controls[name]
+            if rx-8 <= x <= rx+rw+8 and ry-12 <= y <= ry+rh+6: _active_control=name; _set_slider(name,x,controls[name]); return True
+        rx,ry,rw,rh=controls["color"]
+        if rx <= x <= rx+rw and ry <= y <= ry+rh: _active_control="color"; return True
+    if event == cv2.EVENT_MOUSEMOVE and flags & cv2.EVENT_FLAG_LBUTTON and _active_control in ("intensity","range"):
+        _set_slider(_active_control,x,controls[_active_control]); return True
+    if event == cv2.EVENT_LBUTTONUP:
+        previous=_active_control; _active_control=None
+        if previous in ("intensity","range"): _set_slider(previous,x,controls[previous]); return True
+        if previous == "color": _renderer.light_color_index=(_renderer.light_color_index+1)%len(COLOR_PRESETS); _renderer._cache_key=None; return True
+    return False
+
+
+def draw_controls(canvas: np.ndarray, viewport: tuple[int, int, int, int]) -> None:
+    controls = _control_layout(viewport)
+    if not controls: return
+    x,y,w,h=controls["panel"]; cv2.rectangle(canvas,(x,y),(x+w,y+h),(28,32,38),-1)
+    for name,value,low,high,label in (("intensity",_renderer.light_intensity,MIN_INTENSITY,MAX_INTENSITY,"INTENSITY"),("range",_renderer.light_range_m,MIN_RANGE_M,MAX_RANGE_M,"RANGE")):
+        rx,ry,rw,_=controls[name]; cv2.putText(canvas,f"{label} {value:.2f}",(rx,ry-14),cv2.FONT_HERSHEY_SIMPLEX,.34,(235,235,235),1,cv2.LINE_AA); filled=rx+round(rw*(value-low)/(high-low)); cv2.line(canvas,(rx,ry),(rx+rw,ry),(85,90,100),5); cv2.line(canvas,(rx,ry),(filled,ry),(240,130,40),5); cv2.circle(canvas,(filled,ry),6,(245,245,245),-1)
+    rx,ry,_,_=controls["color"]; name,color=COLOR_PRESETS[_renderer.light_color_index]; cv2.putText(canvas,f"COLOR: {name}",(rx,ry+27),cv2.FONT_HERSHEY_SIMPLEX,.34,tuple(int(c*255) for c in color[::-1]),1,cv2.LINE_AA)
 
 
 def configure(lighting_quality: str = "balanced", backend: str = "auto") -> None:

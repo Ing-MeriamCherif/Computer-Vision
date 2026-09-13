@@ -61,6 +61,7 @@ class P123Snapshot:
     contract: P4InputState | None
     metrics: P123Metrics
     fast_geometry_state: GeometryState | None = None
+    mirrored_input: bool = True
 
 
 def _rate(timestamps) -> float | None:
@@ -615,7 +616,11 @@ class P123LiveRuntime:
             _rate(self._normal_times), _percentile(self._normal_ages, 95),
             _percentile(self._depth_completion_ages, 95), _percentile(self._normal_completion_ages, 95), _percentile(self._xyz_completion_ages, 95),
         )
-        return P123Snapshot(None if rgb is None else rgb[0], None if rgb is None else rgb[1], None if rgb is None else rgb[2], depth, canonical_geometry, hands, xyz, contract, metrics, fast_geometry)
+        return P123Snapshot(
+            None if rgb is None else rgb[0], None if rgb is None else rgb[1],
+            None if rgb is None else rgb[2], depth, canonical_geometry, hands, xyz,
+            contract, metrics, fast_geometry, self.mirror,
+        )
 
     def stop(self) -> None:
         self._running = False

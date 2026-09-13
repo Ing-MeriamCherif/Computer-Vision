@@ -1,26 +1,40 @@
 # GPU Hand Relighting
 
-Mode 7 is an OpenGL 3.3 GPU screen-space/camera-space relighter over full-
-resolution monocular 2.5D geometry. It uses `fast_geometry_state` when
-available, falling back to `geometry_state`, and positions lights from fresh
-`HandXYZ.xyz_camera`; it never samples palm depth to infer a production light
-position. RGB is converted from sRGB to linear before surface lighting, then
-converted back at the final composite. Diffuse is albedo-weighted Lambertian;
-specular is additive Blinn-Phong and is gated by front-facing and normal
-reliability checks. The CPU Youssef renderer remains the explicit fallback and
-mathematically consistent reference path.
+Mode 7 uses an OpenGL 3.3 relighter and, when NVIDIA OptiX is available, an
+OptiX acceleration structure built from a 96x54 sample of the live depth map.
+The RTX path traces a visibility ray per coarse sample and light on NVIDIA RT
+cores; bilinear upsampling feeds the full-resolution surface pass. The
+acceleration structure keeps fixed topology and updates its vertices each
+frame. Depth discontinuities and invalid samples are excluded. Volumetric
+scattering still uses the existing screen-space visibility marcher; this is
+not full path tracing and monocular depth cannot reveal hidden geometry.
+
+It uses `fast_geometry_state` when available, falling back to `geometry_state`,
+and positions lights from fresh `HandXYZ.xyz_camera`; it never samples palm
+depth to infer a production light position. RGB is converted from sRGB to
+linear before surface lighting, then converted back at the final composite.
+Diffuse is albedo-weighted; specular is additive. The CPU Youssef renderer
+remains the explicit fallback and reference path.
 
 The GPU path combines full-resolution surface lighting, up to two independently
-colored lights, camera-space soft area-light shadow rays, reduced-resolution
-volumetric ray marching with sample-to-light visibility, temporal stabilization,
-and projected 3D emitter orbs. Each orb and its lighting/shadow/volume rays use
-the same camera-space `LightState` position. The working emitter range is
+colored lights, OptiX RT-core surface visibility (GLSL screen-space fallback),
+reduced-resolution volumetric ray marching with sample-to-light visibility,
+temporal stabilization, and projected 3D emitter orbs. Each orb and its
+lighting/shadow/volume rays use the same camera-space `LightState` position.
+The working emitter range is
 `0.30 m`; physical shadow source radius is `0.018 m`; visible orb radius is
 `0.035 m`. These values are separate. This is not hardware RTX ray tracing or
 full path tracing, and it does not reconstruct hidden geometry beyond the
 monocular depth surface.
 
 ## Install and Run
+
+The RTX route additionally needs the NVIDIA `pyoptix` binding, `cuda-python`,
+CuPy, a working NVIDIA driver/CUDA runtime, and OptiX SDK headers for NVRTC
+compilation. Install the binding from NVIDIA's `otk-pyoptix` project and set
+`OPTIX_INCLUDE_DIR` to the SDK's `include` directory. If any part of that
+optional stack is unavailable, stats report `GLSL_SCREEN_SPACE_FALLBACK`; the
+Mode 7 app remains usable, but is not using RT cores.
 
 On Linux, install the UI/GL dependencies in the repository environment. The
 CUDA-enabled PyTorch wheel must match the installed driver/runtime used by the
@@ -39,7 +53,13 @@ dependencies from `requirements-depth-engine.txt` and use the existing
 provider/export instructions. Ensure the configured hand-landmarker asset is
 present before starting `--hand-backend auto`.
 
-Quality can be selected with `--lighting-quality low|balanced|high`. The
+Quality can be selected with `--lighting-quality low|balanced|high`. The RT
+grid defaults to 96x54, configurable with `NRW_RT_WIDTH` and `NRW_RT_HEIGHT`;
+this keeps RT traversal light while maintaining a full-resolution final
+image. The last relight/session stats expose `ray_backend`, `rt_trace_ms`, and
+`gpu_render_ms`; on the RTX 4060 Laptop at 1280x720 the balanced relight pass
+measured about 33 ms (~30 FPS), excluding camera capture and depth inference.
+The
 volume target is reallocated when its profile divisor changes. Press `D`
 for pipeline and relight telemetry. The WEBCAM/PHONE header selector or `C`
 restarts capture/runtime and invalidates camera-dependent renderer history.
@@ -54,37 +74,13 @@ GPU-rendered.
 The P123 Material UI currently consumes NumPy frames, so Mode 7 reads the
 final RGBA8 framebuffer back to CPU RGB before the existing OpenCV compositor.
 The renderer also exposes `render_to_texture()` for a native-window path that
-avoids this copy. Create the P123 relight context first and pass its shared
+avoids this copy. Create `NativeOpenGLWindow` first, pass its GLFW window as
 `share_window` to `GPURelightRenderer`, then pass the returned texture ID to
-render target. The shared GL context owns the texture;
+`NativeOpenGLWindow.render_texture()`. The shared GL context owns the texture;
 close the renderer and window during shutdown.
 
-The renderer is screen-space/camera-space ray marched, not hardware RTX ray
-tracing. The L2 surface pass is always full resolution. Mode 7's `L` key cycles
-the stage selector: `L2 · DIFFUSE`, `L2 · DIFFUSE + SPECULAR`, and `FULL ·
-SHADOWS + VOLUMETRICS`. L2 stages skip shadow ray marching and the volumetric
-pass; `FULL` retains the existing optional shadow, volume, orb, and temporal
-behavior. Balanced settings use four deterministic area-light shadow rays with
-six samples each, quarter-resolution volumetrics with six camera samples and
-four sample-to-light visibility steps, and conservative depth-rejected
-temporal history. No per-frame depth normalization is performed.
-
-The CPU fallback uses the same linear-light equations and defaults. Low normal
-or geometry confidence attenuates only synthetic lighting; observed camera RGB
-remains visible. It is explicitly labeled `CPU_FALLBACK` in telemetry.
-
-## Backend selection
-
-The live app accepts `--relight-backend auto|rtx|raster`. `auto` selects the
-optional NVIDIA OptiX module only when an RTX-class GPU and native module are
-available; otherwise it reports `OPENGL_RASTER`. `raster` forces the CUDA/OpenGL
-path. `rtx` is strict and reports `RTX_UNAVAILABLE` when unavailable; it never
-labels a fallback as RTX.
-
-The optional native build is under `native/optix_relight/` and requires the
-NVIDIA OptiX SDK, CUDA Toolkit, CMake, a C++ compiler, and pybind11. Set
-`OPTIX_ROOT` or pass `--optix-root` to `tools/build_optix_backend.py`. The
-current GTX 1650 Ti is intentionally detected as non-RTX and uses the raster
-backend. OpenGL raster is not hardware RTX ray tracing; the optional OptiX
-module is not the production path until it is genuinely functional and
-physically validated on an RTX card.
+Balanced settings use one RT-core surface visibility ray per coarse sample,
+quarter-resolution volumetrics with six camera samples and four
+sample-to-light visibility steps, and conservative depth-rejected temporal
+history. The surface fallback uses deterministic screen-space rays. No
+per-frame depth normalization is performed.
