@@ -19,6 +19,17 @@
 > panel and rendered native-resolution structure continuously. Focused P123,
 > CUDA, normal, camera, state, and temporal tests: **77 passed**.
 
+### Exact-quality TensorRT acceleration
+
+The accepted production resolution remains **336×448 FP32** with the original
+Hugging Face image preprocessing and native 640×480 bicubic depth output. A
+fixed-shape TensorRT FP32 engine is selected automatically when present and
+falls back safely to PyTorch otherwise. Direct output validation measured
+correlation `1.0` and relative mean error `1.07e-7` against PyTorch. On the
+physical webcam, depth improved from about 15.9 Hz to **19.8–20.0 Hz** without
+reduced resolution, approximate preprocessing, learned upscaling, or synthetic
+frame interpolation. The rejected 280×392 experiment is not part of the code.
+
 The sections below are retained as historical run records.
 
 Base SHA: `85cae0e6deae1da8eff252907631de805392a531`

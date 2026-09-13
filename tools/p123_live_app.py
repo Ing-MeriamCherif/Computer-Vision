@@ -101,6 +101,7 @@ def main() -> int:
     print(f"  Physical Camera:   {args.camera} ({args.width}x{args.height} @ {args.fps} FPS)")
     print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
     print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
+    print(f"  Depth Runtime:     {getattr(runtime.depth_provider, 'backend_name', 'unknown')}")
     depth_device = getattr(runtime.depth_provider, "device", None)
     normal_backend = getattr(runtime, "_normal_backend", None)
     normal_device = getattr(normal_backend, "device", "cpu") if normal_backend is not None else "cpu/unavailable"

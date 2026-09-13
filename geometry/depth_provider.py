@@ -39,10 +39,11 @@ class DepthAnythingProvider:
 
     backend_name: str = "depth-anything-v2-small"
 
-    def __init__(self, model_path: str | Path = "models/depth-anything-v2-small", *, device: str = "auto", use_fp16: bool = False, input_size: int | tuple[int, int] | None = None) -> None:
+    def __init__(self, model_path: str | Path = "models/depth-anything-v2-small", *, device: str = "auto", use_fp16: bool = False, input_size: int | tuple[int, int] | None = None, engine_path: str | Path | None = "auto") -> None:
         self.model_path = str(model_path)
         self.requested_device = device
         self.use_fp16 = bool(use_fp16)
+        self.engine_path = engine_path
         if input_size is not None:
             if isinstance(input_size, int):
                 input_size = (input_size, input_size)
@@ -60,9 +61,15 @@ class DepthAnythingProvider:
         self._previous_device_valid = None
         self._scale_updates = 0
         self._compute_count = 0
+        self._loaded = False
+        self._trt_runtime = None
+        self._trt_engine = None
+        self._trt_context = None
+        self._trt_output = None
+        self._trt_stream = None
 
     def load(self) -> None:
-        if self.model is not None:
+        if self._loaded:
             return
         try:
             import torch
@@ -80,10 +87,51 @@ class DepthAnythingProvider:
         self.processor = AutoImageProcessor.from_pretrained(path, local_files_only=True)
         if self.input_size is not None:
             self.processor.size = {"height": self.input_size[0], "width": self.input_size[1]}
-        self.model = AutoModelForDepthEstimation.from_pretrained(path, local_files_only=True).to(device).eval()
-        if device.startswith("cuda") and self.use_fp16:
-            self.model = self.model.half()
         self.device = torch.device(device)
+        candidate = None
+        if self.engine_path == "auto" and self.input_size is not None:
+            candidate = path / f"depth_{self.input_size[0]}x{self.input_size[1]}_fp32.engine"
+        elif self.engine_path not in (None, ""):
+            candidate = Path(self.engine_path)
+        if candidate is not None and candidate.exists() and self.device.type == "cuda" and not self.use_fp16:
+            try:
+                import tensorrt as trt
+
+                self._trt_runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+                self._trt_engine = self._trt_runtime.deserialize_cuda_engine(candidate.read_bytes())
+                if self._trt_engine is None:
+                    raise RuntimeError("TensorRT could not deserialize the engine")
+                self._trt_context = self._trt_engine.create_execution_context()
+                output_shape = tuple(self._trt_engine.get_tensor_shape("predicted_depth"))
+                self._trt_output = torch.empty(output_shape, dtype=torch.float32, device=self.device)
+                self._trt_stream = torch.cuda.Stream(device=self.device)
+                self.backend_name = "depth-anything-v2-small-tensorrt-fp32"
+            except (ImportError, RuntimeError):
+                self._trt_runtime = self._trt_engine = self._trt_context = self._trt_output = self._trt_stream = None
+        if self._trt_context is None:
+            self.model = AutoModelForDepthEstimation.from_pretrained(path, local_files_only=True).to(device).eval()
+            if device.startswith("cuda") and self.use_fp16:
+                self.model = self.model.half()
+        self._loaded = True
+
+    def _infer(self, inputs):
+        """Run the numerically equivalent fixed-shape TensorRT or PyTorch model."""
+        import torch
+
+        if self._trt_context is None:
+            return self.model(**inputs).predicted_depth
+        values = inputs["pixel_values"].contiguous()
+        expected = tuple(self._trt_engine.get_tensor_shape("pixel_values"))
+        if tuple(values.shape) != expected:
+            raise RuntimeError(f"TensorRT engine expects {expected}, got {tuple(values.shape)}")
+        self._trt_context.set_tensor_address("pixel_values", values.data_ptr())
+        self._trt_context.set_tensor_address("predicted_depth", self._trt_output.data_ptr())
+        current = torch.cuda.current_stream(self.device)
+        self._trt_stream.wait_stream(current)
+        if not self._trt_context.execute_async_v3(self._trt_stream.cuda_stream):
+            raise RuntimeError("TensorRT inference failed")
+        current.wait_stream(self._trt_stream)
+        return self._trt_output
 
     def warmup(self, iterations: int = 1) -> None:
         """Prime the processor/model path before the camera loop begins."""
@@ -102,7 +150,7 @@ class DepthAnythingProvider:
             if self.device.type == "cuda" and self.use_fp16:
                 inputs = {key: value.half() if value.is_floating_point() else value for key, value in inputs.items()}
             with torch.inference_mode():
-                self.model(**inputs)
+                self._infer(inputs)
         if self.device.type == "cuda":
             torch.cuda.synchronize(self.device)
 
@@ -126,7 +174,7 @@ class DepthAnythingProvider:
             inputs = {key: value.half() if value.is_floating_point() else value for key, value in inputs.items()}
         start = time.perf_counter()
         with torch.inference_mode():
-            output = self.model(**inputs).predicted_depth
+            output = self._infer(inputs)
             resized = functional.interpolate(output.unsqueeze(1), size=frame.shape[:2], mode="bicubic", align_corners=False).squeeze(1)[0]
         elapsed = (time.perf_counter() - start) * 1000.0
         model_output = resized.float()
