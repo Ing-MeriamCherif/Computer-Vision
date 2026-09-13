@@ -478,13 +478,15 @@ class P123LiveRuntime:
                 time.sleep(0.01)
                 continue
             last_key = key
-            # Keep physical freshness tied to capture time. Completion age is
-            # reported separately so a slow worker cannot hide stale frames.
+            # Talel XYZ uses palm width and camera intrinsics, not scene depth.
+            # Its physical freshness therefore follows the hand capture. Tying
+            # it to the slower depth worker made valid lights flash briefly and
+            # disappear between geometry completions.
             now = time.monotonic()
-            age_ms = max(0.0, (now - geometry.timestamp) * 1000.0)
-            completion_age_ms = max(0.0, (now - (geometry.completed_timestamp or geometry.timestamp)) * 1000.0)
-            depth_hz = self._depth_times and _rate(self._depth_times) or 8.0
-            freshness_limit = min(self.max_state_age_ms, max(180.0, 1.75 * (1000.0 / max(depth_hz, 1.0))))
+            age_ms = max(0.0, (now - hands.timestamp) * 1000.0)
+            completion_age_ms = age_ms
+            hand_hz = self._hand_times and _rate(self._hand_times) or 15.0
+            freshness_limit = min(self.max_state_age_ms, max(120.0, 2.5 * (1000.0 / max(hand_hz, 1.0))))
             if age_ms > freshness_limit:
                 self._xyz = ()
                 for stale_id in tuple(self._xyz_smooth):

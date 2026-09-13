@@ -156,6 +156,44 @@ def test_missing_invalid_or_stale_handxyz_never_fabricates_a_light():
         assert lights == []
 
 
+def test_fresh_handxyz_survives_between_detector_optical_flow_frames():
+    snapshot = _snapshot()
+    tracked = replace(snapshot.hand_state.hands[0], stale=True, confidence=0.82)
+    hand_state = replace(snapshot.hand_state, hands=(tracked,), stale=True)
+    xyz = replace(snapshot.xyz[0], source_age_ms=35.0, confidence=0.9)
+
+    lights, age = relight_view.lights_from_snapshot(replace(snapshot, hand_state=hand_state, xyz=(xyz,)))
+
+    assert len(lights) == 1
+    assert lights[0].source_hand == tracked.hand_id
+    assert lights[0].confidence > 0.7
+    assert age == 35.0
+
+
+def test_open_palm_enables_light_and_closed_palm_disables_it():
+    snapshot = _snapshot()
+    open_points = np.zeros((21, 2), dtype=np.float32)
+    open_points[0] = (80, 100)
+    for tip, pip, x in ((8, 6, 55), (12, 10, 72), (16, 14, 89), (20, 18, 106)):
+        open_points[pip] = (x, 72)
+        open_points[tip] = (x, 40)
+    closed_points = open_points.copy()
+    for tip, pip, _ in ((8, 6, 55), (12, 10, 72), (16, 14, 89), (20, 18, 106)):
+        closed_points[tip] = (open_points[pip] + open_points[0]) * 0.5
+
+    renderer = RelightRenderer(use_gpu=False)
+    open_hand = replace(snapshot.hand_state.hands[0], landmarks_uv=open_points, stale=False)
+    opened = replace(snapshot, hand_state=replace(snapshot.hand_state, hands=(open_hand,)))
+    renderer.render(opened)
+    assert renderer.last_light_count == 1
+
+    closed_hand = replace(open_hand, landmarks_uv=closed_points)
+    closed = replace(opened, rgb_capture_id=2, hand_state=replace(opened.hand_state, hands=(closed_hand,)))
+    image, _, _ = renderer.render(closed)
+    assert renderer.last_light_count == 0
+    np.testing.assert_array_equal(image, closed.rgb_frame)
+
+
 def test_fast_geometry_is_preferred_and_slow_geometry_is_fallback(monkeypatch):
     snapshot = _snapshot()
     fast = replace(snapshot.geometry_state, source_frame_id=2)

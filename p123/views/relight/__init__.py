@@ -21,6 +21,25 @@ FRESHNESS_LIMIT_MS = 250.0
 FADE_START_MS = 150.0
 
 
+def _open_palm_state(hand: Any) -> bool | None:
+    """Classify a detected palm; return None when landmarks are unavailable."""
+    landmarks = getattr(hand, "landmarks_uv", None)
+    if landmarks is None or len(landmarks) < 21:
+        return None
+    points = np.asarray(landmarks, dtype=np.float32)
+    if points.shape[1:] != (2,) or not np.isfinite(points).all():
+        return None
+    wrist = points[0]
+    # Four non-thumb fingertips should sit farther from the wrist than their
+    # PIP joints for an open palm. Requiring three gives stable hysteresis
+    # under mild perspective and partial finger occlusion.
+    extended = sum(
+        np.linalg.norm(points[tip] - wrist) > 1.12 * np.linalg.norm(points[pip] - wrist)
+        for tip, pip in ((8, 6), (12, 10), (16, 14), (20, 18))
+    )
+    return extended >= 3
+
+
 def lights_from_snapshot(
     snapshot: Any,
     *,
@@ -40,7 +59,11 @@ def lights_from_snapshot(
         age_ms = max(0.0, age_ms) if math.isfinite(age_ms) else float("inf")
         ages.append(age_ms)
         position = xyz.xyz_camera
-        if hand is None or getattr(hand, "stale", False) or position is None:
+        # `TrackedHand.stale` means the current point came from the LK
+        # between-detector path, not that the physical hand has expired.
+        # HandXYZ source age and confidence are the authoritative freshness
+        # signals for the light.
+        if hand is None or position is None:
             continue
         position = np.asarray(position, dtype=np.float32)
         if position.shape != (3,) or not np.isfinite(position).all() or position[2] <= 0.0:
@@ -125,6 +148,7 @@ class RelightRenderer:
         self.last_geometry_source_id: int | str | None = None
         self.last_geometry_age_ms: float | None = None
         self.last_xyz_source_age_ms: float | None = None
+        self._gesture_enabled: dict[int, bool] = {}
 
     def set_lighting_quality(self, quality: str) -> None:
         self.lighting_quality = str(quality).lower()
@@ -139,6 +163,23 @@ class RelightRenderer:
             self._gpu_renderer.close()
             self._gpu_renderer = None
         self._gpu_warmed = False
+        self._gesture_enabled.clear()
+
+    def _gesture_gated_lights(self, snapshot: Any, lights: list[LightState]) -> list[LightState]:
+        hands = snapshot.hand_state.hands if snapshot.hand_state is not None else ()
+        visible_ids = {int(hand.hand_id) for hand in hands}
+        for hand in hands:
+            hand_id = int(hand.hand_id)
+            # Only detector frames change the latch. Optical-flow frames keep
+            # the last deliberate open/closed state.
+            if not getattr(hand, "stale", False):
+                state = _open_palm_state(hand)
+                if state is not None:
+                    self._gesture_enabled[hand_id] = state
+        for hand_id in tuple(self._gesture_enabled):
+            if hand_id not in visible_ids:
+                self._gesture_enabled.pop(hand_id, None)
+        return [light for light in lights if self._gesture_enabled.get(int(light.source_hand), True)]
 
     def _geometry(self, snapshot: Any) -> GeometryState | None:
         return getattr(snapshot, "fast_geometry_state", None) or snapshot.geometry_state
@@ -273,6 +314,7 @@ class RelightRenderer:
         self.last_geometry_source_id = geometry.source_frame_id
         self.last_geometry_age_ms = max(0.0, (time.monotonic() - geometry.timestamp) * 1000.0)
         lights, self.last_xyz_source_age_ms = lights_from_snapshot(snapshot)
+        lights = self._gesture_gated_lights(snapshot, lights)
         key = self._cache_key_for(snapshot, geometry, lights)
         if key == self._cache_key and self._cache_image is not None:
             return self._cache_image, title, None
