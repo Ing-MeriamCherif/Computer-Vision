@@ -8,9 +8,19 @@ from __future__ import annotations
 
 import threading
 import time
+import subprocess
+import sys
 from typing import Any
 
 import numpy as np
+
+
+def _default_camera_backend(cv2: Any) -> int:
+    if sys.platform == "win32":
+        return getattr(cv2, "CAP_MSMF", getattr(cv2, "CAP_DSHOW", getattr(cv2, "CAP_ANY", 0)))
+    if sys.platform.startswith("linux"):
+        return getattr(cv2, "CAP_V4L2", getattr(cv2, "CAP_ANY", 0))
+    return getattr(cv2, "CAP_ANY", 0)
 
 
 class LatestFrameSlot:
@@ -29,6 +39,9 @@ class LatestFrameSlot:
         self._has_new: bool = False
         self._dropped_count: int = 0
         self._total_arrived: int = 0
+        self._consumed_count: int = 0
+        self._renderer_reuses: int = 0
+        self._last_consumed_sequence_id: int | None = None
 
     def put(
         self,
@@ -55,6 +68,11 @@ class LatestFrameSlot:
                 if not signaled or not self._has_new:
                     return None
             self._has_new = False
+            if self._last_consumed_sequence_id == self._capture_sequence_id:
+                self._renderer_reuses += 1
+            else:
+                self._consumed_count += 1
+                self._last_consumed_sequence_id = self._capture_sequence_id
             assert self._frame is not None
             return self._frame, self._capture_sequence_id, self._capture_timestamp
 
@@ -63,6 +81,12 @@ class LatestFrameSlot:
         with self._lock:
             if self._frame is None:
                 return None
+            self._has_new = False
+            if self._last_consumed_sequence_id == self._capture_sequence_id:
+                self._renderer_reuses += 1
+            else:
+                self._consumed_count += 1
+                self._last_consumed_sequence_id = self._capture_sequence_id
             return self._frame, self._capture_sequence_id, self._capture_timestamp
 
     @property
@@ -86,12 +110,16 @@ class CameraCaptureWorker:
         height: int = 480,
         fps: int = 30,
         backend: int | None = None,
+        fourcc: str = "auto",
+        exposure: float | None = None,
     ) -> None:
         self.device = device
         self.requested_width = width
         self.requested_height = height
         self.requested_fps = fps
         self.backend = backend
+        self.requested_fourcc = str(fourcc).upper()
+        self.requested_exposure = exposure
 
         self.slot = LatestFrameSlot()
         self._thread: threading.Thread | None = None
@@ -101,6 +129,7 @@ class CameraCaptureWorker:
         self.actual_width: int = width
         self.actual_height: int = height
         self.actual_fps: float = float(fps)
+        self.actual_fourcc: int = 0
         self.capture_sequence_id: int = 0
         self.latest_exception: Exception | None = None
         self.last_capture_time: float = 0.0
@@ -112,12 +141,11 @@ class CameraCaptureWorker:
         """Open camera and start the continuous capture thread."""
         import cv2
 
+        cap_backend = self.backend if self.backend is not None else _default_camera_backend(cv2)
         if str(self.device).isdigit():
             dev_idx = int(self.device)
-            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
             self._cap = cv2.VideoCapture(dev_idx, cap_backend)
         elif str(self.device).startswith("/dev/"):
-            cap_backend = self.backend or (cv2.CAP_V4L2 if hasattr(cv2, "CAP_V4L2") else 0)
             self._cap = cv2.VideoCapture(str(self.device), cap_backend)
         else:
             self._cap = cv2.VideoCapture(self.device)
@@ -125,10 +153,34 @@ class CameraCaptureWorker:
         if not self._cap.isOpened():
             raise RuntimeError(f"Unable to open physical camera: {self.device}")
 
+        # Prefer compressed MJPG only when the V4L2 device advertises it. This
+        # avoids forcing an unsupported format while keeping USB capture at
+        # the requested 30 FPS on cameras that expose both MJPG and YUYV.
+        if self.requested_fourcc in {"AUTO", "MJPG", "YUYV"}:
+            chosen = self.requested_fourcc
+            if chosen == "AUTO":
+                chosen = ""
+            if self.requested_fourcc == "AUTO" and str(self.device).startswith("/dev/"):
+                try:
+                    probe = subprocess.run(
+                        ["v4l2-ctl", "--device", str(self.device), "--list-formats-ext"],
+                        capture_output=True, text=True, timeout=2.0, check=False,
+                    ).stdout
+                    chosen = "MJPG" if "'MJPG'" in probe else "YUYV" if "'YUYV'" in probe else ""
+                except (OSError, subprocess.SubprocessError):
+                    chosen = ""
+            if chosen in {"MJPG", "YUYV"}:
+                code = cv2.VideoWriter_fourcc(*chosen)
+                self._cap.set(cv2.CAP_PROP_FOURCC, code)
+
         # Set requested capture properties
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.requested_width)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.requested_height)
         self._cap.set(cv2.CAP_PROP_FPS, self.requested_fps)
+        self._cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        if self.requested_exposure is not None:
+            self._cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+            self._cap.set(cv2.CAP_PROP_EXPOSURE, float(self.requested_exposure))
 
         # Query actual negotiated properties
         act_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -140,6 +192,7 @@ class CameraCaptureWorker:
             self.actual_height = act_h
         if act_fps > 0:
             self.actual_fps = act_fps
+        self.actual_fourcc = int(self._cap.get(cv2.CAP_PROP_FOURCC) or 0)
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True, name="CameraCaptureWorker")
@@ -193,4 +246,24 @@ class CameraCaptureWorker:
 
     @property
     def dropped_frames(self) -> int:
+        return self.slot.dropped_count
+
+    @property
+    def captured_frames(self) -> int:
+        """Physical frames accepted from the camera device."""
+        return self.slot.total_arrived
+
+    @property
+    def consumed_frames(self) -> int:
+        with self.slot._lock:
+            return self.slot._consumed_count
+
+    @property
+    def renderer_reuses(self) -> int:
+        with self.slot._lock:
+            return self.slot._renderer_reuses
+
+    @property
+    def overwritten_before_consumption(self) -> int:
+        """Frames replaced in the capacity-one slot before a consumer read."""
         return self.slot.dropped_count

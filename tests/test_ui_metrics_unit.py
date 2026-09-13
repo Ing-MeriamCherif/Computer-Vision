@@ -1,3 +1,8 @@
+"""UNIT: Metric calculation and view composition unit tests for legacy UI session.
+
+Operates purely on synthetic in-memory arrays; requires no physical camera hardware.
+"""
+
 from __future__ import annotations
 
 import pytest

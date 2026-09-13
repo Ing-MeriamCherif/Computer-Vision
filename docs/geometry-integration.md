@@ -79,12 +79,14 @@ branch/commit provenance in `integrations/README.md` and each `SOURCE.md`.
 their `talel-hand` reacquire/hold settings are retained in the imported
 `config.py` and `upstream_main.py` reference.
 
-`geometry.lighting.light_from_palm` samples the real `GeometryState.depth` at
-the palm (bilinear first, 5x5 median fallback), calls the colleague
-`light_vector.palm_to_light` math, and adapts the result through the calibrated
-camera. `shade_geometry` then applies up to two diffuse/specular lights and a
-bounded screen-space visibility pass. The result is composed into the same
-live OpenCV frame as the webcam, depth, normals, and metrics.
+`geometry.lighting.light_from_palm` remains the legacy CPU/native-app adapter
+and samples `GeometryState.depth`. P123 Mode 7 does not use it: the async XYZ
+worker estimates metric Z from palm width and `CameraModel` intrinsics without
+waiting for scene geometry, then adapts fresh `HandXYZ.xyz_camera` records to
+`LightState`. The Mode 7 OpenGL 3.3 renderer applies linear-space diffuse,
+additive specular, multi-light camera-space area-shadow rays, sample-to-light
+volumetric visibility, and projected 3D orbs; `shade_geometry` is its CPU
+reference/fallback.
 
 The complete colleague `feature/depth` tree is preserved under
 `integrations/colleague_depth/depth`. `geometry.ColleagueDepthProvider` loads

@@ -27,7 +27,14 @@ from .cuda_backend import TorchGeometryBackend, torch_cuda_status
 from .depth_provider import DepthAnythingProvider
 from .colleague_depth import ColleagueDepthProvider
 from .hand_control import GestureState, HandControlEngine, TrackedHand, create_hand_tracker
-from .lighting import LightState, render_volumetric_scattering, sample_depth, shade_geometry
+from .lighting import (
+    LightState,
+    project_light_orb,
+    render_light_orbs,
+    render_volumetric_scattering,
+    sample_depth,
+    shade_geometry,
+)
 from .motion import OpenCVFlowProvider
 from .native_window import NativeOpenGLWindow
 from .normals import normals_to_rgb
@@ -609,7 +616,7 @@ class NativeLiveApp:
                 pu, pv = hand.palm_uv
                 pos = self.camera.unproject(pu, pv, z_val).astype(np.float32)
                 # Modulate intensity by confidence / openness
-                intensity = 1.6 if hand.palm_width_px and hand.palm_width_px > 50 else 1.2
+                intensity = 0.78 if hand.palm_width_px and hand.palm_width_px > 50 else 0.64
                 lights.append(LightState(
                     position_camera=pos,
                     intensity=intensity,
@@ -626,7 +633,7 @@ class NativeLiveApp:
                 orb_z = 0.65
                 lights.append(LightState(
                     position_camera=np.array([orb_x, orb_y, orb_z], dtype=np.float32),
-                    intensity=1.5,
+                    intensity=0.72,
                     color_rgb=np.array([1.0, 0.95, 0.88], dtype=np.float32),
                     confidence=1.0,
                     source_hand=-1,
@@ -643,7 +650,7 @@ class NativeLiveApp:
                 pos1 = self.camera.unproject(h1.palm_uv[0], h1.palm_uv[1], z1).astype(np.float32)
                 lights.append(LightState(
                     position_camera=pos0,
-                    intensity=1.5,
+                    intensity=0.72,
                     color_rgb=np.array([0.2, 0.75, 1.0], dtype=np.float32),  # Cyan
                     confidence=h0.confidence,
                     source_hand=h0.hand_id,
@@ -651,7 +658,7 @@ class NativeLiveApp:
                 ))
                 lights.append(LightState(
                     position_camera=pos1,
-                    intensity=1.5,
+                    intensity=0.72,
                     color_rgb=np.array([1.0, 0.55, 0.15], dtype=np.float32),  # Amber
                     confidence=h1.confidence,
                     source_hand=h1.hand_id,
@@ -665,7 +672,7 @@ class NativeLiveApp:
                 pos1 = np.array([-pos0[0], pos0[1], pos0[2]], dtype=np.float32)
                 lights.append(LightState(
                     position_camera=pos0,
-                    intensity=1.5,
+                    intensity=0.72,
                     color_rgb=np.array([0.2, 0.75, 1.0], dtype=np.float32),  # Cyan
                     confidence=h0.confidence,
                     source_hand=h0.hand_id,
@@ -673,7 +680,7 @@ class NativeLiveApp:
                 ))
                 lights.append(LightState(
                     position_camera=pos1,
-                    intensity=1.3,
+                    intensity=0.62,
                     color_rgb=np.array([1.0, 0.55, 0.15], dtype=np.float32),  # Amber
                     confidence=0.85,
                     source_hand=-1,
@@ -683,7 +690,7 @@ class NativeLiveApp:
                 # Dual virtual lights
                 lights.append(LightState(
                     position_camera=np.array([-0.3, -0.2, 0.65], dtype=np.float32),
-                    intensity=1.4,
+                    intensity=0.68,
                     color_rgb=np.array([0.2, 0.75, 1.0], dtype=np.float32),
                     confidence=1.0,
                     source_hand=-1,
@@ -691,7 +698,7 @@ class NativeLiveApp:
                 ))
                 lights.append(LightState(
                     position_camera=np.array([0.3, -0.2, 0.65], dtype=np.float32),
-                    intensity=1.4,
+                    intensity=0.68,
                     color_rgb=np.array([1.0, 0.55, 0.15], dtype=np.float32),
                     confidence=1.0,
                     source_hand=-1,
@@ -713,7 +720,7 @@ class NativeLiveApp:
                 frame_rgb,
                 geometry,
                 lights,
-                ambient=0.22,
+                ambient=0.40,
                 specular_strength=0.0,
                 shadows=False,
                 volumetrics=False,
@@ -723,8 +730,8 @@ class NativeLiveApp:
                 frame_rgb,
                 geometry,
                 lights,
-                ambient=0.18,
-                specular_strength=0.35,
+                ambient=0.38,
+                specular_strength=0.16,
                 shininess=40.0,
                 shadows=False,
                 volumetrics=False,
@@ -734,8 +741,8 @@ class NativeLiveApp:
                 frame_rgb,
                 geometry,
                 lights,
-                ambient=0.16,
-                specular_strength=0.32,
+                ambient=0.38,
+                specular_strength=0.16,
                 shininess=40.0,
                 shadows=self.shadows_enabled,
                 volumetrics=False,
@@ -745,8 +752,8 @@ class NativeLiveApp:
                 frame_rgb,
                 geometry,
                 lights,
-                ambient=0.15,
-                specular_strength=0.30,
+                ambient=0.36,
+                specular_strength=0.16,
                 shininess=44.0,
                 shadows=self.shadows_enabled,
                 volumetrics=self.volumetrics_enabled,
@@ -779,6 +786,17 @@ class NativeLiveApp:
             for hand in hands:
                 hand_col = (0, 240, 255) if hand.hand_id == 0 else (255, 140, 30)
                 draw_hand_skeleton(rendered, hand, color_rgb=hand_col, draw_vector=True)
+
+        # Emitters are projected from the same camera-space states used above
+        # for shading, shadows, and volumetrics.
+        if lights:
+            rendered = render_light_orbs(
+                rendered,
+                self.camera,
+                lights,
+                depth=geometry.depth,
+                valid=geometry.valid_mask,
+            )
 
         # 9. Draw Professional HUD Overlay
         if self.show_hud:
@@ -864,16 +882,18 @@ class NativeLiveApp:
 
         # Active Lights Panel (Right)
         if lights:
-            _draw_transparent_box(canvas, w - 240, 40, w - 10, 40 + len(lights) * 44 + 8, color=(12, 14, 18), alpha=0.70)
-            ly = 58
+            _draw_transparent_box(canvas, w - 310, 112, w - 10, 112 + len(lights) * 54 + 8, color=(12, 14, 18), alpha=0.70)
+            ly = 130
             for i, lt in enumerate(lights):
                 pos = lt.position_camera if lt.position_camera is not None else np.zeros(3)
                 col_hex = (int(lt.color_rgb[0] * 255), int(lt.color_rgb[1] * 255), int(lt.color_rgb[2] * 255))
-                cv2.circle(canvas, (w - 225, ly - 4), 6, col_hex, -1, cv2.LINE_AA)
-                cv2.putText(canvas, f"Light {i} ({'H' + str(lt.source_hand) if lt.source_hand >= 0 else 'Virtual'})", (w - 212, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
-                cv2.putText(canvas, f"XYZ: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] m", (w - 212, ly + 14), cv2.FONT_HERSHEY_SIMPLEX, 0.36, (180, 190, 200), 1, cv2.LINE_AA)
-                cv2.putText(canvas, f"I: {lt.intensity:.2f} | Conf: {lt.confidence:.2f}", (w - 212, ly + 28), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (160, 170, 180), 1, cv2.LINE_AA)
-                ly += 44
+                uv = project_light_orb(self.camera, lt)
+                uv_text = f"UV: [{uv[0]:.0f}, {uv[1]:.0f}]" if uv is not None else "UV: off-screen"
+                cv2.circle(canvas, (w - 295, ly - 4), 6, col_hex, -1, cv2.LINE_AA)
+                cv2.putText(canvas, f"Light {i} ({'H' + str(lt.source_hand) if lt.source_hand >= 0 else 'Virtual'})", (w - 282, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.40, (255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(canvas, f"XYZ: [{pos[0]:.2f}, {pos[1]:.2f}, {pos[2]:.2f}] m | {uv_text}", (w - 282, ly + 15), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (180, 190, 200), 1, cv2.LINE_AA)
+                cv2.putText(canvas, f"I: {lt.intensity:.2f} | Conf: {lt.confidence:.2f}", (w - 282, ly + 30), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (160, 170, 180), 1, cv2.LINE_AA)
+                ly += 54
 
         # Bottom Shortcut Strip
         _draw_transparent_box(canvas, 0, h - 26, w, h, color=(12, 12, 14), alpha=0.82)

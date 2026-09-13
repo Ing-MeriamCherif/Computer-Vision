@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+import math
 import time
 
 import numpy as np
@@ -22,6 +24,9 @@ class LightState:
     enabled: bool = True
     light_id: int | str = 0
     position_camera_m: np.ndarray | None = None
+    range_m: float = 1.0
+    source_radius_m: float = 0.025
+    visual_radius_m: float = 0.035
 
     def __post_init__(self) -> None:
         if self.position_camera is not None:
@@ -81,6 +86,114 @@ def sample_depth(depth: np.ndarray, valid: np.ndarray | None, u: float, v: float
     return float(np.median(values)), float(min(1.0, values.size / ((2 * radius + 1) ** 2)))
 
 
+def project_light_orb(
+    camera: CameraModel,
+    light: LightState,
+    *,
+    source_radius_m: float | None = None,
+) -> tuple[float, float, float] | None:
+    """Return the pinhole projection and screen radius for a rendered light."""
+    position = light.position_camera
+    if not light.enabled or position is None or not np.isfinite(position).all() or position[2] <= 0:
+        return None
+    uv = camera.project(position)
+    if not np.isfinite(uv).all():
+        return None
+    radius_m = light.visual_radius_m if source_radius_m is None else float(source_radius_m)
+    radius_px = float(np.clip(camera.fx * radius_m / float(position[2]), 6.0, 32.0))
+    return float(uv[0]), float(uv[1]), radius_px
+
+
+@lru_cache(maxsize=24)
+def _light_orb_masks(radius_px: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build reusable masks for the local glow and shaded spherical emitter."""
+    extent = max(5, int(math.ceil(radius_px * 1.8)))
+    yy, xx = np.mgrid[-extent:extent + 1, -extent:extent + 1].astype(np.float32)
+    distance = np.sqrt(xx * xx + yy * yy)
+    broad_glow = np.exp(-0.5 * (distance / max(radius_px * 1.35, 1.0)) ** 2)
+    inner = np.exp(-0.5 * (distance / max(radius_px * 0.88, 1.0)) ** 2)
+    normalized = distance / max(float(radius_px), 1.0)
+    sphere_depth = np.sqrt(np.maximum(1.0 - normalized * normalized, 0.0))
+    highlight = np.exp(-0.5 * (
+        ((xx + radius_px * 0.24) / max(radius_px * 0.12, 1.0)) ** 2
+        + ((yy + radius_px * 0.30) / max(radius_px * 0.12, 1.0)) ** 2
+    ))
+    halo = np.maximum(broad_glow - inner, 0.0)
+    return halo, inner, sphere_depth, highlight
+
+
+def render_light_orbs(
+    rgb: np.ndarray,
+    camera: CameraModel,
+    lights: list[LightState] | tuple[LightState, ...],
+    *,
+    depth: np.ndarray | None = None,
+    valid: np.ndarray | None = None,
+    depth_aware: bool = True,
+) -> np.ndarray:
+    """Composite visible emitters projected from the exact lighting states.
+
+    Work is limited to each orb's small bounding box; reusable radial masks keep
+    the per-frame overlay inexpensive. The white-hot core remains visible when
+    depth indicates that the halo is behind a nearer surface.
+    """
+    image = np.asarray(rgb)
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError("rgb must have shape (height, width, 3+)")
+    height, width = image.shape[:2]
+    result: np.ndarray | None = None
+
+    for light in lights:
+        projected = project_light_orb(camera, light)
+        if projected is None or light.confidence <= 0 or light.intensity <= 0:
+            continue
+        u, v, radius = projected
+        cx, cy = int(round(u)), int(round(v))
+        radius_i = max(4, int(round(radius)))
+        halo, inner, sphere_depth, highlight = _light_orb_masks(radius_i)
+        extent = halo.shape[0] // 2
+        left, top = cx - extent, cy - extent
+        right, bottom = cx + extent + 1, cy + extent + 1
+        x0, y0 = max(0, left), max(0, top)
+        x1, y1 = min(width, right), min(height, bottom)
+        if x0 >= x1 or y0 >= y1:
+            continue
+
+        mask_x0, mask_y0 = x0 - left, y0 - top
+        mask_x1, mask_y1 = mask_x0 + (x1 - x0), mask_y0 + (y1 - y0)
+        halo_roi = halo[mask_y0:mask_y1, mask_x0:mask_x1]
+        inner_roi = inner[mask_y0:mask_y1, mask_x0:mask_x1]
+        sphere_roi = sphere_depth[mask_y0:mask_y1, mask_x0:mask_x1]
+        highlight_roi = highlight[mask_y0:mask_y1, mask_x0:mask_x1]
+
+        halo_visibility = 1.0
+        if depth_aware and depth is not None and depth.shape == (height, width):
+            scene_z, reliability = sample_depth(depth, valid, u, v)
+            if reliability > 0 and scene_z + max(0.025, 0.04 * float(light.position_camera[2])) < float(light.position_camera[2]):
+                halo_visibility = 0.28
+
+        if result is None:
+            result = image[..., :3].copy()
+        roi = result[y0:y1, x0:x1].astype(np.float32)
+        color = np.clip(np.asarray(light.color_rgb, dtype=np.float32), 0.0, 1.0)
+        power = float(np.clip(light.intensity * light.confidence, 0.0, 2.0))
+        glow = (halo_roi * 0.05 * halo_visibility + inner_roi * 0.10) * power
+        roi += glow[..., None] * color[None, None, :] * 85.0
+
+        normalized = np.sqrt(np.maximum(1.0 - sphere_roi * sphere_roi, 0.0))
+        edge_t = np.clip((1.0 - normalized) * 8.0, 0.0, 1.0)
+        edge_alpha = edge_t * edge_t * (3.0 - 2.0 * edge_t)
+        sphere_alpha = (0.90 * edge_alpha)[..., None]
+        white_mix = np.clip(0.42 + 0.36 * sphere_roi + 0.55 * highlight_roi, 0.0, 1.0)[..., None]
+        ball_color = color[None, None, :] * (1.0 - white_mix) + np.array([1.0, 0.98, 0.93], dtype=np.float32) * white_mix
+        rim = ((1.0 - sphere_roi) ** 2 * 0.22)[..., None]
+        ball_color = ball_color * (1.0 - rim) + color[None, None, :] * rim
+        roi = roi * (1.0 - sphere_alpha) + ball_color * (255.0 * sphere_alpha)
+        result[y0:y1, x0:x1] = np.clip(roi, 0.0, 255.0).astype(np.uint8)
+
+    return image if result is None else result
+
+
 def light_from_palm(
     geometry: GeometryState,
     palm_uv: tuple[float, float],
@@ -89,6 +202,7 @@ def light_from_palm(
     color_rgb: tuple[float, float, float] = (1.0, 0.78, 0.48),
     intensity: float = 1.4,
     d_ref: float = 0.7,
+    range_m: float = 1.0,
     source_hand: int = 0,
     timestamp: float | None = None,
 ) -> LightState | None:
@@ -108,29 +222,43 @@ def light_from_palm(
         timestamp=time.time() if timestamp is None else float(timestamp),
         enabled=True,
         light_id=int(source_hand),
+        range_m=float(range_m),
     )
 
 
-def _shadow_factor(geometry: GeometryState, light: LightState, *, steps: int = 4) -> np.ndarray:
-    """Screen-space visibility test with scale-adaptive depth bias."""
+def _shadow_factor(geometry: GeometryState, light: LightState, *, steps: int = 6) -> np.ndarray:
+    """Camera-space screen-ray visibility; out-of-frame samples stay unknown."""
     h, w = geometry.depth.shape
-    yy, xx = np.indices((h, w), dtype=np.float32)
     pos = light.position_camera if light.position_camera is not None else light.position_camera_m
-    light_uv = geometry.camera.project(pos).astype(np.float32)
-    depth = geometry.depth.astype(np.float32)
-    visible = np.ones((h, w), dtype=np.float32)
-    # Scale-adaptive bias depending on light distance and local geometry
-    light_z = max(float(pos[2]), 0.1)
-    bias = max(0.005, 0.015 * light_z)
+    depth = np.asarray(geometry.depth, dtype=np.float32)
+    valid = np.asarray(geometry.valid_mask, dtype=bool) & np.isfinite(depth) & (depth > 1e-5)
+    points = np.asarray(geometry.positions_3d, dtype=np.float32)
+    finite = np.isfinite(points).all(axis=-1) & (points[..., 2] > 1e-4)
+    radius = max(float(getattr(light, "source_radius_m", 0.025)), 0.0)
+    offsets = ((-0.65, -0.65), (0.65, -0.65), (-0.65, 0.65), (0.65, 0.65))
+    visibility_sum = np.zeros((h, w), dtype=np.float32)
 
-    for fraction in np.linspace(0.2, 0.8, max(1, steps), dtype=np.float32):
-        su = np.rint(xx + (light_uv[0] - xx) * fraction).astype(np.int32).clip(0, w - 1)
-        sv = np.rint(yy + (light_uv[1] - yy) * fraction).astype(np.int32).clip(0, h - 1)
-        sampled = depth[sv, su]
-        expected = depth + (light_z - depth) * fraction
-        occluded = np.isfinite(sampled) & (sampled + bias < expected)
-        visible[occluded] *= 0.70
-    return visible
+    for ox, oy in offsets:
+        emitter = np.asarray(pos, dtype=np.float32).copy()
+        emitter[0] += ox * radius
+        emitter[1] += oy * radius
+        ray = emitter.reshape(1, 1, 3) - points
+        visibility = np.ones((h, w), dtype=np.float32)
+        for fraction in np.linspace(0.07, 0.94, max(1, int(steps)), dtype=np.float32):
+            sample = points + ray * fraction
+            sample_z = sample[..., 2]
+            safe_z = np.maximum(sample_z, 1e-4)
+            sample_u = geometry.camera.fx * sample[..., 0] / safe_z + geometry.camera.cx
+            sample_v = geometry.camera.fy * sample[..., 1] / safe_z + geometry.camera.cy
+            inside = finite & (sample_z > 1e-4) & (sample_u >= 0.0) & (sample_u < w) & (sample_v >= 0.0) & (sample_v < h)
+            ix = np.rint(np.nan_to_num(sample_u, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, w - 1)
+            iy = np.rint(np.nan_to_num(sample_v, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, h - 1)
+            scene_z = depth[iy, ix]
+            bias = np.maximum(0.005, 0.012 * sample_z)
+            blocked = inside & valid[iy, ix] & (scene_z < sample_z - bias)
+            visibility[blocked] = np.minimum(visibility[blocked], 0.20)
+        visibility_sum += visibility
+    return visibility_sum / float(len(offsets))
 
 
 def render_volumetric_scattering(
@@ -196,13 +324,26 @@ def render_volumetric_scattering(
             dy = light_pos[1] - py
             dz = light_pos[2] - pz
             dist_sq = dx ** 2 + dy ** 2 + dz ** 2 + 0.05
-            in_scatter = intensity / dist_sq
+            range_m = max(float(getattr(light, "range_m", 1.0)) * 0.78, 1e-3)
+            source_falloff = np.exp(-0.5 * dist_sq / (range_m * range_m))
+            in_scatter = intensity / dist_sq * source_falloff
 
-            # Screen-space shadow test for sample point
-            su = np.rint(cx_low + fx_low * px / np.maximum(pz, 1e-4)).astype(np.int32).clip(0, w - 1)
-            sv = np.rint(cy_low + fy_low * py / np.maximum(pz, 1e-4)).astype(np.int32).clip(0, h - 1)
-            blocker = depth_low[sv, su]
-            visible = np.where(np.isfinite(blocker) & (blocker + 0.02 < pz), 0.3, 1.0)
+            # March from each haze sample toward its emitter. Off-screen
+            # projections are unknown, not clamped to a border depth texel.
+            visible = np.ones((h, w), dtype=np.float32)
+            for shadow_t in np.linspace(0.12, 0.90, max(1, min(6, num_steps)), dtype=np.float32):
+                sx = px + (light_pos[0] - px) * shadow_t
+                sy = py + (light_pos[1] - py) * shadow_t
+                sz = pz + (light_pos[2] - pz) * shadow_t
+                safe_sz = np.maximum(sz, 1e-4)
+                su = fx_low * sx / safe_sz + cx_low
+                sv = fy_low * sy / safe_sz + cy_low
+                inside = (sz > 1e-4) & (su >= 0.0) & (su < w) & (sv >= 0.0) & (sv < h)
+                ix = np.rint(np.nan_to_num(su, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, w - 1)
+                iy = np.rint(np.nan_to_num(sv, nan=-1.0, posinf=-1.0, neginf=-1.0)).astype(np.int32).clip(0, h - 1)
+                blocker = depth_low[iy, ix]
+                blocked = inside & valid_low[iy, ix] & (blocker < sz - np.maximum(0.008, 0.014 * sz))
+                visible[blocked] = np.minimum(visible[blocked], 0.18)
 
             contribution = in_scatter * visible * density
             haze[..., 0] += contribution * color[0]
@@ -256,8 +397,9 @@ def shade_geometry(
         halfway /= np.maximum(np.linalg.norm(halfway, axis=-1, keepdims=True), 1e-6)
         specular = np.maximum(np.sum(normals * halfway, axis=-1), 0.0) ** float(shininess)
 
-        # Physically coherent 1 / (1 + r^2) distance attenuation from light to surface
-        attenuation = float(light.intensity) / (1.0 + distance[..., 0] ** 2)
+        # Keep each hand light local while retaining smooth quadratic falloff.
+        range_m = max(float(getattr(light, "range_m", 1.0)), 1e-3)
+        attenuation = float(light.intensity) / (1.0 + (distance[..., 0] / range_m) ** 2)
         visibility = _shadow_factor(geometry, light) if shadows else 1.0
         contribution = (diffuse * 0.92 + specular * specular_strength) * attenuation * visibility * float(light.confidence)
         lit += contribution[..., None] * light.color_rgb.reshape(1, 1, 3)

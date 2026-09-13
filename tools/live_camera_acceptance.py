@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
-"""Real continuous physical-camera acceptance tool.
+"""Continuous camera soak tool (physical camera default, optional --synthetic offline mode).
 
-Runs the full live pipeline against the real physical camera for a configurable
-duration and validates: FPS, latency, worker health, and resource stability.
+Runs the full live pipeline for a configurable duration and records telemetry:
+FPS, latency, worker health, and RSS memory growth.
+
+NOTE: For authoritative fail-closed physical hardware validation with zero
+synthetic fallbacks, use `python -m tools.physical_camera_gate`.
 
 Usage:
     python -m tools.live_camera_acceptance --duration 60
     python -m tools.live_camera_acceptance --soak --duration 600 --min-render-fps 28
-    python -m tools.live_camera_acceptance --json-report report.json
+    python -m tools.live_camera_acceptance --synthetic --duration 10
 """
 
 from __future__ import annotations

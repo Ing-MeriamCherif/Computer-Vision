@@ -51,13 +51,16 @@ from .persistent import (
     persistent_hole_fill,
 )
 from .cuda_backend import CudaGeometryDiagnostics, TorchGeometryBackend, torch_cuda_status
-from .depth_provider import DepthAnythingProvider, DepthInferenceDiagnostics
+from .depth_provider import DeviceDepthState, DepthAnythingProvider, DepthInferenceDiagnostics
 from .hand_control import GestureState, HandControlEngine, HandObservation, TrackedHand, create_hand_tracker, transform_hand_uv
 from .colleague_depth import ColleagueDepthProvider
-from .lighting import LightState, light_from_palm, render_volumetric_scattering, sample_depth, shade_geometry
+from .lighting import LightState, light_from_palm, render_volumetric_scattering, shade_geometry
 from .async_pipeline import DepthWorker, FramePacket, LatestDepthBuffer, LatestFrameBuffer
 from .camera_worker import CameraCaptureWorker, LatestFrameSlot
 from .persistent_worker import PersistentMapWorker
+from .p123_contract import HandXYZ, P4InputState
+from .p123_live_runtime import P123LiveRuntime, P123Metrics, P123Snapshot
+from .depth_sampling import camera_uv_to_depth_uv, sample_depth
 from .native_app import AppMode, NativeLiveApp, QualityProfile
 from .native_window import NativeOpenGLWindow
 
@@ -132,7 +135,6 @@ __all__ = [
     "ColleagueDepthProvider",
     "LightState",
     "light_from_palm",
-    "sample_depth",
     "shade_geometry",
     "render_volumetric_scattering",
     "FramePacket",
@@ -146,4 +148,11 @@ __all__ = [
     "AppMode",
     "QualityProfile",
     "NativeOpenGLWindow",
+    "HandXYZ",
+    "P4InputState",
+    "P123LiveRuntime",
+    "P123Metrics",
+    "P123Snapshot",
+    "camera_uv_to_depth_uv",
+    "sample_depth",
 ]

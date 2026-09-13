@@ -13,6 +13,8 @@ from typing import Protocol
 
 import numpy as np
 
+from .depth_sampling import camera_uv_to_depth_uv, sample_depth
+
 
 @dataclass(slots=True)
 class TrackedHand:
@@ -28,6 +30,7 @@ class TrackedHand:
     handedness: str | None = None
     palm_width_px: float | None = None
     stale: bool = False
+    depth_confidence: float = 0.0
 
 
 # Backward-compatible alias for existing tests
@@ -142,9 +145,9 @@ class _TasksBackend:
         options = mp_vision.HandLandmarkerOptions(
             base_options=base,
             num_hands=max(1, int(max_hands)),
-            min_hand_detection_confidence=0.3,
-            min_hand_presence_confidence=0.3,
-            min_tracking_confidence=0.3,
+            min_hand_detection_confidence=0.5,
+            min_hand_presence_confidence=0.5,
+            min_tracking_confidence=0.5,
         )
         self._mp = mp
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
@@ -165,6 +168,8 @@ class _TasksBackend:
             except Exception:
                 pass
             palm = points[9]
+            if confidence < 0.45:
+                continue
             observations.append(TrackedHand(
                 hand_id=index,
                 landmarks_uv=points,
@@ -308,6 +313,8 @@ class HandControlEngine:
         self._coast = 0
         self._last_timestamp: float | None = None
         self.last_detection_ran = False
+        self.lk_updates = 0
+        self.lk_motion_px = 0.0
 
     @property
     def backend_name(self) -> str:
@@ -383,9 +390,33 @@ class HandControlEngine:
                     obs.landmarks_uv = obs.landmarks_uv * np.array([scale_x, scale_y])
                 if obs.palm_width_px is not None:
                     obs.palm_width_px *= (scale_x + scale_y) * 0.5
-            observations = self._assign_stable_ids(raw_observations)
+            observations = self._assign_stable_ids([obs for obs in raw_observations if obs.confidence >= 0.45])
         else:
-            observations = self._last
+            # Detector-skip frames still update coordinates using LK optical
+            # flow. Reusing the previous UV was a false 30 Hz claim and made
+            # fast hands appear frozen between detector passes.
+            observations = []
+            if self._last and self._previous_gray is not None:
+                gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+                for prior in self._last:
+                    point = np.asarray([[prior.palm_uv[0] / scale_x, prior.palm_uv[1] / scale_y]], dtype=np.float32)
+                    nxt, status, _ = cv2.calcOpticalFlowPyrLK(self._previous_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
+                    if status is not None and bool(status[0, 0]):
+                        tracked = np.asarray(nxt).reshape(-1, 2)[0]
+                        u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
+                        if 0 <= u < width and 0 <= v < height:
+                            delta = float(np.hypot(u - prior.palm_uv[0], v - prior.palm_uv[1]))
+                            self.lk_updates += 1
+                            self.lk_motion_px += delta
+                            observations.append(TrackedHand(
+                                hand_id=prior.hand_id,
+                                landmarks_uv=None if prior.landmarks_uv is None else prior.landmarks_uv.copy(),
+                                palm_uv=(u, v), confidence=prior.confidence * 0.95,
+                                depth_z=prior.depth_z, timestamp=timestamp,
+                                velocity_px_s=prior.velocity_px_s, handedness=prior.handedness,
+                                palm_width_px=prior.palm_width_px, stale=True,
+                                depth_confidence=prior.depth_confidence,
+                            ))
 
         if observations:
             filtered: list[TrackedHand] = []
@@ -397,10 +428,14 @@ class HandControlEngine:
                 # Depth estimation from depth map if available
                 hand_z = obs.depth_z
                 if depth_map is not None:
-                    from .lighting import sample_depth
-                    z_val, z_conf = sample_depth(depth_map, None, uv[0], uv[1])
+                    depth_arr = np.asarray(depth_map)
+                    if depth_arr.ndim != 2:
+                        raise ValueError("depth_map must be a 2D array")
+                    depth_uv = camera_uv_to_depth_uv(uv, (width, height), (depth_arr.shape[1], depth_arr.shape[0]))
+                    z_val, z_conf = sample_depth(depth_arr, None, depth_uv[0], depth_uv[1])
                     if z_val > 0.0:
                         hand_z = z_val
+                        obs.depth_confidence = float(z_conf)
 
                 if self.filter_mode == "ema":
                     try:
@@ -442,13 +477,21 @@ class HandControlEngine:
                 point = np.asarray([[obs.palm_uv[0] / scale_x, obs.palm_uv[1] / scale_y]], dtype=np.float32)
                 nxt, status, _ = cv2.calcOpticalFlowPyrLK(prior_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
                 if status is not None and bool(status[0, 0]):
-                    u, v = float(nxt[0, 0, 0] * scale_x), float(nxt[0, 0, 1] * scale_y)
+                    tracked = np.asarray(nxt).reshape(-1, 2)[0]
+                    u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
                     if 0 <= u < width and 0 <= v < height:
-                        obs.palm_uv = (u, v)
-                        obs.confidence *= 0.85
-                        obs.stale = True
-                        obs.timestamp = timestamp
-                        coasted.append(obs)
+                        delta = float(np.hypot(u - obs.palm_uv[0], v - obs.palm_uv[1]))
+                        self.lk_updates += 1
+                        self.lk_motion_px += delta
+                        coasted.append(TrackedHand(
+                            hand_id=obs.hand_id,
+                            landmarks_uv=None if obs.landmarks_uv is None else obs.landmarks_uv.copy(),
+                            palm_uv=(u, v), confidence=obs.confidence * 0.85,
+                            depth_z=obs.depth_z, timestamp=timestamp,
+                            velocity_px_s=obs.velocity_px_s, handedness=obs.handedness,
+                            palm_width_px=obs.palm_width_px, stale=True,
+                            depth_confidence=obs.depth_confidence,
+                        ))
             observations = coasted
             self._last = coasted
             self._coast += 1
@@ -476,6 +519,8 @@ class HandControlEngine:
         self._coast = 0
         self._last_timestamp = None
         self.last_detection_ran = False
+        self.lk_updates = 0
+        self.lk_motion_px = 0.0
 
     def close(self) -> None:
         self.backend.close()
