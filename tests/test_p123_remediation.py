@@ -180,6 +180,14 @@ def test_p123_live_cli_exposes_mariem_only(monkeypatch):
     assert args.depth_size == "336"
 
 
+def test_p123_views_are_separate_display_modules():
+    import importlib
+
+    for name in ("rgb", "depth", "normals", "temporal", "hands", "xyz"):
+        module = importlib.import_module(f"p123.views.{name}")
+        assert callable(module.render)
+
+
 def test_cuda_normals_include_radius_four_and_unit_vectors():
     import pytest
     pytest.importorskip("torch")

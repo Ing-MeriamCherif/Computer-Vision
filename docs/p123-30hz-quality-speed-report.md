@@ -53,6 +53,8 @@ hand-coordinate claim is made.
   conservative temporal normal filter that rejects depth-disagreeing history.
 - Existing latest-only worker semantics and Talel XYZ completion-age freshness
   are preserved.
+- The viewer is split into independent `p123/views/{rgb,depth,normals,temporal,hands,xyz}`
+  packages; the CLI is now only lifecycle and input handling.
 - Targeted P123 tests pass in the repository virtualenv: **48 passed**.
 
 ## Verdict

@@ -54,7 +54,8 @@
 | `geometry/transforms.py` | B | P3 | Explicit coordinate transformations (resize, crop, letterbox) | `camera.py`, tests | YES | NO | NO | KEEP |
 | `geometry/validation.py` | C | P3 | `validate_renderer_geometry`, `GeometryValidationReport`, synthetic shapes | Tests, tools | NO (validation only) | NO | NO | KEEP |
 | `tools/native_live_app.py` | A | Shared | CLI wrapper for `NativeLiveApp` competition UI | `main.py`, CLI | YES | NO | NO | KEEP |
-| `tools/p123_live_app.py` | C | Shared | Real-time OpenCV viewer for P123 diagnostics (Modes 1–6) | CLI | NO (diagnostic only) | NO | NO | KEEP |
+| `tools/p123_live_app.py` | C | Shared | Thin lifecycle/CLI launcher for P123 diagnostics | CLI | NO (diagnostic only) | NO | NO | KEEP |
+| `p123/views/{rgb,depth,normals,temporal,hands,xyz}` | C | P123 | Independent display-only modules for Modes 1–6 | `tools/p123_live_app.py` | NO (diagnostic only) | NO | NO | KEEP |
 | `tools/physical_camera_gate.py` | C | Shared | Authoritative physical camera validation gate (fail-closed, no synthetic fallback) | CI / Hardware testing | NO (gate tool) | NO | NO | KEEP |
 | `tools/live_camera_acceptance.py` | C | Shared | Continuous soak test with FPS/latency/RSS metrics and optional `--synthetic` mode | CLI / CI | NO (soak test) | NO | NO | KEEP (document distinction from hardware gate) |
 | `tools/webcam_geometry_app.py` | E | Shared | Legacy 4-panel OpenCV browser/window app | `webcam_e2e.py`, legacy tests | NO (legacy) | YES (superseded by `native_live_app` & `p123_live_app`) | NO | KEEP / ISOLATE (retain for legacy compatibility) |

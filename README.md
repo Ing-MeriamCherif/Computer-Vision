@@ -111,6 +111,11 @@ fresh/degraded age. V4L2 format negotiation prefers advertised MJPG and uses a
 capacity-one capture buffer; override with `--fourcc MJPG` or `--fourcc YUYV`
 when required by a specific camera.
 
+The live display is organized by view module under [`p123/views/`](p123/views):
+`rgb`, `depth`, `normals`, `temporal`, `hands`, and `xyz`. Each view only
+formats the latest snapshot; capture and inference remain in the asynchronous
+runtime and the UI never performs model work.
+
 ---
 
 ## Tests
