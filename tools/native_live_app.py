@@ -158,7 +158,6 @@ def main() -> int:
         headless=args.headless,
         fullscreen=args.fullscreen,
         use_synthetic_camera=args.synthetic,
-        enable_persistent=not args.no_persistent,
     )
 
     try:
