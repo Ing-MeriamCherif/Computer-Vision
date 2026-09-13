@@ -225,7 +225,7 @@ class P123LiveRuntime:
             self.depth_provider = DepthAnythingProvider(depth_model, device="auto", use_fp16=use_fp16, input_size=native_size)
         else:
             raise ValueError(f"unknown depth backend: {depth_backend}")
-        self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=2, max_coast_frames=8)
+        self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=1, max_coast_frames=8)
         self.temporal = TemporalGeometryEngine(
             self.camera,
             TemporalConfig(diagnostics_level="timing"),
@@ -268,6 +268,7 @@ class P123LiveRuntime:
         self._depth_completion_ages = metric(); self._normal_completion_ages = metric(); self._xyz_completion_ages = metric()
         self._xyz: tuple[HandXYZ, ...] = ()
         self._xyz_smooth: dict[int, np.ndarray] = {}
+        self._rectify_maps: tuple[np.ndarray, np.ndarray] | None = None
 
     def start(self) -> None:
         if self._running:
@@ -286,6 +287,7 @@ class P123LiveRuntime:
         if self.hand_engine.backend_name in {"unavailable", "mock"}:
             raise RuntimeError(f"hand backend unavailable: {self.hand_engine.backend_name}")
         self.camera_worker.start()
+        rectification_camera = self.camera
         if not self._explicit_calibration:
             self.camera = CameraModel(
                 self.camera_worker.actual_width, self.camera_worker.actual_height,
@@ -303,6 +305,7 @@ class P123LiveRuntime:
             except RuntimeError:
                 self.camera_worker.stop()
                 raise
+        self._prepare_rectification(rectification_camera)
         self._running = True
         targets = [self._dispatch_loop, self._depth_loop, self._normal_loop, self._hand_loop, self._xyz_loop]
         if self.full_temporal:
@@ -317,6 +320,9 @@ class P123LiveRuntime:
             if packet is None:
                 continue
             frame, capture_id, timestamp = packet
+            if self._rectify_maps is not None:
+                import cv2
+                frame = cv2.remap(frame, self._rectify_maps[0], self._rectify_maps[1], cv2.INTER_LINEAR)
             if self.mirror:
                 # Mirror once at the capture boundary so RGB, depth, hands,
                 # and XYZ all share the user-facing left/right convention.
@@ -331,6 +337,24 @@ class P123LiveRuntime:
                     self._rgb_history.pop(self._rgb_order.popleft(), None)
             self._depth_frames.put(frame, capture_id, timestamp)
             self._hand_frames.put(frame, capture_id, timestamp)
+
+    def _prepare_rectification(self, camera: CameraModel | None = None) -> None:
+        """Precompute undistortion maps for the shared RGB pixel domain."""
+        camera = camera or self.camera
+        if not camera.distortion:
+            self._rectify_maps = None
+            return
+        import cv2
+        matrix = camera.camera_matrix
+        size = (int(camera.width), int(camera.height))
+        self._rectify_maps = cv2.initUndistortRectifyMap(
+            matrix,
+            np.asarray(camera.distortion, dtype=np.float64),
+            None,
+            matrix,
+            size,
+            cv2.CV_32FC1,
+        )
 
     def _depth_loop(self) -> None:
         version = 0
@@ -504,7 +528,6 @@ class P123LiveRuntime:
             # Its physical freshness therefore follows the hand capture. Tying
             # it to the slower depth worker made valid lights flash briefly and
             # disappear between geometry completions.
-            completion_age_ms = age_ms
             hand_hz = self._hand_times and _rate(self._hand_times) or 15.0
             freshness_limit = min(
                 self.max_state_age_ms,
@@ -537,17 +560,31 @@ class P123LiveRuntime:
                     xyz = None
                     reliability = 0.0
                 else:
-                    prior_xyz = self._xyz_smooth.get(hand.hand_id)
-                    motion = float(np.linalg.norm(raw_xyz - prior_xyz)) if prior_xyz is not None else 1.0
-                    blend = float(np.clip(0.25 + motion * 0.45, 0.25, 0.75))
-                    smooth_xyz = raw_xyz if prior_xyz is None else blend * raw_xyz + (1.0 - blend) * prior_xyz
-                    self._xyz_smooth[hand.hand_id] = smooth_xyz
-                    xyz = tuple(float(v) for v in smooth_xyz)
-                values.append(HandXYZ(hand.hand_id, hand.palm_uv, xyz, float(hand.confidence * reliability), hand.timestamp, hands.source_frame_id, age_ms, hand.handedness, age_ms, completion_age_ms))
+                    # HandControlEngine already filters U/V and palm width.
+                    # Unproject that filtered measurement directly; a second
+                    # full-vector EMA caused visible XY lag and geometric drift.
+                    self._xyz_smooth.pop(hand.hand_id, None)
+                    xyz = tuple(float(v) for v in raw_xyz)
+                values.append(HandXYZ(
+                    hand.hand_id, hand.palm_uv, xyz,
+                    float(hand.confidence * reliability), hand.timestamp,
+                    hands.source_frame_id, age_ms, hand.handedness,
+                    age_ms, None,
+                ))
             self._xyz = tuple(values)
-            now = time.monotonic()
-            self._xyz_times.append(now)
-            self._xyz_ages.append(max(0.0, (now - hands.timestamp) * 1000.0))
+            completed = time.monotonic()
+            source_age_ms = max(0.0, (completed - hands.timestamp) * 1000.0)
+            completion_age_ms = max(0.0, (time.monotonic() - completed) * 1000.0)
+            # Rebuild records with the authoritative source age and a distinct
+            # completion age measured after XYZ production.
+            self._xyz = tuple(
+                HandXYZ(item.hand_id, item.palm_uv, item.xyz_camera, item.confidence,
+                        item.timestamp, item.source_frame_id, source_age_ms,
+                        item.handedness, source_age_ms, completion_age_ms)
+                for item in self._xyz
+            )
+            self._xyz_times.append(completed)
+            self._xyz_ages.append(source_age_ms)
             self._xyz_completion_ages.append(completion_age_ms)
 
     def snapshot(self) -> P123Snapshot:

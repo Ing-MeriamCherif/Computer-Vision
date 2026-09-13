@@ -9,6 +9,7 @@ from collections import deque
 import cv2
 
 from geometry.p123_live_runtime import P123LiveRuntime
+from geometry.camera import CameraModel
 from p123.views import relight as relight_view
 from p123.views import render as _panel
 from p123.views.common import hit_test_navigation, hit_test_source_toggle
@@ -67,6 +68,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", default=None, help="Legacy initial camera selector; use --webcam-camera/--phone-camera to configure both sources")
     parser.add_argument("--webcam-camera", default="/dev/video0", help="Webcam device used by the in-app source toggle")
     parser.add_argument("--phone-camera", default="/dev/video2", help="Phone device used by the in-app source toggle")
+    parser.add_argument("--webcam-calibration", default=None, help="CameraModel JSON for the webcam source")
+    parser.add_argument("--phone-calibration", default=None, help="CameraModel JSON for the phone source")
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
@@ -105,6 +108,12 @@ def main() -> int:
         else:
             camera_device = camera_name
         source_depth_size = _parse_depth_size(args.depth_size, (source_height, source_width))
+        calibration_path = args.phone_calibration if source == "phone" else args.webcam_calibration
+        calibration = None
+        if calibration_path:
+            calibration = CameraModel.load_json(calibration_path)
+            if (calibration.width, calibration.height) != (source_width, source_height):
+                calibration = calibration.scaled_intrinsics(source_width, source_height)
         result = P123LiveRuntime(
             camera_device=camera_device,
             width=source_width,
@@ -115,6 +124,7 @@ def main() -> int:
             depth_backend=args.depth_backend,
             use_fp16=args.fp16,
             hand_backend=args.hand_backend,
+            calibration=calibration,
             full_temporal=args.full_temporal,
             mirror=args.mirror,
         )
@@ -139,6 +149,8 @@ def main() -> int:
         args, selected_source, legacy_camera_is_phone=legacy_camera_is_phone
     )
     print(f"  Physical Camera:   {active_camera} ({active_width}x{active_height} @ {args.fps} FPS)")
+    active_calibration = args.phone_calibration if selected_source == "phone" else args.webcam_calibration
+    print(f"  Camera Intrinsics:  {'CALIBRATED ' + active_calibration if active_calibration else 'APPROXIMATE INTRINSICS'}")
     print(f"  Display Canvas:    {display_size[0]}x{display_size[1]}")
     print(f"  Depth Backend:     {args.depth_backend} (input {args.depth_size}, {'fp16' if args.fp16 else 'fp32'})")
     print(f"  Depth Runtime:     {getattr(runtime.depth_provider, 'backend_name', 'unknown')}")

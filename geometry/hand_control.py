@@ -16,6 +16,42 @@ import numpy as np
 from .depth_sampling import camera_uv_to_depth_uv, sample_depth
 
 
+PALM_MCP_INDICES = (5, 9, 13, 17)
+
+
+def palm_center(points: np.ndarray | None) -> tuple[float, float] | None:
+    """Return a robust center of the four palm MCP landmarks."""
+    if points is None:
+        return None
+    points = np.asarray(points, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] < 2 or len(points) <= max(PALM_MCP_INDICES):
+        return None
+    mcp = points[list(PALM_MCP_INDICES), :2]
+    if not np.isfinite(mcp).all():
+        return None
+    center = np.median(mcp, axis=0)
+    # With four samples, an extreme outlier can still influence the average
+    # of the two middle values. Remove only a clearly isolated MCP, retaining
+    # the requested median behavior for normal hand geometry.
+    distances = np.linalg.norm(mcp - center, axis=1)
+    baseline = float(np.median(distances))
+    if baseline > 1e-6:
+        outlier = int(np.argmax(distances))
+        if distances[outlier] > 3.0 * baseline:
+            center = np.median(np.delete(mcp, outlier, axis=0), axis=0)
+    return float(center[0]), float(center[1])
+
+
+def choose_tracker_size(source_size: tuple[int, int], target_size: tuple[int, int] = (640, 360)) -> tuple[int, int]:
+    """Choose a direct aspect-matched tracker resolution (width, height)."""
+    sw, sh = max(1, int(source_size[0])), max(1, int(source_size[1]))
+    tw = max(14, int(target_size[0]))
+    # The width is the processing budget. Height follows the physical aspect
+    # ratio (640x360 for 16:9, 640x480 for 4:3).
+    scale = min(1.0, tw / sw)
+    return max(14, int(round(sw * scale))), max(14, int(round(sh * scale)))
+
+
 @dataclass(slots=True)
 class TrackedHand:
     """One tracked hand in pixel coordinates of the processed RGB frame."""
@@ -67,7 +103,7 @@ def transform_hand_uv(
 class _Backend(Protocol):
     name: str
 
-    def process(self, rgb: np.ndarray) -> list[TrackedHand]: ...
+    def process(self, rgb: np.ndarray, timestamp: float | None = None) -> list[TrackedHand]: ...
 
     def close(self) -> None: ...
 
@@ -75,13 +111,16 @@ class _Backend(Protocol):
 def _palm_width(points: np.ndarray | None) -> float | None:
     if points is None or len(points) < 18:
         return None
-    return float(np.linalg.norm(points[5] - points[17]))
+    points = np.asarray(points, dtype=np.float64)
+    if not np.isfinite(points[[5, 17], :2]).all():
+        return None
+    return float(np.linalg.norm(points[5, :2] - points[17, :2]))
 
 
 class _NullBackend:
     name = "unavailable"
 
-    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
+    def process(self, rgb: np.ndarray, timestamp: float | None = None) -> list[TrackedHand]:
         return []
 
     def close(self) -> None:
@@ -113,16 +152,18 @@ class _ColleagueBackend:
         self._upstream = upstream
         self.name = f"colleague-{self._tracker.backend_name}"
 
-    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
+    def process(self, rgb: np.ndarray, timestamp: float | None = None) -> list[TrackedHand]:
         result = self._tracker.process(rgb)
         if not result.found or result.palm_uv is None:
             return []
+        points = None if result.landmarks_uv is None else np.asarray(result.landmarks_uv, dtype=np.float64)
+        center = palm_center(points) or (float(result.palm_uv[0]), float(result.palm_uv[1]))
         return [TrackedHand(
             hand_id=0,
-            palm_uv=(float(result.palm_uv[0]), float(result.palm_uv[1])),
-            landmarks_uv=None if result.landmarks_uv is None else np.asarray(result.landmarks_uv, dtype=np.float64),
+            palm_uv=center,
+            landmarks_uv=points,
             confidence=float(result.confidence),
-            palm_width_px=result.palm_px,
+            palm_width_px=_palm_width(points) if points is not None else result.palm_px,
         )]
 
     def close(self) -> None:
@@ -145,17 +186,23 @@ class _TasksBackend:
         options = mp_vision.HandLandmarkerOptions(
             base_options=base,
             num_hands=max(1, int(max_hands)),
+            running_mode=mp_vision.RunningMode.VIDEO,
             min_hand_detection_confidence=0.5,
             min_hand_presence_confidence=0.5,
             min_tracking_confidence=0.5,
         )
         self._mp = mp
         self._landmarker = mp_vision.HandLandmarker.create_from_options(options)
+        self._last_timestamp_ms = -1
 
-    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
+    def process(self, rgb: np.ndarray, timestamp: float | None = None) -> list[TrackedHand]:
         h, w = rgb.shape[:2]
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
-        result = self._landmarker.detect(image)
+        if timestamp is None:
+            timestamp = time.monotonic()
+        timestamp_ms = max(self._last_timestamp_ms + 1, int(round(float(timestamp) * 1000.0)))
+        self._last_timestamp_ms = timestamp_ms
+        result = self._landmarker.detect_for_video(image, timestamp_ms)
         observations: list[TrackedHand] = []
         for index, hand in enumerate(result.hand_landmarks):
             points = np.asarray([[p.x * w, p.y * h] for p in hand], dtype=np.float64)
@@ -167,13 +214,15 @@ class _TasksBackend:
                 confidence = float(category.score)
             except Exception:
                 pass
-            palm = points[9]
+            palm = palm_center(points)
+            if palm is None:
+                continue
             if confidence < 0.45:
                 continue
             observations.append(TrackedHand(
                 hand_id=index,
                 landmarks_uv=points,
-                palm_uv=(float(palm[0]), float(palm[1])),
+                palm_uv=palm,
                 confidence=confidence,
                 handedness=handedness,
                 palm_width_px=_palm_width(points),
@@ -188,6 +237,9 @@ class _TasksBackend:
                 pass
             self._landmarker = None
 
+    def reset(self) -> None:
+        self._last_timestamp_ms = -1
+
 
 class _LegacyBackend:
     name = "mediapipe-legacy"
@@ -201,13 +253,15 @@ class _LegacyBackend:
             min_tracking_confidence=0.3,
         )
 
-    def process(self, rgb: np.ndarray) -> list[TrackedHand]:
+    def process(self, rgb: np.ndarray, timestamp: float | None = None) -> list[TrackedHand]:
         h, w = rgb.shape[:2]
         result = self._hands.process(rgb)
         output: list[TrackedHand] = []
         for index, hand in enumerate(result.multi_hand_landmarks or []):
             pts = np.array([[p.x * w, p.y * h] for p in hand.landmark], dtype=np.float64)
-            palm = pts[9]
+            palm = palm_center(pts)
+            if palm is None:
+                continue
             conf = 1.0
             handedness = None
             if result.multi_handedness and index < len(result.multi_handedness):
@@ -220,7 +274,7 @@ class _LegacyBackend:
             output.append(TrackedHand(
                 hand_id=index,
                 landmarks_uv=pts,
-                palm_uv=(float(palm[0]), float(palm[1])),
+                palm_uv=palm,
                 confidence=conf,
                 handedness=handedness,
                 palm_width_px=_palm_width(pts),
@@ -295,9 +349,9 @@ class HandControlEngine:
         model_path: str | None = None,
         max_hands: int = 2,
         backend: str = "auto",
-        detect_every_n: int = 2,
+        detect_every_n: int = 1,
         max_coast_frames: int = 6,
-        input_size: tuple[int, int] = (320, 240),
+        input_size: tuple[int, int] | None = None,
         filter_mode: str = "oneeuro",
     ) -> None:
         self.max_hands = max(1, int(max_hands))
@@ -312,6 +366,7 @@ class HandControlEngine:
         self._previous_gray: np.ndarray | None = None
         self._coast = 0
         self._last_timestamp: float | None = None
+        self._update_index = 0
         self.last_detection_ran = False
         self.lk_updates = 0
         self.lk_motion_px = 0.0
@@ -359,6 +414,77 @@ class HandControlEngine:
 
         return assigned
 
+    def _coast_with_lk(
+        self, small: np.ndarray, width: int, height: int,
+        scale_x: float, scale_y: float, timestamp: float,
+    ) -> list[TrackedHand]:
+        """Coast only a genuine detector dropout and update palm scale too."""
+        import cv2
+        if not self._last or self._previous_gray is None or self._coast >= self.max_coast_frames:
+            return []
+        gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
+        coasted: list[TrackedHand] = []
+        for prior in self._last:
+            if prior.landmarks_uv is not None and len(prior.landmarks_uv) >= 18:
+                points = np.asarray(prior.landmarks_uv, dtype=np.float32)
+                tracker_points = points / np.asarray([scale_x, scale_y], dtype=np.float32)
+                nxt, status, _ = cv2.calcOpticalFlowPyrLK(
+                    self._previous_gray, gray, tracker_points, None,
+                    winSize=(31, 31), maxLevel=3,
+                )
+                if nxt is None or status is None:
+                    continue
+                valid = np.asarray(status).reshape(-1).astype(bool)
+                required = np.asarray(PALM_MCP_INDICES)
+                if len(valid) <= int(required.max()) or not bool(valid[required].all()):
+                    continue
+                mapped = np.asarray(nxt).reshape(-1, 2) * np.asarray([scale_x, scale_y])
+                if not np.isfinite(mapped).all():
+                    continue
+                center = palm_center(mapped)
+                width_px = _palm_width(mapped)
+                if center is None or width_px is None:
+                    continue
+                u, v = center
+                if not (0 <= u < width and 0 <= v < height):
+                    continue
+                delta = float(np.linalg.norm(np.subtract(center, prior.palm_uv)))
+                self.lk_updates += 1
+                self.lk_motion_px += delta
+                coasted.append(TrackedHand(
+                    hand_id=prior.hand_id, landmarks_uv=mapped.astype(np.float64),
+                    palm_uv=center, confidence=prior.confidence * 0.85,
+                    depth_z=prior.depth_z, timestamp=timestamp,
+                    velocity_px_s=prior.velocity_px_s, handedness=prior.handedness,
+                    palm_width_px=width_px, stale=True,
+                    depth_confidence=prior.depth_confidence,
+                ))
+            else:
+                point = np.asarray([[prior.palm_uv[0] / scale_x, prior.palm_uv[1] / scale_y]], dtype=np.float32)
+                nxt, status, _ = cv2.calcOpticalFlowPyrLK(
+                    self._previous_gray, gray, point, None,
+                    winSize=(31, 31), maxLevel=3,
+                )
+                if nxt is None or status is None or not bool(status[0, 0]):
+                    continue
+                tracked = np.asarray(nxt).reshape(-1, 2)[0]
+                center = (float(tracked[0] * scale_x), float(tracked[1] * scale_y))
+                if not (0 <= center[0] < width and 0 <= center[1] < height):
+                    continue
+                delta = float(np.linalg.norm(np.subtract(center, prior.palm_uv)))
+                self.lk_updates += 1
+                self.lk_motion_px += delta
+                coasted.append(TrackedHand(
+                    hand_id=prior.hand_id, landmarks_uv=None, palm_uv=center,
+                    confidence=prior.confidence * 0.85, depth_z=prior.depth_z,
+                    timestamp=timestamp, velocity_px_s=prior.velocity_px_s,
+                    handedness=prior.handedness, palm_width_px=prior.palm_width_px,
+                    stale=True, depth_confidence=prior.depth_confidence,
+                ))
+        if coasted:
+            self._coast += 1
+        return coasted
+
     def update(
         self,
         rgb: np.ndarray,
@@ -372,51 +498,37 @@ class HandControlEngine:
         started = time.perf_counter()
         source = np.asarray(rgb, dtype=np.uint8)[..., :3]
         height, width = source.shape[:2]
-        iw, ih = self.input_size
+        iw, ih = choose_tracker_size((width, height), self.input_size or (640, 360))
         scale_x, scale_y = width / iw, height / ih
         small = cv2.resize(source, (iw, ih), interpolation=cv2.INTER_AREA)
 
-        should_detect = self._last_timestamp is None or (
-            isinstance(frame_id, int) and frame_id % self.detect_every_n == 0
+        should_detect = (
+            self._last_timestamp is None
+            or self.detect_every_n == 1
+            or self._update_index % self.detect_every_n == 0
         )
+        self._update_index += 1
         self.last_detection_ran = bool(should_detect)
         observations: list[TrackedHand] = []
 
         if should_detect:
-            raw_observations = self.backend.process(small)
+            try:
+                raw_observations = self.backend.process(small, timestamp)
+            except TypeError:
+                # Preserve compatibility with simple test/colleague adapters.
+                raw_observations = self.backend.process(small)
             for obs in raw_observations:
-                obs.palm_uv = (obs.palm_uv[0] * scale_x, obs.palm_uv[1] * scale_y)
                 if obs.landmarks_uv is not None:
                     obs.landmarks_uv = obs.landmarks_uv * np.array([scale_x, scale_y])
-                if obs.palm_width_px is not None:
-                    obs.palm_width_px *= (scale_x + scale_y) * 0.5
+                    center = palm_center(obs.landmarks_uv)
+                    if center is not None:
+                        obs.palm_uv = center
+                    obs.palm_width_px = _palm_width(obs.landmarks_uv)
+                else:
+                    obs.palm_uv = (obs.palm_uv[0] * scale_x, obs.palm_uv[1] * scale_y)
             observations = self._assign_stable_ids([obs for obs in raw_observations if obs.confidence >= 0.45])
-        else:
-            # Detector-skip frames still update coordinates using LK optical
-            # flow. Reusing the previous UV was a false 30 Hz claim and made
-            # fast hands appear frozen between detector passes.
-            observations = []
-            if self._last and self._previous_gray is not None:
-                gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-                for prior in self._last:
-                    point = np.asarray([[prior.palm_uv[0] / scale_x, prior.palm_uv[1] / scale_y]], dtype=np.float32)
-                    nxt, status, _ = cv2.calcOpticalFlowPyrLK(self._previous_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
-                    if status is not None and bool(status[0, 0]):
-                        tracked = np.asarray(nxt).reshape(-1, 2)[0]
-                        u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
-                        if 0 <= u < width and 0 <= v < height:
-                            delta = float(np.hypot(u - prior.palm_uv[0], v - prior.palm_uv[1]))
-                            self.lk_updates += 1
-                            self.lk_motion_px += delta
-                            observations.append(TrackedHand(
-                                hand_id=prior.hand_id,
-                                landmarks_uv=None if prior.landmarks_uv is None else prior.landmarks_uv.copy(),
-                                palm_uv=(u, v), confidence=prior.confidence * 0.95,
-                                depth_z=prior.depth_z, timestamp=timestamp,
-                                velocity_px_s=prior.velocity_px_s, handedness=prior.handedness,
-                                palm_width_px=prior.palm_width_px, stale=True,
-                                depth_confidence=prior.depth_confidence,
-                            ))
+        if not observations and self._last and self._previous_gray is not None:
+            observations = self._coast_with_lk(small, width, height, scale_x, scale_y, timestamp)
 
         if observations:
             filtered: list[TrackedHand] = []
@@ -445,13 +557,22 @@ class HandControlEngine:
                         smooth_uv = (float(smooth_arr[0]), float(smooth_arr[1]))
                     except Exception:
                         smooth_uv = uv
+                    smooth_width = obs.palm_width_px
                     smooth_z = hand_z
                 else:
                     if hid not in self._filters:
                         self._filters[hid] = (_OneEuro(), _OneEuro(), _OneEuro())
-                    fx, fy, fz = self._filters[hid]
+                    fx, fy, fw = self._filters[hid]
                     smooth_uv = (fx(uv[0], timestamp), fy(uv[1], timestamp))
-                    smooth_z = fz(hand_z, timestamp) if hand_z is not None else None
+                    width_value = obs.palm_width_px
+                    previous_width = old.palm_width_px if old is not None else None
+                    if width_value is not None and previous_width is not None:
+                        ratio = width_value / max(previous_width, 1e-6)
+                        if ratio < 0.35 or ratio > 1.65:
+                            width_value = None
+                            obs.confidence *= 0.7
+                    smooth_width = fw(width_value, timestamp) if width_value is not None else None
+                    smooth_z = hand_z
 
                 velocity = 0.0
                 if old is not None:
@@ -461,43 +582,20 @@ class HandControlEngine:
                     )
 
                 obs.palm_uv = smooth_uv
+                obs.palm_width_px = smooth_width
                 obs.depth_z = smooth_z
                 obs.velocity_px_s = velocity
                 obs.timestamp = timestamp
-                obs.stale = not should_detect
+                obs.stale = bool(obs.stale or not should_detect or self._coast > 0)
                 filtered.append(obs)
 
             self._last = filtered
             self._coast = 0
-        elif self._last and self._coast < self.max_coast_frames and self._previous_gray is not None:
-            gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-            prior_gray = self._previous_gray
-            coasted: list[TrackedHand] = []
-            for obs in self._last:
-                point = np.asarray([[obs.palm_uv[0] / scale_x, obs.palm_uv[1] / scale_y]], dtype=np.float32)
-                nxt, status, _ = cv2.calcOpticalFlowPyrLK(prior_gray, gray, point, None, winSize=(31, 31), maxLevel=3)
-                if status is not None and bool(status[0, 0]):
-                    tracked = np.asarray(nxt).reshape(-1, 2)[0]
-                    u, v = float(tracked[0] * scale_x), float(tracked[1] * scale_y)
-                    if 0 <= u < width and 0 <= v < height:
-                        delta = float(np.hypot(u - obs.palm_uv[0], v - obs.palm_uv[1]))
-                        self.lk_updates += 1
-                        self.lk_motion_px += delta
-                        coasted.append(TrackedHand(
-                            hand_id=obs.hand_id,
-                            landmarks_uv=None if obs.landmarks_uv is None else obs.landmarks_uv.copy(),
-                            palm_uv=(u, v), confidence=obs.confidence * 0.85,
-                            depth_z=obs.depth_z, timestamp=timestamp,
-                            velocity_px_s=obs.velocity_px_s, handedness=obs.handedness,
-                            palm_width_px=obs.palm_width_px, stale=True,
-                            depth_confidence=obs.depth_confidence,
-                        ))
-            observations = coasted
-            self._last = coasted
-            self._coast += 1
         else:
             self._last = []
             self._coast = 0
+            self._filters.clear()
+            self._ema_filters.clear()
 
         self._previous_gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
         self._last_timestamp = timestamp
@@ -518,9 +616,13 @@ class HandControlEngine:
         self._previous_gray = None
         self._coast = 0
         self._last_timestamp = None
+        self._update_index = 0
         self.last_detection_ran = False
         self.lk_updates = 0
         self.lk_motion_px = 0.0
+        reset_backend = getattr(self.backend, "reset", None)
+        if callable(reset_backend):
+            reset_backend()
 
     def close(self) -> None:
         self.backend.close()
