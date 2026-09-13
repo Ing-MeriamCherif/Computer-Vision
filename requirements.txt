@@ -11,3 +11,6 @@ torch>=1.8
 transformers>=4.40
 # Phase 2: D2NT depth->normals (normal_translator.py, tools/bench_normals.py)
 d2nt>=0.1.0
+# Phase 4 renderer (renderer/ ModernGL) + full_pipeline.py
+moderngl>=5.0
+glfw>=2.0

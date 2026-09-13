@@ -144,9 +144,11 @@ class TorchPipeline:
             if cap is not None:
                 cap.release()
 
-    def step(self, cap=None) -> LightPacket:
+    def step(self, cap=None, frame_bgr=None) -> LightPacket:
         W, H, intr = self.W, self.H, self.intr
-        if self.no_camera or cap is None:
+        if frame_bgr is not None:
+            frame = frame_bgr
+        elif self.no_camera or cap is None:
             frame = np.random.randint(0, 255, (H, W, 3), dtype=np.uint8)
             frame = cv2.GaussianBlur(frame, (21, 21), 0)
         else:
