@@ -18,8 +18,8 @@ python main.py
 # Specify camera device, quality, fullscreen
 python main.py --camera 0 --quality high --fullscreen
 
-# Use colleague depth model
-python main.py --depth-backend colleague
+# P123 live diagnostics (Mariem depth + Talel hand XYZ)
+PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 
 # All options
 python main.py --help
@@ -81,15 +81,13 @@ PYTHONPATH=. .venv/bin/python -m tools.p123_live_app --camera /dev/video0
 ```
 
 Use keys `1`–`6` for RGB, depth, normals, temporal confidence, hands, and XYZ
-contract diagnostics; press `q` to exit. The default is native camera-sized
-depth input with FP32 inference (faster on the local GTX 1650 Ti); add
-`--fp16` only after benchmarking it on another GPU. Use
-`--depth-backend mariem --depth-size 420` to run the latest Depth-Anything V2
-module pulled from Mariem's `main` branch; `--depth-backend colleague` selects
-the older preserved adapter. On this GTX 1650 Ti, Mariem's module gives a
-visually cleaner relative-depth field but measures about 9.8 Hz FP32, while the
-local backend remains the live sweet spot at about 17–19 Hz. Use
-`--headless --duration 10` for a bounded physical-camera smoke measurement.
+contract diagnostics; press `q` to exit. The P123 live path now uses Mariem's
+vendored CUDA Depth Anything module exclusively, with Talel's hand tracker and
+palm-size XYZ convention. FP32 is the default because it is faster than FP16
+on the GTX 1650 Ti. The default Mariem input is 336px (use `--depth-size 420`
+for higher spatial quality); use `--headless --duration 10` for a bounded
+physical-camera smoke measurement. The older local/colleague depth providers
+remain only for legacy non-P123 tools and are not selectable by this live app.
 Native normals use the CUDA geometry stream
 independently of the slower temporal CPU diagnostics; mode 4 uses a lightweight
 native temporal-consistency map at the same live cadence.

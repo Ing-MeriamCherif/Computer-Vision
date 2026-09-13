@@ -171,6 +171,29 @@ def test_depth_size_parser_accepts_rectangular_inputs():
     assert _parse_depth_size("native", (480, 640)) == (480, 640)
 
 
+def test_p123_live_cli_exposes_mariem_only(monkeypatch):
+    from tools import p123_live_app
+
+    monkeypatch.setattr("sys.argv", ["p123_live_app"])
+    args = p123_live_app.parse_args()
+    assert args.depth_backend == "mariem"
+    assert args.depth_size == "336"
+
+
+def test_cuda_normals_include_radius_four_and_unit_vectors():
+    import pytest
+    pytest.importorskip("torch")
+    from geometry import CameraModel
+    from geometry.cuda_backend import TorchGeometryBackend
+
+    camera = CameraModel(24, 16, 20, 20, 12, 8)
+    backend = TorchGeometryBackend("cpu")
+    geometry = backend.process_depth(np.ones((16, 24), np.float32), camera)
+    assert 4 in np.unique(geometry.selected_radius)
+    vectors = geometry.normals[geometry.normal_valid_mask]
+    assert np.allclose(np.linalg.norm(vectors, axis=1), 1.0, atol=1e-4)
+
+
 def test_talel_xyz_depth_proxy_stays_in_metric_working_volume():
     from geometry import CameraModel
     from geometry.p123_live_runtime import _talel_depth_from_palm_size, _talel_hand_xyz

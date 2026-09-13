@@ -18,7 +18,6 @@ from .async_pipeline import LatestDepthBuffer, LatestFrameBuffer
 from .backproject import DepthScaleMode
 from .camera import CameraModel
 from .camera_worker import CameraCaptureWorker
-from .depth_provider import DepthAnythingProvider
 from .depth_sampling import sample_depth
 from .hand_control import GestureState, HandControlEngine
 from .motion import OpenCVFlowProvider
@@ -159,8 +158,8 @@ class P123LiveRuntime:
         fps: int = 30,
         depth_provider: Any | None = None,
         depth_model: str = "models/depth-anything-v2-small",
-        depth_size: int | tuple[int, int] | None = None,
-        depth_backend: str = "local",
+        depth_size: int | tuple[int, int] | None = 336,
+        depth_backend: str = "mariem",
         use_fp16: bool = False,
         hand_backend: str = "auto",
         calibration: CameraModel | None = None,
@@ -172,24 +171,17 @@ class P123LiveRuntime:
         self.camera = calibration or CameraModel(width, height, width * 0.82, width * 0.82, width / 2.0, height / 2.0)
         if depth_provider is not None:
             self.depth_provider = depth_provider
-        elif depth_backend in {"colleague", "mariem"}:
-            from .colleague_depth import ColleagueDepthProvider, MariemDepthProvider
+        elif depth_backend == "mariem":
+            from .colleague_depth import MariemDepthProvider
             if depth_size is None:
                 colleague_size = max(height, width)
             elif isinstance(depth_size, tuple):
                 colleague_size = max(int(v) for v in depth_size)
             else:
                 colleague_size = int(depth_size)
-            provider_cls = MariemDepthProvider if depth_backend == "mariem" else ColleagueDepthProvider
-            self.depth_provider = provider_cls(device="auto", input_size=colleague_size, fp16=use_fp16)
-        elif depth_backend == "local":
-            # Native camera dimensions preserve fine spatial detail; the
-            # latest-only worker keeps capture/UI cadence independent of the
-            # heavier inference cost.
-            native_size = (height, width) if depth_size is None else depth_size
-            self.depth_provider = DepthAnythingProvider(depth_model, device="auto", use_fp16=use_fp16, input_size=native_size)
+            self.depth_provider = MariemDepthProvider(device="auto", input_size=colleague_size, fp16=use_fp16)
         else:
-            raise ValueError(f"unknown depth backend: {depth_backend}")
+            raise ValueError("P123 live runtime uses Mariem's depth module only; pass depth_backend='mariem'")
         self.hand_engine = HandControlEngine(model_path="models/hand_landmarker.task", max_hands=2, backend=hand_backend, detect_every_n=2, max_coast_frames=8)
         self.temporal = TemporalGeometryEngine(
             self.camera,

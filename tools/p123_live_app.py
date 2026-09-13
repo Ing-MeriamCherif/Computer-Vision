@@ -166,15 +166,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=480)
     parser.add_argument("--fps", type=int, default=30)
-    parser.add_argument("--depth-model", default="models/depth-anything-v2-small")
-    parser.add_argument("--depth-backend", choices=["local", "colleague", "mariem"], default="local")
+    parser.add_argument("--depth-backend", choices=["mariem"], default="mariem", help="Use Mariem's CUDA depth module (the sole P123 depth backend)")
     parser.add_argument(
         "--fp16", action="store_true",
         help="Use FP16 depth inference (benchmark first; FP32 is faster on some GPUs such as GTX 1650 Ti)",
     )
     parser.add_argument(
-        "--depth-size", default="native",
-        help="Model input size in pixels, or 'native' for the camera's HxW (default: native)",
+        "--depth-size", default="336",
+        help="Mariem model input side in pixels (default: 336; use 420 for higher quality)",
     )
     parser.add_argument("--full-temporal", action="store_true", help="Enable the slower CPU temporal reference worker")
     parser.add_argument("--fourcc", choices=["auto", "MJPG", "YUYV"], default="auto")
@@ -191,7 +190,7 @@ def main() -> int:
         depth_size = _parse_depth_size(args.depth_size, (args.height, args.width))
         runtime = P123LiveRuntime(
             camera_device=camera, width=args.width, height=args.height, fps=args.fps,
-            depth_model=args.depth_model, depth_size=depth_size, depth_backend=args.depth_backend,
+            depth_size=depth_size, depth_backend=args.depth_backend,
             use_fp16=args.fp16, hand_backend=args.hand_backend,
             full_temporal=args.full_temporal,
         )

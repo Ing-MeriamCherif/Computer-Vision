@@ -36,10 +36,12 @@ showed zero hands when no hand was present.
 ### Mariem `main` depth module integration
 
 The complete `depth_module/` package from Mariem's `upstream/main` commit
-`a7ed804` is vendored unchanged and exposed as `--depth-backend mariem`. A
-physical A/B run showed cleaner foreground/background separation than the local
-provider, but approximately 9.8 Hz FP32 and 3 Hz FP16 on this GTX 1650 Ti;
-therefore the local provider remains the default for responsive live video.
+`a7ed804` is vendored unchanged and is now the **sole P123 live depth
+provider**. The old local and colleague adapters are not selectable by
+`tools.p123_live_app`; they remain only for legacy non-P123 tools. On this GTX
+1650 Ti, Mariem FP32 is materially faster and cleaner than its FP16 path
+(approximately 9–10 Hz at the default 336px input versus approximately 3 Hz
+FP16). Talel's hand tracker and palm-size XYZ math remain the P123 hand path.
 
 ### Talel XYZ correction
 
@@ -64,13 +66,12 @@ rates plus XYZ fresh/degraded age. CUDA normals use edge-aware radii 1/2 and
 unit-vector normalization without per-frame synchronization or peak-memory
 resets.
 
-Remaining measured limitations: the Hugging Face DPT processor remains on the
-depth hot path because its PIL bicubic output was not numerically equivalent to
-OpenCV interpolation (the equivalence check is documented in the engineering
-notes); depth is still copied to a CPU `DepthState` for compatibility before
-CUDA geometry. TensorRT/ONNX conversion and architectural replacement were not
-introduced. Physical XYZ hand coordinates require a hand in view and were not
-claimed from a no-hand webcam soak.
+Remaining measured limitations: Mariem's preserved Hugging Face pipeline remains
+the depth hot path and publishes a CPU-compatible `DepthState`; CUDA normals
+consume that latest state without a queue or backlog. TensorRT/ONNX conversion
+and architectural replacement were not introduced. Physical XYZ hand
+coordinates require a hand in view and were not claimed from a no-hand webcam
+soak.
 
 ============================================================
 
@@ -153,7 +154,7 @@ Result: NOT READY
 MODE 2 — DEPTH
 ============================================================
 
-Provider: `DepthAnythingProvider`
+Provider: Mariem's vendored Depth Anything V2 module (`MariemDepthProvider`)
 
 Input resolution: 192x192 gate input
 
